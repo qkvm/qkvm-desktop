@@ -72,7 +72,7 @@ Column {
     }
     Text {
         width: parent.width
-        text: qsTr("Range: %1–%2 %3 · averages over the last day").arg(Number(graph.values.low).toFixed(1)).arg(Number(graph.values.high).toFixed(1)).arg(graph.values.unit)
+        text: qsTr("Range: %1 to %2 %3, averages over the last day").arg(Number(graph.values.low).toFixed(1)).arg(Number(graph.values.high).toFixed(1)).arg(graph.values.unit)
         textFormat: Text.PlainText
         color: Theme.muted
         font.pixelSize: Theme.smallSize

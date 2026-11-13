@@ -47,7 +47,6 @@ using core::testing::JetKvmByHand;
 using core::testing::MadeUpKvm;
 using core::testing::MemorySecrets;
 using core::testing::RedfishByHand;
-using core::testing::sign;
 using core::testing::StandIn;
 
 namespace {
@@ -523,7 +522,7 @@ private slots:
         // The KVM's own name for itself is a maker's word for every one of its kind: it is called
         // by where it is. And what it says it is, and that it is spoken to in the clear.
         const QString host = u"127.0.0.1:%1"_s.arg(kvm.stand->serverPort());
-        QCOMPARE(box.added(), host + u" added "_s + sign(0x2014) + u" RM10 "_s + sign(0x00B7) + u" over plain HTTP"_s);
+        QCOMPARE(box.added(), host + u" added (RM10, over plain HTTP)"_s);
         // The plain way shows no certificate: it is known by none.
         QCOMPARE(box.certificate(), QString());
         QCOMPARE(box.count(), 1);
@@ -1879,7 +1878,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!box.busy(), 20000);
         QCOMPARE(box.problem(), QString());
         const QString host = u"127.0.0.1:%1"_s.arg(secure.stand->serverPort());
-        QCOMPARE(box.added(), host + u" added "_s + sign(0x2014) + u" JetKVM"_s);
+        QCOMPARE(box.added(), host + u" added (JetKVM)"_s);
         QCOMPARE(box.certificate(), core::kvm::fingerprint(sha256Of("first")));
         QCOMPARE(held.own.wall().kvms().constFirst().address, secure.address().toString());
         QCOMPARE(plain.signIns, 0);
@@ -2526,7 +2525,7 @@ private slots:
         disconnect(atTheWallsWord);
         // What the box would have said, and the certificate it would have shown with it.
         const QString host = u"127.0.0.1:%1"_s.arg(kvm.stand->serverPort());
-        QCOMPARE(asItClosed.at(0).at(0).toString(), host + u" added "_s + sign(0x2014) + u" RM10"_s);
+        QCOMPARE(asItClosed.at(0).at(0).toString(), host + u" added (RM10)"_s);
         QCOMPARE(asItClosed.at(0).at(1).toString(), core::ServerClient::written(sha256Of("comet")));
         QCOMPARE(own.wall().kvms().size(), 1);
         // The box itself says nothing of it: it is closed, and begins anew when it is opened.
@@ -3205,11 +3204,10 @@ private slots:
         const QString called = u"\"Build server\""_s;
         QCOMPARE(ui::OwnWall::saidOf(added, called), u"\"Build server\" added"_s);
         added.model = u"RM10"_s;
-        QCOMPARE(ui::OwnWall::saidOf(added, called), u"\"Build server\" added "_s + sign(0x2014) + u" RM10"_s);
+        QCOMPARE(ui::OwnWall::saidOf(added, called), u"\"Build server\" added (RM10)"_s);
         added.model.clear();
         added.overPlainHttp = true;
-        QCOMPARE(ui::OwnWall::saidOf(added, called),
-                 u"\"Build server\" added "_s + sign(0x2014) + u" over plain HTTP"_s);
+        QCOMPARE(ui::OwnWall::saidOf(added, called), u"\"Build server\" added (over plain HTTP)"_s);
     }
 
     // --- what a KVM is called in a sentence of the screens ---------------------------------------

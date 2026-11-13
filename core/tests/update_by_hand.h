@@ -105,6 +105,12 @@ struct UpdateAnswer {
     QNetworkReply::NetworkError error = QNetworkReply::NoError;
     bool hold = false;
     qint64 declaredBytes = -1;
+    // Where it sends the asker instead, as a server's redirect does (with the status, say 302); none: no redirect.
+    QUrl redirect{};
+    // Answered this long after the question (all of it at once then), as a slow server answers.
+    int afterMs = 0;
+    // What it has is said, and it never ends: a server that keeps sending.
+    bool endless = false;
 };
 
 class UpdateReply : public QNetworkReply {
@@ -116,17 +122,21 @@ public:
         setUrl(request.url());
         setOperation(QNetworkAccessManager::GetOperation);
         setAttribute(QNetworkRequest::HttpStatusCodeAttribute, m_answer.status);
+        if (!m_answer.redirect.isEmpty()) {
+            setAttribute(QNetworkRequest::RedirectionTargetAttribute, m_answer.redirect);
+            setRawHeader("Location", m_answer.redirect.toEncoded());
+        }
         if (m_answer.declaredBytes >= 0) {
             setHeader(QNetworkRequest::ContentLengthHeader, m_answer.declaredBytes);
         }
         open(QIODevice::ReadOnly);
         if (!m_answer.hold) {
-            QTimer::singleShot(0, this, [this] {
+            QTimer::singleShot(m_answer.afterMs, this, [this] {
                 if (m_answer.error != NoError) {
                     setError(m_answer.error, QStringLiteral("Test failure"));
                 }
                 emit readyRead();
-                if (!isFinished()) {
+                if (!isFinished() && !m_answer.endless) {
                     setFinished(true);
                     emit finished();
                 }
@@ -156,6 +166,8 @@ private:
 class UpdateNetwork : public QNetworkAccessManager {
 public:
     UpdateAnswer next;
+    // Answers given first, one to each request in turn, before `next` answers all the rest.
+    QList<UpdateAnswer> first;
     QList<QNetworkRequest> requests;
 
 protected:
@@ -164,7 +176,8 @@ protected:
         Q_UNUSED(operation)
         Q_UNUSED(outgoing)
         requests.append(request);
-        return std::make_unique<UpdateReply>(request, next, this).release(); // The network manager owns it.
+        const UpdateAnswer answer = first.isEmpty() ? next : first.takeFirst();
+        return std::make_unique<UpdateReply>(request, answer, this).release(); // The network manager owns it.
     }
 };
 

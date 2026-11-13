@@ -48,7 +48,7 @@ CTest enforces an overall 180-second deadline. The fixture generator refuses to 
 & "$trialBuild\qkvm_webrtc_cpp_trial.exe" $trialFixture 5 30
 ```
 
-The optional numbers are cycle count (1–20) and access units per cycle (1–120). The generated clip contains 60 frames. Use CTest or another process timeout for manual runs too. A failure exits nonzero; successful output includes the selected candidate pairs, matched access-unit/frame counts, closure results, and `result=PASS`. Keep the full build/runtime logs with the dependency manifest and comparison report. Source presence alone is not a passing trial result.
+The optional numbers are cycle count (1 to 20) and access units per cycle (1 to 120). The generated clip contains 60 frames. Use CTest or another process timeout for manual runs too. A failure exits nonzero; successful output includes the selected candidate pairs, matched access-unit/frame counts, closure results, and `result=PASS`. Keep the full build/runtime logs with the dependency manifest and comparison report. Source presence alone is not a passing trial result.
 
 ## API references consulted
 

@@ -65,7 +65,9 @@ reproduce it helps most.
 - While somebody searches for devices: the addresses of the private or link-local network
   chosen for the search (at most a /20), on the ports KVMs answer on. Only when asked.
 - `download.qkvm.com`, to ask whether a newer release exists, and to fetch one when you ask
-  for it (*Settings, Updates, Check automatically* switches the daily check off).
+  for it (*Settings, Updates, Check automatically* switches the daily check off). Where the
+  signed feed names a file of a GitHub release, the file comes from `github.com` and the one
+  address GitHub sends the program on to, on GitHub's own file host.
 
 Nothing else: no telemetry, no licence check, nothing that reports use. It takes no incoming
 network connection.
@@ -75,12 +77,14 @@ network connection.
 - Each release lists the SHA-256 of its files in `SHA256SUMS`, on its GitHub release page.
   Check the setup before you run it, or the ZIP before you unpack it:
 
-      Get-FileHash .\qKVM-Desktop-0.1.0-windows-x64-setup.exe -Algorithm SHA256
-      Get-FileHash .\qKVM-Desktop-0.1.0-windows-x64.zip -Algorithm SHA256
+      Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64-setup.exe -Algorithm SHA256
+      Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64.zip -Algorithm SHA256
 
   A different value means: do not run it.
 - The program checks for updates against a feed signed with a key that is built into it, and
-  checks a downloaded update against that signature, its SHA-256 and its size. A copy the
+  checks a downloaded update against that signature, its SHA-256 and its size, wherever it
+  came from. It follows no redirect but the one a GitHub release's download answers with,
+  to GitHub's own file host. A copy the
   setup installed takes only a setup from its own feed, and runs that verified setup with its
   own rights when you choose Install and restart; the setup never asks for an administrator's.
   A copy from the ZIP shows you the verified file; it runs nothing it downloaded.

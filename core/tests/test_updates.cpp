@@ -805,6 +805,201 @@ private slots:
         QCOMPARE(request.rawHeader("User-Agent"), QByteArray("qKVM-Desktop-Updater"));
     }
 
+    // 0.1.1 (the owner): release files live on GitHub, whose download address answers with a redirect to its file
+    // host. A package follows that one redirect and no other; the feed follows none; and what comes is checked by its
+    // size and SHA-256 as ever. (0.1.0 followed none: "could not be reached securely".)
+    void aPackageFollowsOneRedirectOnlyFromAGitHubReleaseToGitHubsFileHost_data()
+    {
+        QTest::addColumn<QString>("package");
+        QTest::addColumn<QString>("target");
+        QTest::addColumn<bool>("taken");
+        const QString release = u"https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s;
+        const QString assets =
+            u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sp=r&sv=2018-11-09&sig=a"_s;
+        QTest::newRow("a GitHub release, to its file host") << release << assets << true;
+        QTest::newRow("to GitHub's older file host")
+            << release << u"https://objects.githubusercontent.com/github-production-release-asset-2e65be/1/2?sig=a"_s
+            << true;
+        QTest::newRow("to a host that only begins as GitHub's file host")
+            << release << u"https://release-assets.githubusercontent.com.example.test/1"_s << false;
+        QTest::newRow("to another host") << release << u"https://updates.example.test/qkvm-0.2.0.zip"_s << false;
+        QTest::newRow("to GitHub itself") << release << release << false;
+        QTest::newRow("to the file host without encryption")
+            << release << u"http://release-assets.githubusercontent.com/1"_s << false;
+        QTest::newRow("to the file host at another port")
+            << release << u"https://release-assets.githubusercontent.com:8443/1"_s << false;
+        QTest::newRow("to the file host with a name in the address")
+            << release << u"https://someone@release-assets.githubusercontent.com/1"_s << false;
+        QTest::newRow("from GitHub, but no release download")
+            << u"https://github.com/qkvm/qkvm-desktop/archive/v0.2.0.zip"_s << assets << false;
+        // (Its shape is a release download's, its tag "..": it comes to /qkvm/qkvm-desktop/releases/qkvm-0.2.0.zip.)
+        QTest::newRow("from GitHub, a release path that climbs")
+            << u"https://github.com/qkvm/qkvm-desktop/releases/download/../qkvm-0.2.0.zip"_s << assets << false;
+        QTest::newRow("from another host of GitHub's")
+            << u"https://api.github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s << assets << false;
+        QTest::newRow("from a host that only begins as GitHub")
+            << u"https://github.com.example.test/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s << assets
+            << false;
+        QTest::newRow("from the direct host") << u"https://updates.example.test/qkvm-0.2.0.zip"_s << assets << false;
+    }
+    void aPackageFollowsOneRedirectOnlyFromAGitHubReleaseToGitHubsFileHost()
+    {
+        QFETCH(QString, package);
+        QFETCH(QString, target);
+        QFETCH(bool, taken);
+        Desk desk;
+        auto release = releaseFor(desk.package);
+        release[u"package"_s] = package;
+        desk.check(release);
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Available);
+        // The redirect says something of its own, as GitHub's does: none of it is the package.
+        desk.network.first = {UpdateAnswer{QByteArray("<html>You are being redirected.</html>"), 302,
+                                           QNetworkReply::NoError, false, -1, QUrl(target)},
+                              UpdateAnswer{desk.package}};
+        desk.updates.download();
+        if (taken) {
+            QTRY_COMPARE(desk.updates.state(), Updates::State::Ready);
+            QCOMPARE(desk.network.requests.size(), 3);
+            const QNetworkRequest followed = desk.network.requests.last();
+            QCOMPARE(followed.url(), QUrl(target));
+            // Asked as the first was: no cookies, credentials, cache or redirect of Qt's own.
+            QCOMPARE(followed.attribute(QNetworkRequest::RedirectPolicyAttribute).toInt(),
+                     QNetworkRequest::ManualRedirectPolicy);
+            QCOMPARE(followed.attribute(QNetworkRequest::CookieLoadControlAttribute).toInt(), QNetworkRequest::Manual);
+            QCOMPARE(followed.attribute(QNetworkRequest::AuthenticationReuseAttribute).toInt(),
+                     QNetworkRequest::Manual);
+            QVERIFY(!followed.hasRawHeader("Authorization"));
+            QCOMPARE(followed.rawHeader("User-Agent"), QByteArray("qKVM-Desktop-Updater"));
+        } else {
+            QTRY_COMPARE(desk.updates.state(), Updates::State::Error);
+            QCOMPARE(desk.network.requests.size(), 2);
+            QCOMPARE(desk.updates.problem(), u"The update service could not be reached securely. Try again later."_s);
+        }
+    }
+
+    // A redirect that is not to be followed ends the request at once, however long its own answer goes on. (0.1.1's
+    // first form read it to the end: a server that kept sending held the check for its whole time.)
+    void aRedirectThatIsNotFollowedEndsAtOnceThoughItsAnswerGoesOn()
+    {
+        Desk desk;
+        desk.network.next = {
+            QByteArray(4096, 'x'),
+            302,
+            QNetworkReply::NoError,
+            false,
+            -1,
+            QUrl(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2"_s),
+            0,
+            true};
+        desk.updates.check();
+        QTRY_COMPARE_WITH_TIMEOUT(desk.updates.state(), Updates::State::Error, 3000);
+        QCOMPARE(desk.updates.problem(), u"The update service could not be reached securely. Try again later."_s);
+    }
+
+    // What a followed redirect says of its own is let go, and only so much of it.
+    void aFollowedRedirectsOwnAnswerIsTakenOnlyUpToItsLimit()
+    {
+        Desk desk;
+        auto release = releaseFor(desk.package);
+        release[u"package"_s] = u"https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s;
+        desk.check(release);
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Available);
+        desk.network.first = {
+            UpdateAnswer{
+                QByteArray(70LL * 1024, 'x'), 302, QNetworkReply::NoError, false, -1,
+                QUrl(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=a"_s), 0,
+                true},
+            UpdateAnswer{desk.package}};
+        desk.updates.download();
+        QTRY_COMPARE_WITH_TIMEOUT(desk.updates.state(), Updates::State::Error, 3000);
+        QCOMPARE(desk.network.requests.size(), 2);
+    }
+
+    // The download's time is the whole download's, across the redirect: the hop does not begin it again.
+    void theDownloadsTimeRunsAcrossTheRedirect()
+    {
+        Desk desk;
+        desk.updates.setTimeLimits(30000, 600);
+        auto release = releaseFor(desk.package);
+        release[u"package"_s] = u"https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s;
+        desk.check(release);
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Available);
+        desk.network.first = {
+            UpdateAnswer{
+                {},
+                302,
+                QNetworkReply::NoError,
+                false,
+                -1,
+                QUrl(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=a"_s),
+                400},
+            UpdateAnswer{desk.package, 200, QNetworkReply::NoError, false, -1, {}, 400}};
+        desk.updates.download();
+        QTRY_COMPARE_WITH_TIMEOUT(desk.updates.state(), Updates::State::Error, 5000);
+        QCOMPARE(desk.updates.problem(), u"The update request timed out. Try again later."_s);
+        QCOMPARE(desk.network.requests.size(), 3);
+    }
+
+    void aPackageFollowsNoSecondRedirect()
+    {
+        Desk desk;
+        auto release = releaseFor(desk.package);
+        release[u"package"_s] = u"https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s;
+        desk.check(release);
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Available);
+        const QUrl assets(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=a"_s);
+        desk.network.first = {UpdateAnswer{{}, 302, QNetworkReply::NoError, false, -1, assets},
+                              UpdateAnswer{{}, 302, QNetworkReply::NoError, false, -1, assets},
+                              UpdateAnswer{desk.package}};
+        desk.updates.download();
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Error);
+        QCOMPARE(desk.network.requests.size(), 3);
+    }
+
+    void whatComesThroughTheRedirectIsCheckedByItsHashAllTheSame()
+    {
+        Desk desk;
+        auto release = releaseFor(desk.package);
+        release[u"package"_s] = u"https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qkvm-0.2.0.zip"_s;
+        desk.check(release);
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Available);
+        QByteArray other = desk.package;
+        other[0] = other[0] == 'x' ? 'y' : 'x';
+        desk.network.first = {
+            UpdateAnswer{
+                {},
+                302,
+                QNetworkReply::NoError,
+                false,
+                -1,
+                QUrl(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2?sig=a"_s)},
+            UpdateAnswer{other}};
+        desk.updates.download();
+        QTRY_COMPARE(desk.updates.state(), Updates::State::Error);
+        QCOMPARE(desk.updates.problem(), u"The downloaded update failed verification. Nothing was installed."_s);
+    }
+
+    // Not even where the feed itself is a GitHub release's file, whose redirect a package would follow.
+    void theFeedFollowsNoRedirectNotEvenToGitHubsFileHost()
+    {
+        Desk desk;
+        auto channel = desk.channel(u"0.1.0"_s);
+        channel.feed = QUrl(u"https://github.com/qkvm/qkvm-desktop/releases/download/feed/stable.json"_s);
+        Updates updates{channel, desk.settings, desk.network, desk.folder.filePath(u"feed-downloads"_s)};
+        desk.network.first = {
+            UpdateAnswer{{},
+                         302,
+                         QNetworkReply::NoError,
+                         false,
+                         -1,
+                         QUrl(u"https://release-assets.githubusercontent.com/github-production-release-asset/1/2"_s)},
+            UpdateAnswer{desk.signer.seal(releaseFor(desk.package))}};
+        updates.check();
+        QTRY_COMPARE(updates.state(), Updates::State::Error);
+        QCOMPARE(desk.network.requests.size(), 1);
+        QCOMPARE(updates.problem(), u"The update service could not be reached securely. Try again later."_s);
+    }
+
     void currentAndOlderReleasesNeverOfferADowngrade_data()
     {
         QTest::addColumn<QString>("version");

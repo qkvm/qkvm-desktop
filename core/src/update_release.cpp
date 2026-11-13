@@ -162,6 +162,21 @@ bool updateAddress(const QUrl& address)
            address.toEncoded().size() <= 2048;
 }
 
+bool updatePackageRedirect(const QUrl& from, const QUrl& to)
+{
+    static const QRegularExpression release(u"\\A/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/releases/download/[^/]+/[^/]+\\z"_s);
+    static const QStringList fileHosts{u"release-assets.githubusercontent.com"_s, u"objects.githubusercontent.com"_s};
+    const auto plain = [](const QUrl& address) {
+        return address.isValid() && address.scheme() == u"https"_s && address.userInfo().isEmpty() &&
+               (address.port() == -1 || address.port() == 443) && !address.hasFragment() &&
+               address.toEncoded().size() <= 4096;
+    };
+    // (A path that climbs, ".." or ".", is not the release's, whatever it would come to.)
+    return plain(from) && from.host() == u"github.com"_s && !from.hasQuery() &&
+           from.adjusted(QUrl::NormalizePathSegments) == from &&
+           release.match(from.path(QUrl::FullyEncoded)).hasMatch() && plain(to) && fileHosts.contains(to.host());
+}
+
 QVersionNumber updateVersion(const QString& text)
 {
     static const QRegularExpression shape(u"\\A(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})\\.(0|[1-9][0-9]{0,4})\\z"_s);

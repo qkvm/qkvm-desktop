@@ -1,5 +1,20 @@
 # Changes
 
+## 0.1.1 (beta)
+
+Fixes for the first beta, and updates whose files may come from the GitHub release.
+
+- The window's title says what the window shows, then the program's name, as Windows titles
+  go: "This PC - qKVM", "192.168.1.10:8787 - qKVM", "Rack B - This PC - qKVM", and "qKVM"
+  alone before anything is chosen. In 0.1.0 it began with "qKVM" and a long dash, and Windows
+  added a second "- qKVM" after it.
+- No long dash, short dash or curly quote in any text of the program, its notifications or its
+  documents; the project's checks refuse them.
+- Updates: a file of a release may come from its GitHub release page. The program follows the
+  one redirect GitHub's download address answers with, to GitHub's own file host, and checks
+  the file by the signed feed's SHA-256 and size as before. It follows no other redirect, and
+  the feed follows none.
+
 ## 0.1.0 (beta)
 
 The first public release of qKVM Desktop, a beta, for Windows 10 (22H2) and Windows 11, x64,

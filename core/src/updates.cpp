@@ -456,10 +456,11 @@ void Updates::check()
     emit changed();
 }
 
-void Updates::request(const QUrl& url, bool package)
+void Updates::request(const QUrl& url, bool package, int limitMs)
 {
     m_package = package;
     m_received = 0;
+    m_redirectAnswer = 0;
     QNetworkRequest request(url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     request.setAttribute(QNetworkRequest::CookieLoadControlAttribute, QNetworkRequest::Manual);
@@ -475,7 +476,7 @@ void Updates::request(const QUrl& url, bool package)
     m_reply->setReadBufferSize(128LL * 1024);
     connect(m_reply, &QNetworkReply::readyRead, this, &Updates::takeBytes);
     connect(m_reply, &QNetworkReply::finished, this, &Updates::finished);
-    m_deadline.start(package ? 15 * 60 * 1000 : 30000);
+    m_deadline.start(limitMs >= 0 ? limitMs : package ? m_downloadMs : m_checkMs);
 }
 
 void Updates::download()
@@ -524,6 +525,20 @@ void Updates::takeBytes()
         fail(tr("The update information is no longer available. Check again."));
         return;
     }
+    // A redirect that is not to be followed ends the question now, whatever it goes on to say. What one that is says
+    // of its own is no part of what was asked for: read and let go, never kept or counted, and only so much of it
+    // (finished() follows it).
+    if (const QVariant redirect = m_reply->attribute(QNetworkRequest::RedirectionTargetAttribute); redirect.isValid()) {
+        if (!followable(redirect)) {
+            fail(tr("The update service could not be reached securely. Try again later."));
+            return;
+        }
+        m_redirectAnswer += m_reply->readAll().size();
+        if (m_redirectAnswer > mostRedirectAnswer) {
+            fail(tr("The update service could not be reached securely. Try again later."));
+        }
+        return;
+    }
     const qint64 limit = m_package && m_release ? m_release->bytes : mostUpdateMetadata;
     const auto length = m_reply->header(QNetworkRequest::ContentLengthHeader);
     if (length.isValid() && length.toLongLong() > limit) {
@@ -558,9 +573,26 @@ void Updates::finished()
     if (m_reply == nullptr) {
         return;
     }
+    // A package on GitHub follows the one redirect its release download answers with, to GitHub's file host, and
+    // is asked for there as it was asked for here (request); nothing of the redirect's answer was kept (takeBytes).
+    // The feed follows none. Nothing follows a second: a redirect is taken only from github.com, and the first
+    // lands on GitHub's file host.
+    const QVariant redirect = m_reply->attribute(QNetworkRequest::RedirectionTargetAttribute);
+    if (redirect.isValid() && followable(redirect)) {
+        const QUrl there = m_reply->url().resolved(redirect.toUrl());
+        // (The download's time runs on across the hop.)
+        const int left = m_deadline.remainingTime();
+        stopRequest();
+        if (left <= 0) {
+            fail(tr("The update request timed out. Try again later."));
+            return;
+        }
+        request(there, true, left);
+        emit changed();
+        return;
+    }
     if (m_reply->error() != QNetworkReply::NoError ||
-        m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 ||
-        m_reply->attribute(QNetworkRequest::RedirectionTargetAttribute).isValid()) {
+        m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200 || redirect.isValid()) {
         fail(tr("The update service could not be reached securely. Try again later."));
         return;
     }
@@ -604,6 +636,12 @@ void Updates::finished()
         }
     }
     emit changed();
+}
+
+bool Updates::followable(const QVariant& redirect) const
+{
+    return m_reply != nullptr && m_reply->error() == QNetworkReply::NoError && m_package &&
+           updatePackageRedirect(m_reply->url(), m_reply->url().resolved(redirect.toUrl()));
 }
 
 void Updates::stopRequest()

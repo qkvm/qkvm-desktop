@@ -1,3 +1,5 @@
+#include <algorithm>
+
 #include <QScopeGuard>
 
 #include "screens_test.h"
@@ -969,6 +971,56 @@ private slots:
         nobody.stage = u"signIn"_s;
         session.show(nobody);
         QTRY_COMPARE(window->title(), u"qKVM"_s);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Where the wall may come from this PC or a server, the title says which, before the program's name, as
+    // Windows titles go, and with nothing but hyphens between. (Qt puts " - " and the program's name after a title
+    // that does not end with it: 0.1.0 said "qKVM " and a long dash, and Windows showed "qKVM <dash>  - qKVM"
+    // before anything was chosen, and "qKVM <dash> This PC - qKVM" after.)
+    void theTitleSaysWhichWallBeforeTheProgramsNameWithHyphensAlone()
+    {
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        wall.machines()->setTiles(qkvm::ui::pretendWall());
+        qkvm::ui::SessionView session;
+        // Nothing chosen yet: neither this PC's wall nor an address.
+        qkvm::ui::SessionView::Shown nothing;
+        nothing.stage = u"signIn"_s;
+        session.show(nothing);
+        session.showSources({QVariantMap{{u"value"_s, u"pc"_s}, {u"label"_s, u"This PC"_s}},
+                             QVariantMap{{u"value"_s, u"https://example.test/"_s}, {u"label"_s, u"example.test"_s}}},
+                            u"pc"_s, true);
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        QVERIFY(bringUp(window));
+        const QString name = QGuiApplication::applicationDisplayName();
+        QCOMPARE(name, u"qKVM"_s);
+        // Every title ends with the program's name, so that Qt adds nothing to it; and has no dash but the hyphen.
+        const auto plain = [&](const QString& title) {
+            return title.endsWith(name) && std::ranges::none_of(title, [](QChar sign) {
+                       return sign != u'-' && (sign.category() == QChar::Punctuation_Dash ||
+                                               sign.category() == QChar::Punctuation_InitialQuote ||
+                                               sign.category() == QChar::Punctuation_FinalQuote);
+                   });
+        };
+        QTRY_COMPARE(window->title(), u"qKVM"_s);
+        // This PC's own wall.
+        session.show(atItsOwnWall());
+        QTRY_COMPARE(window->title(), u"This PC - qKVM"_s);
+        QVERIFY(plain(window->title()));
+        // A server's.
+        session.show(signedIn());
+        QTRY_COMPARE(window->title(), u"192.168.1.10:8787 - qKVM"_s);
+        QVERIFY(plain(window->title()));
+        // One group of it, in a window of its own.
+        wall.shown()->setGroup(u"Rack B"_s);
+        QTRY_COMPARE(window->title(), u"Rack B - 192.168.1.10:8787 - qKVM"_s);
+        QVERIFY(plain(window->title()));
+        session.show(atItsOwnWall());
+        QTRY_COMPARE(window->title(), u"Rack B - This PC - qKVM"_s);
+        QVERIFY(plain(window->title()));
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 

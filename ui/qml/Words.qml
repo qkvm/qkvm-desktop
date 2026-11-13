@@ -5,7 +5,9 @@ import QtQuick
 // words (app/qkvm/static/app.js and index.html).
 QtObject {
     readonly property string appName: qsTr("qKVM")
-    readonly property string appNameWithGroup: qsTr("%1 - qKVM")
+    // A window's title: what it shows, then the program's name, as Windows titles go (Qt adds " - qKVM" to a
+    // title that does not end with it). What it shows may be several, with " - " between them (Main.qml).
+    readonly property string inTheTitle: qsTr("%1 - qKVM")
     readonly property string about: qsTr("About")
     readonly property string close: qsTr("Close")
     readonly property string cancel: qsTr("Cancel")
@@ -35,7 +37,7 @@ QtObject {
     readonly property string isThisYourQkvm: qsTr("Is this your qKVM?")
     readonly property string certificateNotKnown: qsTr("%1 shows a certificate that Windows does not know, as a qKVM does that made its own. Nothing has been sent to it yet.")
     readonly property string itsCertificate: qsTr("Its certificate's SHA-256")
-    readonly property string compareWithQkvm: qsTr("qKVM prints this when it starts, after “certificate SHA-256:”. Where the two are alike, this is your qKVM.")
+    readonly property string compareWithQkvm: qsTr("qKVM prints this when it starts, after \"certificate SHA-256:\". Where the two are alike, this is your qKVM.")
     readonly property string trustThisCertificate: qsTr("Trust this certificate")
     readonly property string anotherCertificate: qsTr("This qKVM shows another certificate than before")
     readonly property string certificateNotTheSame: qsTr("%1 is known here by another certificate. That happens when qKVM was set up anew or was given a new certificate. It is also what it looks like when something has come between this PC and your qKVM. Nothing is sent to it until you say so.")
@@ -110,7 +112,7 @@ QtObject {
     // Discovery asks only the networks selected here, anonymously, and adds nothing itself.
     readonly property string discoverKvms: qsTr("Find devices")
     readonly property string discoveryHint: qsTr("Choose networks to search from this PC. No passwords are sent and no devices are added until you choose an address and check it.")
-    readonly property string discoveryNetwork: qsTr("%1 — %2 (%3 addresses)")
+    readonly property string discoveryNetwork: qsTr("%1, %2 (%3 addresses)")
     readonly property string discoveryNoNetworks: qsTr("No active private IPv4 networks were found. Enter a reachable private address or range below.")
     readonly property string discoveryScope: qsTr("Additional subnet, range or address")
     readonly property string discoveryScopeHint: qsTr("Examples: 192.168.1.0/24, 192.168.1.10-192.168.1.40, or https://192.168.1.20:8443. Private IPv4 only; at most 4096 addresses per search. Larger adapter networks need a smaller range.")
@@ -307,7 +309,6 @@ QtObject {
     readonly property string askingForKeyboardAndMouseOf: qsTr("Asking %1 for its keyboard and mouse…")
     readonly property string stopAsking: qsTr("Stop asking")
     readonly property string stopAskingFor: qsTr("Stop asking %1 for its keyboard and mouse")
-    readonly property string machineInTheTitle: qsTr("%1 - qKVM")
     readonly property string asking: qsTr("Asking...")
     // Control's words while somebody else has them, as the page's (app.js, the label of "focus-control").
     readonly property string takeOverFrom: qsTr("Take over from %1")

@@ -648,8 +648,8 @@ void OwnWall::useAppLock(AppLock& lock)
 
 QString OwnWall::saidOf(const core::KvmAdding::Added& added, const QString& called)
 {
-    // "Build server" added, and after a dash what else is to be said, with a dot between: the
-    // page's own two signs, made here from their numbers. (What it is called stands as a
+    // "Build server" added, and in brackets what else is to be said, with commas between (the page has a long
+    // dash and a dot there; the owner's rule writes neither, 2026-11-13). (What it is called stands as a
     // sentence calls it, and not as it was typed: calledInASentence.)
     QStringList more;
     if (!added.model.isEmpty()) {
@@ -660,7 +660,7 @@ QString OwnWall::saidOf(const core::KvmAdding::Added& added, const QString& call
     }
     QString said = u"%1 added"_s.arg(called);
     if (!more.isEmpty()) {
-        said += u' ' + QChar(0x2014) + u' ' + more.join(u' ' + QString(QChar(0x00B7)) + u' ');
+        said += u" ("_s + more.join(u", "_s) + u')';
     }
     return said;
 }

@@ -85,10 +85,18 @@ Window {
     height: 800
     minimumWidth: 640
     minimumHeight: 400
-    // A window that shows one group says which: several windows are told apart in the taskbar.
-    // And one whose keyboard goes to a machine says which machine: its name is whole here,
-    // however long it is, where its bar may have to cut it.
-    title: enlarged && control.on ? Words.machineInTheTitle.arg(wall.enlargedCard.name ?? "") : (group !== "" ? Words.appNameWithGroup.arg(group) : Words.appName) + (session.canChooseSource ? " — " + (session.ownWall ? Words.thisPc : session.address) : "")
+    // A window that shows one group says which: several windows are told apart in the taskbar. Where the wall may
+    // come from this PC or a server, it says which. And one whose keyboard goes to a machine says which machine: its
+    // name is whole here, however long it is, where its bar may have to cut it. Each before the program's name, as
+    // Windows titles go; with nothing chosen, the program's name alone.
+    title: {
+        const machine = enlarged && control.on ? (wall.enlargedCard.name ?? "") : "";
+        if (machine !== "")
+            return Words.inTheTitle.arg(machine);
+        const source = session.canChooseSource ? (session.ownWall ? Words.thisPc : session.address) : "";
+        const shown = [group, source].filter(part => part !== "");
+        return shown.length > 0 ? Words.inTheTitle.arg(shown.join(" - ")) : Words.appName;
+    }
     color: Theme.bg
 
     // A box is opened while a machine's keyboard and mouse are asked for: whoever sits here went

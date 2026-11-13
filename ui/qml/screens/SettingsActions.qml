@@ -140,7 +140,7 @@ Section {
                     textFormat: Text.PlainText
                     wrapMode: Text.WordWrap
                     color: Theme.text
-                    text: qsTr("Remove “%1” and its saved text? This does not run the action.").arg(nameField.text)
+                    text: qsTr("Remove \"%1\" and its saved text? This does not run the action.").arg(nameField.text)
                 }
                 Column {
                     width: parent.width

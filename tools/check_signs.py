@@ -3,6 +3,10 @@ a line around, ends a line as no key does, is a blank of another kind than the b
 meaning at all. Such a sign belongs in no file as itself. A test that needs one makes it from
 its number where it runs; a text that needs one does not need it.
 
+Nor, anywhere, a dash other than the hyphen, the minus sign, or a quote that curls or points: the
+hyphen and the straight quotes are written instead (the owner's rule, 2026-11-13: no long dash
+anywhere). Three dots made one are let pass.
+
 In the sources of the program and its tests, a letter is one of the twenty-six, small or large:
 a letter of another alphabet, or one with a mark on it, may look like a letter it is not, which
 is what the tests about that are for. (When the program's words are translated, the files of a
@@ -16,6 +20,7 @@ A file that is to be text and is not written in UTF-8 is said too: it cannot be 
 Ends with 1 where something was found.
 """
 import pathlib
+import re
 import subprocess
 import sys
 import unicodedata
@@ -24,7 +29,7 @@ HERE = pathlib.Path(__file__).resolve().parent.parent
 TEXT = {
     '.cpp', '.h', '.hlsl', '.hlsli', '.qml', '.js', '.md', '.py', '.ps1', '.cmake', '.txt', '.json', '.rc', '.in',
     '.qrc', '.svg', '.xml', '.manifest', '.toml', '.yml', '.yaml', '.ini', '.cfg', '.bat', '.sh', '.html', '.css',
-    '.clang-format', '.clang-tidy', '.gitignore', '.gitattributes',
+    '.clang-format', '.clang-tidy', '.gitignore', '.gitattributes', '.iss',
 }
 SOURCES = {'.cpp', '.h', '.hlsl', '.hlsli', '.qml', '.js'}
 # Never as themselves: format signs (zero width, the ones that turn a line around, soft hyphens,
@@ -40,6 +45,19 @@ NOT_DRAWN = (
     | set(range(0xFE00, 0xFE10))
     | set(range(0xE0100, 0xE01F0))
 )
+
+
+# Dashes (the hyphen, the only one written, is below 0x7F and never gets here) and quotes that curl or point; and
+# signs of other kinds that stand for one: the minus sign, quotes that open low or are of full width, primes, an
+# accent alone, and the lines of a box.
+DASHES_AND_QUOTES = {'Pd', 'Pi', 'Pf'}
+LOOK_ALIKE = {0x2212, 0x201A, 0x201E, 0x301D, 0x301E, 0x301F, 0xFF02, 0xFF07, 0x2032, 0x2033, 0x00B4, 0x2500,
+              0x2501}
+# In a program's source (not a test's: a test may need one to try the program with), such a sign made from its
+# number for showing: QChar(0x2014), String.fromCharCode(0x2014), or an escape in a text, \\u2014. Its number
+# compared with another (a sign that is read and recognised) is let pass.
+_NUMBERS = r'(?:201[0-5]|201[89a-fA-F]|2212|2032|2033|2500|2501)'
+MADE = re.compile(r'(?:QChar|fromCharCode|char16_t)\s*\(\s*0x' + _NUMBERS + r'\b|\\u' + _NUMBERS + r'\b')
 
 
 def files():
@@ -66,6 +84,8 @@ def wrong(character, after, in_sources):
         return True
     if number < 0x7F:
         return False
+    if unicodedata.category(character) in DASHES_AND_QUOTES or number in LOOK_ALIKE:
+        return True
     if unicodedata.category(character) in UNSEEN or number in NOT_DRAWN:
         return True
     # (In sources: no letter but the twenty-six, and no mark that sits on one and makes another of it.)
@@ -88,6 +108,11 @@ for path in files():
     if text.startswith(chr(0xFEFF)):
         text = text[1:]
     in_sources = path.suffix.lower() in SOURCES
+    if in_sources and 'tests' not in path.parts:
+        for match in MADE.finditer(text):
+            found += 1
+            print(f'{path}:{text.count(chr(10), 0, match.start()) + 1}: {match.group(0)} makes a dash or a quote not '
+                  'written here')
     line = 1
     for at, character in enumerate(text):
         if wrong(character, text[at + 1:at + 2], in_sources):
@@ -97,5 +122,5 @@ for path in files():
             line += 1
 print(f'{looked} files looked through.')
 if found:
-    print(f'{found} signs that nobody can see, or that look like others.')
+    print(f'{found} signs that nobody can see, that look like others, or dashes and quotes not written here.')
 sys.exit(1 if found else 0)

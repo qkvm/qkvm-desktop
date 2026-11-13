@@ -48,6 +48,11 @@ UpdateKind updateKindOf(const QString& programFolder, bool packaged);
 // The feed a Setup copy reads: stable-setup.json, in the folder of the built-in feed (none where that is none).
 QUrl setupFeedBeside(const QUrl& feed);
 bool updateAddress(const QUrl& address);
+// The one redirect an update package may follow (0.1.1, the owner): from a GitHub release download, the address
+// the signed feed names (https://github.com/<owner>/<repository>/releases/download/<tag>/<file>), to GitHub's own
+// file host, over https, at its usual port and with no name in the address. What comes is checked by its size and
+// SHA-256 as ever: this only says where it may come from.
+bool updatePackageRedirect(const QUrl& from, const QUrl& to);
 QVersionNumber updateVersion(const QString& text);
 
 struct UpdateRelease {
@@ -61,6 +66,8 @@ struct UpdateRelease {
 };
 
 inline constexpr qint64 mostUpdateMetadata = 96LL * 1024;
+// The most a redirect that is followed may say of its own (GitHub's says a line or two).
+inline constexpr qint64 mostRedirectAnswer = 64LL * 1024;
 inline constexpr qint64 mostUpdatePackage = 1024LL * 1024 * 1024;
 
 // The envelope holds base64 payload and signature. Verify the exact payload bytes before

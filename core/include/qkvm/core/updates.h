@@ -48,6 +48,12 @@ public:
     ~Updates() override;
 
     State state() const { return m_state; }
+    // How long a check and a download may take, in milliseconds (30 s and 15 min; tests make them short).
+    void setTimeLimits(int checkMs, int downloadMs)
+    {
+        m_checkMs = checkMs;
+        m_downloadMs = downloadMs;
+    }
     bool configured() const;
     bool busy() const { return m_state == State::Checking || m_state == State::Downloading; }
     QString currentVersion() const { return m_channel.currentVersion; }
@@ -101,7 +107,11 @@ signals:
     void afterSetupTold();
 
 private:
-    void request(const QUrl& url, bool package);
+    // A question for the feed or the package, with the whole of its time (limitMs below 0), or what is left of it
+    // (a package's redirect followed: the time runs across the hop).
+    void request(const QUrl& url, bool package, int limitMs = -1);
+    // Whether this reply's redirect is the one an update package may follow (updatePackageRedirect).
+    bool followable(const QVariant& redirect) const;
     void takeBytes();
     void finished();
     void fail(const QString& message);
@@ -132,9 +142,13 @@ private:
     std::optional<UpdateRelease> m_release;
     QNetworkReply* m_reply = nullptr;
     QTimer m_deadline;
+    int m_checkMs = 30000;
+    int m_downloadMs = 15 * 60 * 1000;
     bool m_package = false;
     QByteArray m_metadata;
     qint64 m_received = 0;
+    // What a followed redirect has said of its own, let go of (mostRedirectAnswer at the most).
+    qint64 m_redirectAnswer = 0;
     std::unique_ptr<DownloadFolder> m_folder;
     QFile m_file;
     // Windows read handle held across verification and installer handoff. Denies replacement

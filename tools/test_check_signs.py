@@ -37,6 +37,30 @@ CASES = [
     ('a blank of no width in a screen', 'a.qml', '// x' + chr(0x200B), True),
     ('nothing odd', 'i.md', 'nothing odd\n\tat all\n', False),
     ('the mark at a file\'s head', 'k.md', chr(0xFEFF) + 'said after it\n', False),
+    # Dashes other than the hyphen, the minus sign and quotes that curl: written nowhere (the owner, 2026-11-13).
+    ('a long dash in a text', 'm.md', 'one ' + chr(0x2014) + ' two', True),
+    ('a long dash in a source', 'f.cpp', 'auto a = u" ' + chr(0x2014) + ' "_s;', True),
+    ('a short dash between numbers in a screen', 'c.qml', 'text: "1' + chr(0x2013) + '2"', True),
+    ('a dash that does not break', 'n.md', 'one' + chr(0x2011) + 'two', True),
+    ('the minus sign', 'o.md', 'a ' + chr(0x2212) + ' b', True),
+    ('a quote that curls, in a source', 'g.cpp', '// it' + chr(0x2019) + 's', True),
+    ('quotes that curl, in a screen', 'd.qml', 'text: "' + chr(0x201C) + 'a' + chr(0x201D) + '"', True),
+    ('quotes that point, in a text', 'p.md', chr(0x00AB) + 'a' + chr(0x00BB), True),
+    ('the hyphen and straight quotes', 'q.md', 'well-known - "a" and \'b\'', False),
+    ('three dots made one, in a text', 'r.md', 'Sending' + chr(0x2026), False),
+    ('three dots made one, in a source', 'h.cpp', 'auto a = u"Sending' + chr(0x2026) + '"_s;', False),
+    ('a low quote that curls', 's.md', chr(0x201E) + 'a' + chr(0x201C), True),
+    ('a prime', 't.md', '5' + chr(0x2032), True),
+    ('an accent alone', 'u.md', 'it' + chr(0x00B4) + 's', True),
+    ('a line of a box', 'v.md', 'one ' + chr(0x2500) + ' two', True),
+    ('a quote of full width', 'w.md', chr(0xFF02) + 'a' + chr(0xFF02), True),
+    ('a long dash in a setup script', 'a.iss', 'Name: "one ' + chr(0x2014) + ' two"', True),
+    ('a long dash made from its number, in a source', 'j.cpp', 'said += QChar(0x2014);', True),
+    ('a quote that curls made from its number, in a source', 'k.cpp', 'said += QChar( 0x201C );', True),
+    ('a long dash made from its number, in a screen', 'f.qml', 'text: String.fromCharCode(0x2014)', True),
+    ('a long dash written as an escape, in a screen', 'g.qml', 'text: "a \\u2014 b"', True),
+    ('the number of a quote compared, in a source', 'l.cpp', 'return sign >= 0x201C && sign <= 0x201F;', False),
+    ('a long dash made from its number, in a test', 'tests/m.cpp', 'auto dash = QChar(0x2014);', False),
 ]
 
 
@@ -48,6 +72,7 @@ wrong = 0
 with tempfile.TemporaryDirectory() as folder:
     for what, name, text, is_refused in CASES:
         path = pathlib.Path(folder) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(text.encode('utf-8'))
         if refuses(path) != is_refused:
             wrong += 1

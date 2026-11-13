@@ -90,7 +90,7 @@ void TrayKeeper::say()
                 for (const auto& choice : choices) {
                     TrayIcon::Row row;
                     row.id = next++;
-                    row.text = choice.name.simplified().left(60) + u" — "_s + choice.source.simplified().left(60);
+                    row.text = choice.name.simplified().left(60) + u" - "_s + choice.source.simplified().left(60);
                     row.scope = choice.reference.scope;
                     row.machine = choice.reference.machine;
                     menu.children.append(row);

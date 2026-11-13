@@ -21,17 +21,19 @@ Website: https://qkvm.com/#desktop
 For Windows 10 (22H2) and Windows 11, x64, the same program in two forms:
 
 - **The setup**,
-  [qKVM-Desktop-0.1.0-windows-x64-setup.exe](https://download.qkvm.com/desktop/0.1.0/qKVM-Desktop-0.1.0-windows-x64-setup.exe).
+  [qKVM-Desktop-0.1.1-windows-x64-setup.exe](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe).
   It installs the program for you alone, without asking for an administrator, into
   `%LOCALAPPDATA%\Programs\qKVM Desktop`, and adds it to the Start menu (to the desktop only if
   you tick that) and to Settings, Apps.
 - **The ZIP**,
-  [qKVM-Desktop-0.1.0-windows-x64.zip](https://download.qkvm.com/desktop/0.1.0/qKVM-Desktop-0.1.0-windows-x64.zip).
+  [qKVM-Desktop-0.1.1-windows-x64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip).
   Nothing is installed: unpack the whole ZIP into a folder of its own and start
   `qkvm-desktop.exe` in it.
 
-Both files, their `SHA256SUMS` and the release notes are on the
-[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.0). At the first start
+The same files are also at
+[download.qkvm.com](https://download.qkvm.com/desktop/0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip), where
+copies of 0.1.0 take their update from. Both files, their `SHA256SUMS` and the release notes are on the
+[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1). At the first start
 the program asks for a password of its own.
 
 Windows may say it protected your PC: neither file is signed with a certificate yet. Choose
@@ -42,8 +44,8 @@ More info, then Run anyway.
 Before you run the setup or unpack the ZIP, compare its SHA-256 with the line for it in
 `SHA256SUMS` on the release page. In PowerShell, in the folder you downloaded it to:
 
-    Get-FileHash .\qKVM-Desktop-0.1.0-windows-x64-setup.exe -Algorithm SHA256
-    Get-FileHash .\qKVM-Desktop-0.1.0-windows-x64.zip -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64-setup.exe -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64.zip -Algorithm SHA256
 
 If the two differ, do not run it.
 

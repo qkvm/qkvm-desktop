@@ -285,7 +285,7 @@ void AlertsView::observeFor(const QString& scope, const QHash<QString, core::Sta
         emit notification(
             changes.size() == 1 ? tr("%1: %2").arg(changes.front().name.left(40), label(changes.front().state))
                                 : tr("%1 alert changes").arg(changes.size()),
-            sourceName.left(80) + u" — "_s + (changes.size() == 1 ? tr("Click to open in qKVM.") : names.join(u"; "_s)),
+            sourceName.left(80) + u" - "_s + (changes.size() == 1 ? tr("Click to open in qKVM.") : names.join(u"; "_s)),
             warning, scope, changes.size() == 1 ? changes.front().key : QString());
     }
 }
@@ -304,7 +304,7 @@ void AlertsView::screenAlertFor(const QString& scope, const core::ScreenWatch::E
         m_incidents.screenAlert(scope, event.machine, machine->name, event.watch, event.back, event.minutes);
     if (tell && !m_lock.restricted()) {
         emit notification(tr("%1: %2").arg(machine->name.left(40), watchText(event.watch, event.back, event.minutes)),
-                          channel.name.left(80) + u" — "_s + tr("Click to open in qKVM."), !event.back, scope,
+                          channel.name.left(80) + u" - "_s + tr("Click to open in qKVM."), !event.back, scope,
                           event.machine);
     }
 }

@@ -17,7 +17,7 @@ endif()
 # it, and a crash in one can still be read.
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
 
-project(QkvmDesktop VERSION 0.1.0 LANGUAGES CXX)
+project(QkvmDesktop VERSION 0.1.1 LANGUAGES CXX)
 
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "QKVM Desktop is built for Windows x64 with Microsoft's compiler, and for nothing else yet.")
