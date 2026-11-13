@@ -1,0 +1,21 @@
+{
+  "format": "qkvm-export",
+  "version": 1,
+  "lock": {
+    "kdf": {
+      "name": "scrypt",
+      "n": 4096,
+      "r": 8,
+      "p": 1,
+      "salt": "4O763WgND3VoZmeB6aCUlg=="
+    },
+    "key": {
+      "nonce": "M5tRwwul9KIC/tBt",
+      "data": "uOM0aMku8QLMQo6BEhbNA/84EVcBoay88m16hJmEdcDFcE2npOURvFFQwBxnPFxu"
+    }
+  },
+  "sealed": {
+    "nonce": "39UkS6V+3AYP8hCj",
+    "data": "m0MFqruewmumVqaaVy1hNCuZk3uFPBbzl8/R9+20EIbVyMZzPZCwE6n3Lk4tlXFMBWBOH1fZTLtpbJWLSd+PV8yCXrqAXspAMul8f7cyQpjb/i6E6wrWKmeCGKX+lQWzYhyG/xfxjC0CRuujTX2dY9E/nhzNvEOnl9rknUqwvh+i9puVk+CSE0D4aMJZwW36as4SA/GGOWTelq87bzWlbAyZ0xvFZDeLtW52owlFw0B6ZzdV3t7nsS24JYCCbXTpUOHrJPlOZ5HLNGVgoUZsFoxTmOXCTSEgcLjr2Hyxczcqs3ljQNyshOFJWaNaTnxuddw2KCKIMxrvRgMlOhd7sjrkLKr7hc9br1fLRHUmwiwAXkeLI22hkQYLYkSZx4RV"
+  }
+}

@@ -1,0 +1,11 @@
+core/data/jetkvm_layouts.py is a copy, byte for byte, of the web app's app/qkvm/layouts.py as qKVM 0.3.0 has it:
+branch web-030, where the file was last changed by commit d5bd6216 (2026-10-18). SHA-256:
+b1f9bc3935d5c28f8a5168ad3267be74e5779ab599df6cbaa47a130c9f5fcb3e
+
+It is what to press to type a character on the keyboard layouts a JetKVM's computer may use: made by the web's
+tools/make_layouts.py from Unicode CLDR's keyboard data, release 43, under Unicode's licence, whose notice the module
+carries (and licenses/Unicode-CLDR.txt). The build reads it and makes C++ tables of it
+(core/tools/make_jetkvm_layouts.cpp, the notice with them); nothing in it is changed by hand.
+test_core_jetkvm_layouts checks its tables against characters of it.
+
+When the web's file changes, it is copied here again whole, and this note says from where.

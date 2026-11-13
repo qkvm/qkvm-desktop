@@ -1,0 +1,7 @@
+#pragma once
+
+namespace qkvm::core {
+inline constexpr char updateFeed[] = "@QKVM_UPDATE_FEED@";
+inline constexpr char updatePublicKey[] = "@QKVM_UPDATE_PUBLIC_KEY@";
+inline constexpr char updateCurrentVersion[] = "@PROJECT_VERSION@";
+}

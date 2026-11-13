@@ -1,0 +1,38 @@
+# What tools/check.ps1 holds our own C++ to, beyond the compiler's warnings. A finding is an error.
+# Left out, each for a reason:
+#   bugprone-easily-swappable-parameters   it objects to every function that takes two sizes
+#   performance-enum-size                  enums stay the size the language gives them
+#   performance-no-int-to-ptr              Windows hands a window's own data back as a number
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  -performance-enum-size,
+  -performance-no-int-to-ptr,
+  cppcoreguidelines-owning-memory,
+  cppcoreguidelines-no-malloc,
+  cppcoreguidelines-pro-type-const-cast,
+  cppcoreguidelines-slicing,
+  misc-unused-parameters,
+  misc-unused-using-decls,
+  misc-redundant-expression,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-make-unique,
+  modernize-make-shared,
+  readability-identifier-naming
+WarningsAsErrors: '*'
+HeaderFilterRegex: '[/\\]desktop[/\\](base|engine|input|bmc|core|ui|bench)[/\\]'
+CheckOptions:
+  # Qt's way of naming, because QML needs it (DESIGN.md section 10).
+  - { key: readability-identifier-naming.ClassCase, value: CamelCase }
+  - { key: readability-identifier-naming.StructCase, value: CamelCase }
+  - { key: readability-identifier-naming.EnumCase, value: CamelCase }
+  - { key: readability-identifier-naming.FunctionCase, value: camelBack }
+  # Qt Test finds the rows of a test by this name: the test's own, with _data behind it.
+  - { key: readability-identifier-naming.FunctionIgnoredRegexp, value: '.*_data$' }
+  - { key: readability-identifier-naming.VariableCase, value: camelBack }
+  - { key: readability-identifier-naming.ParameterCase, value: camelBack }
+  - { key: readability-identifier-naming.PrivateMemberPrefix, value: m_ }
+  - { key: readability-identifier-naming.NamespaceCase, value: lower_case }

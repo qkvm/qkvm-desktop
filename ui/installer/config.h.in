@@ -1,0 +1,6 @@
+#pragma once
+namespace qkvm::installer {
+inline constexpr wchar_t packageName[] = L"@QKVM_PACKAGE_NAME@";
+inline constexpr wchar_t packagePublisher[] = L"@QKVM_PACKAGE_PUBLISHER@";
+inline constexpr unsigned profileSchema = 1;
+}

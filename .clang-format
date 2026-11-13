@@ -1,0 +1,28 @@
+# How the C++ in here is set. tools/check.ps1 refuses what is set otherwise.
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+PointerAlignment: Left
+NamespaceIndentation: None
+FixNamespaceComments: true
+AlwaysBreakTemplateDeclarations: Yes
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterStruct: false
+  AfterEnum: false
+  AfterNamespace: false
+  AfterControlStatement: Never
+  BeforeElse: false
+  BeforeCatch: false
+  SplitEmptyFunction: false
+# Includes stay in the groups they were written in: the file's own header, the standard library, Qt, ours.
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive

@@ -1,0 +1,4 @@
+# The same bytes on every system: text is kept with Unix line ends, in the repository and when checked out.
+* text=auto eol=lf
+# The program's icon is the one file that is not text.
+*.ico binary

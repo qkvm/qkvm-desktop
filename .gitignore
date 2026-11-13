@@ -1,0 +1,12 @@
+# What is built, and what tools/check.ps1 keeps of its last run.
+/build/
+
+# FFmpeg as tools/fetch_ffmpeg.ps1 brought it.
+/.deps/
+
+# Where Qt is on this PC, written by tools/fetch_qt.ps1; and presets of one's own.
+/local.cmake
+/CMakeUserPresets.json
+
+# The pictures tools/make_testdata.ps1 makes for tests and measurements.
+/.testdata/

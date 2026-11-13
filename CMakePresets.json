@@ -1,0 +1,58 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "common",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "cl",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "description": "For working on it: no optimising, every check of Qt and of the standard library switched on.",
+      "inherits": "common",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "description": "What is handed out, with its debug information kept beside it.",
+      "inherits": "common",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "publish",
+      "displayName": "Publish",
+      "description": "The release that is handed out (tools/build_release.ps1): the public update feed and the release key's public half built in, as tools/release_key.ps1 printed it (its SHA-256 fingerprint is a3acc1b6199a0ae2d19520bb36d31fde3428746e2b7abe8684f446349767f40f).",
+      "inherits": "release",
+      "cacheVariables": {
+        "QKVM_UPDATE_FEED": "https://download.qkvm.com/desktop/stable.json",
+        "QKVM_UPDATE_PUBLIC_KEY": "5253d9285e0974bd12b3ab48a223b71a2c69eb20adab303befbfebcf4d93d5e8cba5f64dc0fd235aa41dc08f97d1c53f7328b85f486a4274d79d77e65b42ba4c"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "Address sanitizer",
+      "description": "Optimised, with the address sanitizer watching every access to memory.",
+      "inherits": "common",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QKVM_ASAN": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug", "configurePreset": "debug" },
+    { "name": "release", "configurePreset": "release" },
+    { "name": "publish", "configurePreset": "publish" },
+    { "name": "asan", "configurePreset": "asan" }
+  ],
+  "testPresets": [
+    { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
+    { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
+    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } }
+  ]
+}

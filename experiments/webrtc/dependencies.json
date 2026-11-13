@@ -1,0 +1,35 @@
+{
+  "scope": "C++ receiver approved for desktop integration on 2026-10-20",
+  "cpp": {
+    "libdatachannel": {
+      "version": "0.24.6",
+      "commit": "6b1e2e620f1e37f0eafeee702eaea0043cb305fd",
+      "repository": "https://github.com/paullouisageneau/libdatachannel"
+    },
+    "gitlinks": {
+      "libjuice": "b89c792e3612faf2f12cf35bcc56857313a06be3",
+      "libsrtp": "24b3bf8f19b6f5ab4cd2bcceb4f4064efca86fd5",
+      "usrsctp": "fec583d54493f879d2ae44a743423bf8a04371ab",
+      "plog": "94899e0b926ac1b0f4750bfbd495167b4a6ae9ef"
+    },
+    "mbedtls": {
+      "version": "3.6.7",
+      "commit": "068ff080b369adfac81509f9b57b2afabaf82dc5",
+      "archive": "https://github.com/Mbed-TLS/mbedtls/releases/download/mbedtls-3.6.7/mbedtls-3.6.7.tar.bz2",
+      "sha256": "a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6"
+    },
+    "configuration": {
+      "media": true,
+      "websocket": false,
+      "ice_backend": "libjuice",
+      "tls_backend": "mbedtls",
+      "mbedtls_define": "MBEDTLS_SSL_DTLS_SRTP",
+      "libdatachannel_linkage": "shared",
+      "mbedtls_linkage": "static",
+      "msvc_runtime": "MD",
+      "cpp_exception_handling": "EHsc",
+      "upstream_tests_built": false,
+      "upstream_examples_built": false
+    }
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "format": "qkvm-export",
+  "version": 1,
+  "made": 1791832242,
+  "program": "0.1.0",
+  "devices": [
+    {
+      "name": "Rack 1, top",
+      "url": "https://192.168.1.21",
+      "username": "admin",
+      "kind": "kvmd",
+      "group": "Rack 1",
+      "tls": "pinned",
+      "cert_pem": "-----BEGIN CERTIFICATE-----\nMIIBHzCBxqADAgECAgID6DAKBggqhkjOPQQDAjAZMRcwFQYDVQQDDA5hbiBleGFt\ncGxlIEtWTTAeFw0yNjAxMDEwMDAwMDBaFw0zNTEyMzAwMDAwMDBaMBkxFzAVBgNV\nBAMMDmFuIGV4YW1wbGUgS1ZNMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEkoYW\n6kW9oO3ILuXrYCeiDLKpt4eq/ON7DwCe1F6av2t9ygp9QbxUMJBePxGOkOLuiQoT\nJW8q35yG1qcAPd9gujAKBggqhkjOPQQDAgNIADBFAiEA3xyTzdfJz+sYMmDqd0/9\nf18OyJhT9K1FPBtZBVRLdj8CICcxZ6T++/Z1QCNp3ZqXhAsCk9P+kXQrJuCsPA43\nCOJH\n-----END CERTIFICATE-----\n",
+      "open_url": "",
+      "alerts": true,
+      "ident": ""
+    },
+    {
+      "name": "Rack 1, plain",
+      "url": "http://192.168.1.22:8080",
+      "username": "operator",
+      "kind": "kvmd",
+      "group": "Rack 1",
+      "tls": "pinned",
+      "cert_pem": null,
+      "open_url": "https://192.168.1.22/kvm/",
+      "alerts": false,
+      "ident": ""
+    },
+    {
+      "name": "By Windows",
+      "url": "https://kvm.example.net",
+      "username": "admin",
+      "kind": "kvmd",
+      "group": "",
+      "tls": "system",
+      "cert_pem": null,
+      "open_url": "",
+      "alerts": true,
+      "ident": ""
+    },
+    {
+      "name": "A small one",
+      "url": "http://192.168.1.30",
+      "username": "admin",
+      "kind": "jetkvm",
+      "group": "Desk",
+      "tls": "pinned",
+      "cert_pem": null,
+      "open_url": "",
+      "alerts": true,
+      "ident": "jetkvm:0123456789abcdef"
+    },
+    {
+      "name": "A server",
+      "url": "https://192.168.1.40",
+      "username": "root",
+      "kind": "redfish",
+      "group": "Rack 2",
+      "tls": "insecure",
+      "cert_pem": null,
+      "open_url": "",
+      "alerts": true,
+      "ident": "",
+      "keep_both": true
+    }
+  ],
+  "actions": [
+    {
+      "name": "Ctrl+Alt+Del",
+      "kind": "keys",
+      "keys": "ControlLeft,AltLeft,Delete",
+      "enter": false,
+      "danger": true
+    }
+  ],
+  "alerts": {
+    "enabled": false,
+    "format": "auto",
+    "offline": true,
+    "no_signal": true,
+    "problem": true,
+    "recovered": true
+  },
+  "wall": {
+    "interval": 1.0,
+    "update_check": true
+  }
+}

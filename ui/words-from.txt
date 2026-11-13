@@ -1,0 +1,11 @@
+ui/words.json is a copy, byte for byte, of the web app's app/qkvm/static/words.json as qKVM 0.3.0 has it: branch
+web-030, where the file was last changed by commit e9d3c4c (2026-11-03). SHA-256:
+f02a133dbdae5cc55d0eee0f26a9229bad61f4cd8f3b902aa2f7fa63d88dc477
+
+It is the vocabulary the server and this program share (the web's W8): the states and their labels, a device's codes
+and the state each is shown under, the wall's refusals with their HTTP statuses, the kinds of device and the words of
+`can`. ui/tests/test_words.cpp (test_ui_words, in every gate) fails on a word of it that ui/qml/Words.qml lacks or names
+otherwise, and on a state a machine's card calls otherwise.
+
+When the web's file changes, it is copied here again whole, this note says from where, and Words.qml is given what is
+new.
