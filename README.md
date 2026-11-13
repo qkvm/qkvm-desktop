@@ -1,20 +1,161 @@
+<div align="center">
+
+<a href="https://qkvm.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm/main/.github/brand/qkvm-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm/main/.github/brand/qkvm-light.svg" alt="qKVM" height="64"></picture></a>
+
 # qKVM Desktop
 
-qKVM Desktop is the qKVM screen wall as a Windows program of its own. It shows the live
-screens of many machines on one wall, through their IP KVMs (GL.iNet Comet and other
-PiKVM-style devices, JetKVM) and the management controllers of servers, and lets you work
-on one of them with the real keyboard and mouse, including the keys a browser never gets
-(the Windows key, Alt+Tab).
+**Every KVM and server screen you run, on one native Windows wall.**<br>
+Open source. No server, no cloud, no account. Built in C++ and Qt 6 for video that feels like you are sitting at the machine.
 
-It needs no server: KVMs are added in the program, and it speaks to them itself. Whoever
-also runs a [qKVM server](https://github.com/qkvm/qkvm) can sign the program in to it and
-have that server's wall beside the program's own.
+<a href="https://github.com/qkvm/qkvm-desktop/releases"><img src="https://img.shields.io/github/v/release/qkvm/qkvm-desktop?include_prereleases&label=release&color=0b6bff" alt="Latest release"></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases"><img src="https://img.shields.io/github/downloads/qkvm/qkvm-desktop/total?label=downloads&color=0b6bff" alt="Downloads"></a>
+<img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0b6bff" alt="Windows 10 and 11, x64">
+<img src="https://img.shields.io/badge/C%2B%2B-20-0b6bff" alt="C++20">
+<img src="https://img.shields.io/badge/Qt-6.12-0b6bff" alt="Qt 6.12">
+<a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-0b6bff" alt="Licence: AGPL-3.0"></a>
 
-**This is a beta.** It is not yet signed with a certificate. A copy the setup installed
-installs an update when you choose Install and restart; a copy from the ZIP shows the update
-rather than installing it. Try it first where a mistake costs little.
+[Website](https://qkvm.com) · [Download](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1) · [qKVM server](https://github.com/qkvm/qkvm) · [Live demo of the web app](https://demo.qkvm.com) · [Documentation](https://docs.qkvm.com) · [Security](SECURITY.md)
 
-Website: https://qkvm.com/#desktop
+<br>
+
+<a href="https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-light.svg" width="100%" alt="qKVM Desktop: a wall of nine machines with their live screens, names and state, one of them shown large and live with the real keyboard, and a server's power and sensors."></picture></a>
+
+<sub>An illustration of the wall. The machines are made up.</sub>
+
+<br>
+
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe"><img src="https://img.shields.io/badge/Download-the%20setup%2C%2019%20MB-0b6bff?style=for-the-badge" alt="Download the setup" height="38"></a>
+&nbsp;
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip"><img src="https://img.shields.io/badge/Download-the%20ZIP%2C%20no%20install-1f2937?style=for-the-badge" alt="Download the ZIP" height="38"></a>
+
+<sub>Version 0.1.1, a beta. For Windows 10 (22H2) and Windows 11, x64. No administrator rights needed.</sub>
+
+</div>
+
+<br>
+
+## What is this?
+
+An **IP KVM** is a small box (or a server's own management controller) that lets you see a computer's screen and
+use its keyboard and mouse over the network: from the moment it powers on, through the BIOS, even when its
+operating system is down. Homelabs, offices and data centers use them to look after machines nobody sits in front of.
+
+**qKVM** puts all of those screens on one wall. You see every machine live at a glance, and with one click you work on
+one of them as if you were there. qKVM comes in two forms that share one look and one way of working:
+
+- **qKVM Desktop** (this repository): a native Windows program for one PC. Nothing else to run.
+- **[qKVM server](https://github.com/qkvm/qkvm)**: a self-hosted web app for a team, opened in any browser.
+
+They work together: the desktop can sign in to a qKVM server and show that server's wall beside its own.
+
+## Highlights
+
+<table>
+  <tr>
+    <td width="33%" valign="top">
+      <b>A live wall</b><br>
+      Every machine's screen, its name and its state, on one wall that you can sort into groups and spread
+      over several windows and monitors.
+    </td>
+    <td width="33%" valign="top">
+      <b>One machine, live and smooth</b><br>
+      H.264 decoded on your graphics card, every frame shown, about half a millisecond from arrival to screen.
+    </td>
+    <td width="33%" valign="top">
+      <b>Your real keyboard</b><br>
+      The Windows key, Alt+Tab and the other keys a browser keeps go to the machine, not to your PC. Typed text,
+      saved key combinations, keys on screen.
+    </td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top">
+      <b>Servers too</b><br>
+      Server boards through their management controller over Redfish: power, health, temperatures, fans, the
+      locator light, and the server's own screen where its controller runs AMI MegaRAC.
+    </td>
+    <td width="33%" valign="top">
+      <b>Safe with passwords</b><br>
+      Each device is known by the certificate it first showed. Its password goes to that device only, and is kept in
+      Windows Credential Manager behind the program's own app password.
+    </td>
+    <td width="33%" valign="top">
+      <b>Signed updates</b><br>
+      A daily check of a feed signed with the release key. An installed copy updates itself with Install and
+      restart, and the setup it downloaded is checked against that feed before it runs.
+    </td>
+  </tr>
+</table>
+
+**Works with** GL.iNet Comet · PiKVM-style KVMs (kvmd) · JetKVM · servers with a Redfish management controller (BMC),
+including the console of AMI MegaRAC · a [qKVM server](https://github.com/qkvm/qkvm) 0.3 or later.
+
+<sub>qKVM is an independent project. It is not affiliated with GL.iNet, PiKVM, JetKVM or AMI.</sub>
+
+## Desktop or web?
+
+Both are free and open source under the same licence. Pick by where you work; many people run both.
+
+| | **qKVM Desktop** | **qKVM server (web app)** |
+|---|---|---|
+| **Best for** | One person at a desk, a NOC screen, a laptop on the road | A team that shares one wall, from any browser |
+| **What it is** | A native Windows program | A self-hosted server you open in a browser |
+| **Install** | A setup or a ZIP, no administrator rights | pip or Docker, on Linux or Windows |
+| **Needs a server** | No | It is the server |
+| **People** | One per PC, with an app password and a lock | Accounts with three roles, two-factor sign-in and a recovery key |
+| **GL.iNet Comet, PiKVM-style KVMs** | ✓ | ✓ |
+| **JetKVM** | ✓ | ✓ |
+| **Servers over Redfish:** power, health, sensors | ✓ | ✓ |
+| **A server's own screen** (AMI MegaRAC) | ✓ | ✓ |
+| **OpenBMC's console** | Planned | ✓ |
+| **PCs with Intel AMT, VNC servers, Proxmox VE** | Planned | ✓ |
+| **Virtual media** (mount an ISO) | Through a qKVM server | ✓ |
+| **Keyboard** | Taken in its window, the Windows key and Alt+Tab included | The keys the browser lets through |
+| **Video** | Decoded on your graphics card, in the program | Decoded in the browser |
+| **Windows and monitors** | Several windows, across monitors | Browser tabs and windows |
+| **Alerts** | On screen, when a machine goes away or comes back | On screen, by webhook and syslog |
+| **Updates** | Signed feed; Install and restart | In place, or by pip or Docker |
+| **Licence** | AGPL-3.0 | AGPL-3.0 |
+
+<sub>As of qKVM Desktop 0.1.1 and qKVM server 0.3. "Planned" has no date yet.</sub>
+
+## Why native C++, and not Electron?
+
+qKVM Desktop could have been the web app in a window. We chose not to, because a console is only as good as the
+moment the picture reaches your eyes and your keystroke reaches the machine. Electron is a fine choice for many
+programs; a console you sit at all day is not one of them. So there is nothing between the network and the screen
+but our own code and your graphics card.
+
+- **Video is the product.** One machine at 60 frames a second, every frame shown, decoded on the graphics card in
+  the same process that draws the window: 0.5 to 0.7 ms on average from a frame's arrival to the screen, at 1080p60
+  and at 4K60 ([SPEC.md](SPEC.md), section 9). A bundled browser engine would add its own video pipeline and
+  compositor in between.
+- **Keys a browser never gets.** The Windows key, Alt+Tab and the like belong to your PC in a browser. A native
+  program can take them for the machine you are working on, and hand them back with a leave key.
+- **Small and quiet.** One process. No bundled browser engine, no Node.js, no local web server. About 19 MB to
+  download. A wall of 64 previews at one picture a second took 0.33 % of a current desktop PC's processor.
+- **Fewer things to trust.** A short list of dependencies, each pinned: Qt 6.12 and FFmpeg (both LGPL), and
+  libdatachannel with Mbed TLS for WebRTC. Every download the build makes is checked by its SHA-256, and WebRTC is
+  built from pinned sources. Every line of qKVM's own code is written for this project.
+- **The same product, twice.** Not a wrapper: the desktop has the web page's look and words, drawn natively with Qt
+  Quick, and speaks to every device itself.
+
+<br>
+
+<div align="center">
+<picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/how-it-connects-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/how-it-connects-light.svg" width="100%" alt="How qKVM Desktop connects: one native Windows process, with its interface, video engine, device drivers and secrets, speaks directly to IP KVMs, server controllers and, if you have one, a qKVM server. No cloud, no relay, no local server."></picture>
+</div>
+
+## Get started in a minute
+
+1. **Download** the [setup](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe)
+   (or the ZIP) and start it.
+2. **Choose an app password.** It guards the passwords of your devices. Leave "Sign in automatically on this PC"
+   ticked only if the PC is yours alone.
+3. **Add your first KVM or server** by its address, or let qKVM find the devices on your network. Its screen
+   appears on the wall; open it to work on that machine.
+
+Already run a [qKVM server](https://github.com/qkvm/qkvm)? Sign the program in to it, and its wall appears beside
+your own.
 
 ## Download
 
@@ -36,6 +177,8 @@ copies of 0.1.0 take their update from. Both files, their `SHA256SUMS` and the r
 [release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1). At the first start
 the program asks for a password of its own.
 
+**This is a beta.** Try it first where a mistake costs little.
+
 Windows may say it protected your PC: neither file is signed with a certificate yet. Choose
 More info, then Run anyway.
 
@@ -47,7 +190,8 @@ Before you run the setup or unpack the ZIP, compare its SHA-256 with the line fo
     Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64-setup.exe -Algorithm SHA256
     Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64.zip -Algorithm SHA256
 
-If the two differ, do not run it.
+If the two differ, do not run it. `SHA256SUMS` itself is signed with the release key the program pins
+(`SHA256SUMS.sig`).
 
 ### Upgrade and uninstall
 
@@ -158,3 +302,8 @@ Every line here is written for this project: no code is copied from another proj
 its licence. The libraries the program ships with, and their licences:
 [THIRD-PARTY.md](THIRD-PARTY.md) and [licenses/](licenses/). Reports are welcome; pull requests
 are not taken.
+
+<div align="center">
+<br>
+<a href="https://qkvm.com"><b>qkvm.com</b></a> · <a href="https://github.com/qkvm/qkvm">qKVM server</a> · <a href="https://demo.qkvm.com">Live demo</a> · <a href="https://docs.qkvm.com">Documentation</a>
+</div>
