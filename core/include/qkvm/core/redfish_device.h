@@ -608,7 +608,8 @@ private:
     // left standing until a change of its can no longer come; a look that shows the override off.
     SetupOverrides& overrides() const;
     QDateTime wallAt(qint64 ms) const;
-    void noteMayBeSet(const std::shared_ptr<Setup>& setup);
+    // Whether the note is written down: the change goes out only where it is (outside review of 0.1.2, C6).
+    [[nodiscard]] bool noteMayBeSet(const std::shared_ptr<Setup>& setup);
     void settleTheNote(const std::shared_ptr<Setup>& setup);
     void lookedAtTheOverride(const QJsonObject& system);
     // This driver is let go of: each start into BIOS setup under way is over, its press told that the override may be

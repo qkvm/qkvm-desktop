@@ -116,9 +116,11 @@ public:
     bool readyForUpdate() const;
     // What keeps the program from closing for an update to be installed, in the person's words; empty where nothing
     // does. All that readyForUpdate waits for, and: a virtual media upload or change in any window, an action sent to a
-    // machine from any window and not answered yet (a start into BIOS setup among them), a start into BIOS setup of
-    // this PC's own servers under way or an override of one that may still be set (core::SetupOverrides: the program's
-    // end waits for its clearing), and a box with changes that are not saved (its window's "unsavedEdit", its title).
+    // machine from any window and not answered yet (a start into BIOS setup among them), a change of the BIOS setup
+    // boot override of one of this PC's own servers that may still come (core::SetupOverrides::changeMayStillCome: a
+    // press under way, by no clock, or a record whose doubt is not over; one whose doubt is over holds nothing, and
+    // stays), and a box with changes that are not saved (its window's "unsavedEdit", its title). Read anew at each
+    // call: Install and restart asks it at each press, and Setup's request at each answer.
     QString whatHoldsAnUpdate() const;
     void openIncident(const QString& scope, const QString& machine);
     void incidentUnavailable();

@@ -1,0 +1,34 @@
+{
+    "actions": [
+    ],
+    "certificates": {
+    },
+    "check_updates": true,
+    "favorites": [
+    ],
+    "graphics_card": "most-powerful",
+    "hardware_decoding": "automatic",
+    "kvms": [
+    ],
+    "last_update_check": "",
+    "own_wall": false,
+    "picture_every_ms": 0,
+    "picture_scales": [
+    ],
+    "reached_encrypted": [
+    ],
+    "recent_machines": [
+    ],
+    "release_key": "right-ctrl",
+    "server": "http://127.0.0.1:47392/",
+    "servers": [
+    ],
+    "settings_section": "",
+    "stay_in_tray": false,
+    "tell_news": true,
+    "theme": "",
+    "windows": [
+    ],
+    "workspaces": [
+    ]
+}

@@ -1,7 +1,10 @@
 #include "shell_start.h"
 
 #include <filesystem>
+#include <string>
 #include <vector>
+
+#include "setup_wait.h"
 
 #include <windows.h>
 
@@ -62,6 +65,19 @@ private:
     VARIANT m_value{};
 };
 
+// A token's user (its TOKEN_USER, whole); empty where it cannot be read.
+std::vector<unsigned char> userOf(HANDLE token)
+{
+    DWORD size = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<unsigned char> user(size);
+    if (size < sizeof(TOKEN_USER) || GetTokenInformation(token, TokenUser, user.data(), size, &size) == FALSE ||
+        IsValidSid(reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid) == FALSE) {
+        return {};
+    }
+    return user;
+}
+
 bool startThroughTheShell(const std::wstring& program, const std::wstring& folder)
 {
     Held<IShellWindows> windows;
@@ -93,6 +109,15 @@ bool startThroughTheShell(const std::wstring& program, const std::wstring& folde
         FAILED(application->QueryInterface(IID_IShellDispatch2, shell.asVoid()))) {
         return false;
     }
+    // The shell starts what it starts as its own user, at its own integrity: only one of the person's own, this
+    // install's (whoever runs this start, the user Setup ran as), and not above them (review C1). Another person's
+    // desktop, a shell started elevated, or one that cannot be told, starts nothing.
+    HWND shellWindow = nullptr;
+    DWORD shellProcess = 0;
+    if (FAILED(browser->GetWindow(&shellWindow)) || shellWindow == nullptr ||
+        GetWindowThreadProcessId(shellWindow, &shellProcess) == 0 || !processIsThePersons(shellProcess)) {
+        return false;
+    }
     const Text file(program);
     const Text arguments(L"");
     const Text where(folder);
@@ -104,6 +129,40 @@ bool startThroughTheShell(const std::wstring& program, const std::wstring& folde
 }
 
 } // namespace
+
+bool tokenIsThePersons(void* theirs, void* ours)
+{
+    const std::vector<unsigned char> their = userOf(theirs);
+    const std::vector<unsigned char> our = userOf(ours);
+    return !their.empty() && !our.empty() &&
+           EqualSid(reinterpret_cast<const TOKEN_USER*>(their.data())->User.Sid,
+                    reinterpret_cast<const TOKEN_USER*>(our.data())->User.Sid) != FALSE &&
+           !tokenRunsAboveThePerson(theirs);
+}
+
+bool processIsThePersons(unsigned long processId)
+{
+    if (processId == 0) {
+        return false;
+    }
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (process == nullptr) {
+        return false;
+    }
+    HANDLE theirs = nullptr;
+    HANDLE ours = nullptr;
+    const bool opened = OpenProcessToken(process, TOKEN_QUERY, &theirs) != FALSE &&
+                        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &ours) != FALSE;
+    CloseHandle(process);
+    const bool persons = opened && tokenIsThePersons(theirs, ours);
+    if (theirs != nullptr) {
+        CloseHandle(theirs);
+    }
+    if (ours != nullptr) {
+        CloseHandle(ours);
+    }
+    return persons;
+}
 
 bool startAnewThroughTheShell()
 {

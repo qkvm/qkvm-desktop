@@ -1,0 +1,19 @@
+{
+    "app_password": "made-up app password 4271",
+    "automatic": true,
+    "locked": true,
+    "made_by": {
+        "commit": "bbb093284016f4c8d289ce9ed581507fb43baa12",
+        "kind": "wall-screen",
+        "version": "0.1.0"
+    },
+    "now": "2026-11-14T12:00:00Z",
+    "now_ms": 1794657600000,
+    "server": {
+        "account": "Lobby screen",
+        "address": "http://127.0.0.1:47392/",
+        "display_key": "qkvm_Lb4Tz8Qw1Ex6Rv3Ym9Pa2Sd7Kf0Hg5Jc1Nb8Vt4Mq",
+        "port": 47392,
+        "session": "w3Xk9pL2mN7qR4tV8yB1cF6hJ0dG5sA2eU9iO3zK7nP"
+    }
+}

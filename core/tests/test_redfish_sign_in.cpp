@@ -652,11 +652,14 @@ private slots:
     void aSignInThatIsOutWhenItsDriverGoesIsCountedWhenItIsRefused()
     {
         // Refused after the driver went: nothing to give back, and the no is noted where every driver of the
-        // controller sees it, as the driver would have noted it.
+        // controller sees it, as the driver would have noted it. (Its hold as long as a real one, a minute: quick()'s
+        // 600 ms ran out before the driver made anew looked, where the test was held up that long on a loaded PC, gate
+        // 47, and it signed in again then, as it may once the hold is over.)
         RedfishByHand bmc;
         bmc.password = u"changed on the controller"_s;
         bmc.loginTakesMs = 600;
-        const RedfishDevice::Pace pace = quick();
+        RedfishDevice::Pace pace = quick();
+        pace.refusedHoldMs = 60'000;
         auto device = std::make_unique<RedfishDevice>(at(bmc), u"secret"_s, pace);
         device->identify([](const base::Result<RedfishDevice::Identity>&) {});
         QTRY_COMPARE(bmc.logins, 1);
@@ -667,7 +670,8 @@ private slots:
         QCOMPARE(pace.pacing->silent(mark), 0);
         QCOMPARE(pace.goodbyes->given(), 0);
         QCOMPARE(bmc.signedOut, 0);
-        QCOMPARE(bmc.stand->asked.size(), 2); // (the root asked first, and the sign-in)
+        QCOMPARE(bmc.stand->asked.size(), 2);       // (the root asked first, and the sign-in)
+        QVERIFY(pace.pacing->waitLeftMs(mark) > 0); // (the no stands as the driver made anew looks)
         RedfishDevice anew(at(bmc), u"secret"_s, pace);
         const auto what = identified(anew);
         QCOMPARE(codeOf(what), std::string("auth_failed"));

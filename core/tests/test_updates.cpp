@@ -1710,6 +1710,32 @@ private slots:
         QCOMPARE(desk.network.requests.size(), 2);
     }
 
+    // A hand-over to a version older than the one that starts is one a newer install has gone past since (that
+    // version's own setup, or a copy of the zip): let go of, and Setup's TEMP with it; nothing told, as of an update
+    // that did not install, and nothing looked for anew. (Dry run 3 of the VM step, an upgrade from 0.1.0 whose profile
+    // had handed over to 0.1.1: the start of 0.1.2 said in red that 0.1.1 was not installed, and looked for it again,
+    // 2026-11-15.)
+    void aHandOverToAnOlderVersionThanTheOneThatStartsIsLetGoOfUntold()
+    {
+        Desk desk(UpdateKind::Setup);
+        QVERIFY(desk.readyToRun());
+        QVERIFY(desk.updates.runSetup());
+        QVERIFY(!desk.whatSetupWrote().isEmpty());
+        QTRY_VERIFY(!desk.setupStillRuns());
+        QCOMPARE(desk.handOver()["to"_L1].toString(), u"0.2.0"_s);
+        const qsizetype asked = desk.network.requests.size();
+        // (The feed has an answer ready: a look would be seen among the requests.)
+        desk.network.next = {desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+        const Updates after(desk.channel(u"0.3.0"_s), desk.settings, desk.network,
+                            desk.folder.filePath(u"downloads"_s));
+        QCOMPARE(after.afterSetup(), QString());
+        QVERIFY(!after.afterSetupWentWrong());
+        QVERIFY(!QFileInfo::exists(desk.folder.filePath(u"data/updates/setup-handover.json"_s)));
+        QVERIFY(QDir(desk.folder.filePath(u"downloads"_s)).entryList({u"setup-temp-*"_s}, QDir::Dirs).isEmpty());
+        QTest::qWait(300);
+        QCOMPARE(desk.network.requests.size(), asked);
+    }
+
     void theStartAfterAFailedUpdateSaysWhereSetupsLogIsAndOffersItAgain()
     {
         Desk desk(UpdateKind::Setup);

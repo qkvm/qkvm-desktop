@@ -318,7 +318,9 @@ Everything here works with the server of today (section 6.1).
   among its hidden ones until whoever sits at the PC drags it out. The same mark is the
   window's own icon. One copy of the program runs at a time for whoever is signed in to
   Windows: started again, it brings the windows of the copy that runs to the front, out
-  of the notification area too, and ends. And while nobody can see the wall (every
+  of the notification area too, and ends. Where Windows does not let it see whether a copy
+  runs (one of another account in the same session, Run as different user), it says so in
+  plain words and ends, never taking itself for the only one. And while nobody can see the wall (every
   window is minimized, or out of sight behind the icon), Windows shows a message when a machine
   changes state or recovers, and when QKVM stops answering or answers again; a third box
   in the settings switches that off. Settings > Alerts and incidents records offline,
@@ -696,8 +698,11 @@ no administrator) updates itself in place. Such a copy reads its own feed, besid
 portable copies read, and takes only Setup's release. Settings > Updates offers "Install
 and restart" once that release is downloaded and verified: only when the person asks, and
 not while control, actions, file operations or virtual media are under way in any window, an
-action sent to a machine is unanswered, a server's start into BIOS setup is under way or its
-override may still be set, or a box holds changes that are not saved; it says which. The program
+action sent to a machine is unanswered, a server's start into BIOS setup is under way (a change
+of its override may still come, for as long as its doubt runs on a clock that nothing puts right,
+whatever the wall clock does meanwhile; a record left from before whose doubt is over by the wall
+clock, or reaches further than any press notes, holds nothing), or a
+box holds changes that are not saved; it says which. The program
 verifies the setup again, through a handle that lets nothing change, rename or remove it
 until the program ends, and starts it from that very file, which lies alone in a folder of
 the program's own update cache that only the person (and Windows' own administrators) may
@@ -706,7 +711,10 @@ The program then closes its windows and ends: its goodbyes to devices are given 
 and it ends within 9 seconds after them, and 50 seconds in any case; Setup waits for that,
 installs into the same folder, and starts qKVM again. The next start says "Updated to"
 the new version, or that the update was not installed, with the place of Setup's log, and
-offers it again; where Setup found qKVM still running, it says so. Setup unpacks itself in a
+offers it again; where Setup found qKVM still running, it says so. A hand-over to a version
+older than the one that starts is one a newer install has gone past since (that version's own
+setup, or a copy of the zip): it is let go of, with nothing said and nothing looked for.
+Setup unpacks itself in a
 folder of the program's cache that only the person may change, not in a shared Temp. While
 Setup is at work, qKVM started by hand ends at once, without a word or a window; only
 Setup's own start at its end waits for it to finish, and then starts qKVM anew as the person
@@ -1327,7 +1335,18 @@ devices:
   is told that it may be set. From the moment the change can go out the server is noted beside the settings as "may
   be set" (no secret in it), and let go of only where the override is seen off with nothing of the press's change
   still on its way; otherwise the next start tells it, as a notice and on the server's card, until a look shows the
-  override off.
+  override off. Where that note cannot be written (a full disk, a file that cannot be written), the change is not
+  sent: the press ends saying so, with nothing changed on the server. Where the controller only queues the change (a
+  202, the monitor of a task named, or a Task as its answer), the server's record is marked queued and written down at
+  once, at that answer, before anything else of the press (a program ended by force then leaves it marked); where the
+  change is not seen made, the press says that the controller queued it and that qKVM cannot follow it to its end, and
+  to look at the boot override in the server's BMC. No look and no time lets a record marked queued go: its card (and
+  the notice at each start) says "The controller queued a change qKVM could not follow; check the boot override in its
+  BMC" until one of two things: a later start into BIOS setup on that server ends as it should (its change seen made,
+  and the override seen off after it), or the server is taken off the wall, and the record goes with its card
+  (`SetupOverrides::markQueued`, `forget`). Install and restart is held as for any press, by the press's own doubt
+  alone; the record and its mark are carried across an update in their file. The real fix is the task monitor in
+  0.2.0: the task followed to its end, so that a queued change is seen made or seen dropped.
 * **A screen is watched by the pictures the wall gets anyway** (screen watches on this PC's own wall, the web's
   screens.py). A KVM may be watched for no signal, or for an unchanged screen, for 1 to 1440 minutes (its Change box).
   Nothing is asked of a KVM for it: the pictures its cards and views are handed are compared, one every 15 seconds at
@@ -1538,3 +1557,127 @@ JetKVMs by hand on this PC, and the web's aiortc fake; the owner's JetKVM comes 
 * No settings of the server, no accounts, no activity log, until after M4. (The wall as
   a file is the one thing of an admin's that is in it: section 4, M2.)
 * No sound, no virtual media, no file transfer: later, if ever.
+
+## 11. What the program stores, and the upgrade rule
+
+The owner, 2026-11-14: "the upgrade should be seamless: everything stays the same, the
+settings, preferences, username, password". So every place the program keeps something of
+a person's is listed here, with its format and the code that reads and writes it. Nothing
+else is kept. A name or format that is not here is not one the program may lose.
+
+### 11.1 The rule, from 0.1.0 on
+
+* **No clean cuts in user data.** The rule for unreleased work ("no legacy code in
+  development") ended with the first published version, 0.1.0. A change to any file, key,
+  credential name or record format below comes with a migration that is versioned (the
+  old version is read, and written in the new form only after it was read whole), and with
+  a fixture test from every published version (`ui/tests/fixtures/profiles/`, a person's
+  and a wall screen's profile of each version, with the Credential Manager records that
+  version's own Windows code made of its secrets; `test_ui_upgrade_continuity` and
+  `test_ui_credential_shapes`, which fail where a name, a format or a record's shape
+  changed without one; and the VM step `tools/test_upgrade_keeps_vm.ps1`, whose writer is
+  built at the version's own commit). A change to how the program keeps a credential (its
+  type, persistence, target name or the filter it lists by) is a format change too.
+* **A rename is a migration, never a drop.** A key, a credential name or a sibling file
+  that is to be called otherwise is read under its old name, written under the new, and
+  the old one is taken away only once the new one is written.
+* **Additions only, in settings.json.** A key that a version adds is new; one it no longer
+  needs is still read and written as it was until a migration takes it out. (An older
+  version that writes the file drops the keys it does not know, but for the KVMs of a
+  family it does not speak to, which it keeps as they stand: so going back to an older
+  version keeps what that version knew, and nothing more.)
+* **Every release adds its fixture.** Before a version is published, its own profile is
+  made by `qkvm-test-make-profile` built at the release's commit, and committed beside the
+  others (the fixtures' README says how).
+* **The app lock's recovery rule stays.** Secrets without a readable app-password record
+  go to "Reset saved secrets" (`ui/app_lock.cpp`): deleting the record must not open the
+  lock. So the record is the one thing an upgrade must never fail to read, and the fixtures
+  prove that it does not.
+* **A way back before anything is reset or changed** (from 0.1.2). At a start the version
+  that wrote the settings last is found: they say it from 0.1.2 on (`written_by`, which a
+  version before 0.1.2 drops when it writes them); where they say none, it is the version
+  recorded, if they were not written since it recorded them (their time), else one from
+  before 0.1.2. Where that is not this version (newer, older, or one run in between that
+  keeps no record), the settings are kept as they were found (`settings.json.<version>.bak`,
+  below) before anything of them is written, and only then is this version recorded. Where
+  that copy cannot be made, the person is told once, at that start, in plain words, and the
+  settings owe it (`Settings::owesACopy`): the Settings that writes them keeps it before it
+  writes anything of them, records this version once it is kept, and writes nothing while it
+  cannot be kept. So no writing marks the change of version done without its copy, and the
+  settings stay as the version before left them, which makes the next start owe it still
+  (settings that another program held while the start looked are copied once they are
+  free). Before "Reset saved secrets" erases
+  anything, the settings are kept as a copy of their own kind, and the box says what will be
+  erased, why (a profile made by a test build from before the app password existed is said
+  to be one; a record of a newer version is said to be one), and the very file the copy goes
+  to. Where that copy cannot be made, nothing is erased and it is said; chosen again, the
+  reset goes on (the settings themselves stay), so nobody is kept out of a reset for good.
+  Each kind keeps its newest three; a full count never keeps a copy from being made. A format
+  change that comes later keeps its copy first too. No secret goes into a copy: the settings
+  hold none.
+
+### 11.2 `%LOCALAPPDATA%\QKVM Desktop`
+
+Qt's `AppLocalDataLocation` for the application name "QKVM Desktop" (`ui/application.cpp`,
+`prepareApplication`: the internal name stays, only the displayed one is "qKVM"). The file
+names beside the settings are made from the settings' own (`core::Settings::usualFile()`,
+then `ui/main.cpp`). None of these holds a secret.
+
+| File | What it is, and its format | Read and written by |
+|---|---|---|
+| `settings.json` | One JSON object, no version field; from 0.1.2 `written_by`, the version that wrote it. `server` (the last server's address as `ServerClient` writes it, with its path), `servers` (those whose sign-in was kept), `favorites`, `recent_machines`, `picture_scales` (each `{scope, machine[, scale]}`, scope `pc` or `server-` and a SHA-256), `reached_encrypted` (host names), `certificates` (`"host:port": sha256 hex`), `theme`, `stay_in_tray`, `tell_news`, `release_key`, `hardware_decoding`, `graphics_card`, `check_updates`, `last_update_check` (ISO, UTC), `own_wall`, `picture_every_ms`, `settings_section`, `windows` (each `{source, place {x, y, width, height, maximized, full_screen}, group, order, columns, rotate}`), `workspaces` (each `{id, name, windows}`), `kvms` (each `{id, kind, name, address, user, group, known_by_certificate, certificate, asked, number, machine}`, and where set `no_signal_minutes`, `unchanged_minutes`, `certificate_pem`, `secret_kept`, `kept_beside_twin`, `followed_onto_https`, `held_for_twin`; a KVM of a family this build does not speak to is kept as it stands), `actions` (each `{id, name, kind, keys, enter, danger, changed, writing}`). Written whole, through a new file that takes the old one's place | `core/src/settings.cpp` (`readFrom`, `Settings::remember`), for `core/src/local_wall.cpp`, `own_actions.cpp`, `updates.cpp`, `ui/server_source.cpp`, `server_session.cpp`, `settings_view.cpp`, `look.cpp`, `wall_windows.cpp`, `workspaces_view.cpp`, `quick_access.cpp`, `wall_pace.cpp`; read also by `ui/app_lock.cpp` (a wall in it is a profile that was used) |
+| `settings.unreadable.json`, `settings.unreadable-N.json` (N up to 20) | A settings file that could not be read when the program started, moved aside before anything is written | `Settings::putAsideWhatCouldNotBeRead`; read by `ui/app_lock.cpp` as above |
+| `settings.json.sign-ins` | The wrong-password counts of every sign-in (a9). `{"version": 1, "nonce", "sealed"}`, the sealed part AES-256-GCM under the key `sign-in-pacing` (below) for "qkvm sign-in pacing 1", inside `{"kept": [{digest, road, address, user, noes, silent, until}]}` (`until` in milliseconds on the PC's clock). One that does not open is moved to `.unreadable` (`.unreadable-N`, N up to 10) | `core/src/pacing_file.cpp` |
+| `settings.json.locked` | The app lock's second record where Windows would not write the first: one line, `locked`, `screen`, `reset` or `setup` | `ui/app_lock.cpp` (`latch`, `unlatch`, `load`) |
+| `settings.json.incidents` | The alerts' history. `{"version": 1, "watches", "entries", "pauses"}`; one that cannot be read is kept as `.damaged-<uuid>` when it is repaired | `core/src/incidents.cpp`; read also by `ui/app_lock.cpp` (history is a profile that was used) |
+| `settings.json.setup-overrides` | The servers whose BIOS setup boot override may still be set. `{"version": 1, "servers": [{address, machine, since, doubtUntil, queued (true where the controller only queued a press's change, from 0.1.2)}]}` | `core/src/setup_overrides.cpp` |
+| `alert-pictures\` | The screen watches' pictures, `<kvm id>-<stamp>.jpg`, and their state, `screens.json` | `core/src/screen_watch.cpp` |
+| `updates\setup-<version>.log`, `updates\setup-handover.json` | A Setup's log, and the note of a hand-over to Setup that is told at the next start | `core/src/updates.cpp` |
+| `settings.json.version` (from 0.1.2) | The version that last started with this profile, the one before it, and the settings' time as that start left them: `{"version", "previous", "settings_time"}` (`previous` empty where none was recorded; `settings_time` in milliseconds since 1970, UTC) | `core/src/profile.cpp` (`recordStart`, `recorded`), at every start in `ui/main.cpp` before the settings are read |
+| `settings.json.<version>.bak`, `settings.json.before-<version>.bak`, `settings.json.reset-<version>.bak`, each also `-2` to `-999`, and past those by the time of the copy (from 0.1.2) | The way back, in two kinds kept apart, each to its newest three: the settings byte for byte as they were found at a start of another version (named by the version that wrote them; `before-` and the version that found them where that was one before 0.1.2), and as they were before a "Reset saved secrets" (`reset-` and the version that reset). Never written over; no secret is in them | `core/src/profile.cpp` (`keepCopy`), for `recordStart` and `ui/app_lock.cpp` (`resetSecrets`); read by `ui/app_lock.cpp` (a wall in one is a profile that was used) |
+
+### 11.3 `%LOCALAPPDATA%\qKVM\Cache`
+
+A cache: anything in it may go, and nothing of the person's is in it. A packaged copy has it
+under `%LOCALAPPDATA%\Packages\<family>\LocalCache\qKVM` instead (`ui/win/cache_paths.cpp`).
+`Downloads\` (`update-XXXXXX\` with a downloaded package, `setup-temp-XXXXXX\`, pruned after
+a week: `core/src/update_cache.cpp`, `updates.cpp`), `Helpers\` (`qkvm-setup-XXXXXX\`:
+`ui/installer_launcher.cpp`), `Installer\` (`setup.lock`, `history.json`:
+`ui/installer/main.cpp`), `Diagnostics\` (`video.jsonl` and `video.jsonl.1`:
+`core/src/video_diagnostics.cpp`; `{uuid}.crash.txt`: `ui/win/crash_report.cpp`). And the
+program's own Temp, `%LOCALAPPDATA%\Temp`, after a Setup started it (`ui/win/own_temp.cpp`).
+
+Qt's own caches, under the program's data folder (`QStandardPaths::CacheLocation`:
+`%LOCALAPPDATA%\QKVM Desktop\cache`), are caches as well, and hold nothing of a person's:
+`qmlcache\*.qmlc` is what Qt's QML engine compiles of QML that it reads from a file on disk,
+and this build reads none so (its own QML is compiled into the program by qmlcachegen, Qt's
+into Qt's plugins); `qtpipelinecache-<architecture>\qqpc_<backend>` is Qt Quick's automatic
+pipeline cache, on by Qt's default, which Qt 6.12 with Direct3D 11 left unwritten when it was
+looked for (2026-11-14, by Qt's own QML runtime and a scratch window: it saves only what it
+compiles while it runs, and Qt Quick's shaders come compiled). Either may appear with another
+Qt or backend; neither is read as anything of the person's, and either may go.
+
+### 11.4 Windows Credential Manager
+
+Generic credentials of this PC only (`CRED_PERSIST_LOCAL_MACHINE`), each named
+`QKVM Desktop: ` and the name below (`core/src/windows_secrets.cpp`); 2560 bytes at the
+most each.
+
+| Name | Record | Read and written by |
+|---|---|---|
+| `app password` | `00 'Q' 'K' 'V' 'M' 01`, the length of the JSON in 4 bytes (big-endian), the JSON (compact), then one or two zero bytes so that the whole is odd. JSON `{"v": 1, "salt" (16 bytes, base64), "verifier" (32 bytes of scrypt N=131072 r=8 p=1, base64), "automatic", "locked", "screen", "failures", "next", "last"}`; during a reset `{"v": 1, "reset": true}` | `ui/app_lock.cpp` (`recordBytes`, `readRecord`, `load`, `persist`) |
+| `app password established` | `1`: the app password was set once on this PC | `ui/app_lock.cpp` |
+| `sign-in-pacing` | 32 random bytes: the key `settings.json.sign-ins` is sealed under. Made at a first start before the lock looks; not a sign of a profile that was used | `core/src/pacing_file.cpp`; `ui/app_lock.cpp` lets it pass |
+| `kvm:<id>` | A KVM's password: `QKVM-KVM-2`, a line feed, its address (as written, `%`-encoded beyond letters, digits and `.-_:/[]`), a line feed, `none` or `sha256:` and the hex of its certificate's SHA-256, a line feed, then the password in UTF-8. Read only where the lines are the KVM's as it is now | `core/src/local_wall.cpp` (`savedFor`, `KeptAs`, `passwordIn`) |
+| `action:<id>:<a or b><part>` | A saved action's typed text, in parts of 2500 bytes: `QKVM-ACTION-1`, the action's id, `<writing mark> <part>/<parts>`, each line ended by a line feed, then the part's bytes. The settings name which writing is the action's (`writing`) | `core/src/own_actions.cpp` |
+| `session at <server address>` | The server's session (its `qkvm_session` cookie), where "Stay signed in" was ticked | `ui/server_source.cpp`; read also by `ui/server_session.cpp`; erased by `ui/wall_screen.cpp` |
+| `display link at <server address>` | A display link's key | `ui/server_source.cpp`; erased by `ui/wall_screen.cpp` |
+| `wall screen` | The servers this PC is a wall screen of, one address to a line | `ui/wall_screen.cpp` |
+
+### 11.5 Elsewhere
+
+* Starting with Windows: the value `QKVM Desktop` under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (the program's file in quotes), and
+  what Windows notes of it under `...\Explorer\StartupApproved\Run`; for a packaged copy the
+  startup task `qKVMStartup` (`core/src/windows_auto_start.cpp`). The setup installs into
+  the same folder on an upgrade, so the value still names the program.

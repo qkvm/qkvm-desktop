@@ -1597,9 +1597,12 @@ Status RedfishDevice::status() const
     if (const std::optional<base::Error> why = noScreen(); why && status.server) {
         status.server->noScreen = QString::fromStdString(why->message);
     }
-    // A start into BIOS setup that did not end may have left its override set: said until a look shows it off.
-    if (status.server && overrides().standing(m_where.address, m_machine)) {
-        status.server->setupLeft = SetupOverrides::onTheCard();
+    // A start into BIOS setup that did not end may have left its override set: said until a look shows it off (one the
+    // controller only queued: until a later start into BIOS setup ends as it should, D1).
+    if (status.server) {
+        if (const std::optional<SetupOverrides::Left> left = overrides().standing(m_where.address, m_machine)) {
+            status.server->setupLeft = SetupOverrides::onTheCard(left->queued);
+        }
     }
     if (m_lastOkAt) {
         const qint64 ago = std::clamp<qint64>(QDateTime::currentSecsSinceEpoch() - *m_lastOkAt, 0, 2'000'000'000);

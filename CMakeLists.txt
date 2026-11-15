@@ -17,7 +17,7 @@ endif()
 # it, and a crash in one can still be read.
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
 
-project(QkvmDesktop VERSION 0.1.1 LANGUAGES CXX)
+project(QkvmDesktop VERSION 0.1.2 LANGUAGES CXX)
 
 if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "QKVM Desktop is built for Windows x64 with Microsoft's compiler, and for nothing else yet.")
@@ -133,6 +133,15 @@ add_test(NAME test_review_guards
         -BuildDir "${CMAKE_BINARY_DIR}" -Config "$<CONFIG>" -Ctest "${CMAKE_CTEST_COMMAND}")
 set_tests_properties(test_review_guards PROPERTIES TIMEOUT 60)
 qkvm_test_runs(test_review_guards NOTHING) # (PowerShell's)
+
+# The VM script's helpers, as a VM runs them: in Windows PowerShell 5.1 under strict mode, on none, one and several of
+# what each finds, and the titles its steps expect (tools/test_vm_scripts.ps1). Nothing of its guard or steps runs.
+find_program(QKVM_WINDOWS_POWERSHELL NAMES powershell REQUIRED)
+add_test(NAME test_vm_scripts
+    COMMAND "${QKVM_WINDOWS_POWERSHELL}" -NoProfile -ExecutionPolicy Bypass -File
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_vm_scripts.ps1")
+set_tests_properties(test_vm_scripts PROPERTIES TIMEOUT 120)
+qkvm_test_runs(test_vm_scripts NOTHING) # (Windows PowerShell's)
 
 # Approved C++ receiver, built from the pinned sources by tools/fetch_webrtc.ps1.
 # Only its C ABI crosses the DLL boundary, including in debug and sanitizer builds.

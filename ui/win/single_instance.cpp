@@ -3,6 +3,7 @@
 #include <string>
 
 #include <QByteArray>
+#include <QCoreApplication>
 
 // Windows' own header.
 #include <windows.h>
@@ -29,8 +30,16 @@ SingleInstance::SingleInstance(const QString& name, QObject* parent) : QObject(p
     // have their own copy.
     const std::wstring mutex = (u"Local\\"_s + name).toStdWString();
     m_mutex = CreateMutexW(nullptr, FALSE, mutex.c_str());
-    // Where Windows makes none at all, the program runs as if it were alone: better twice than not.
-    m_first = m_mutex == nullptr || GetLastError() != ERROR_ALREADY_EXISTS;
+    const DWORD said = GetLastError();
+    // Where Windows makes none, and lets this copy at none (another account's in this session lets
+    // nobody else at it), nothing is known of the others: never the first, which would let two copies
+    // write one profile. Neither listened nor told; the program ends, saying why.
+    if (m_mutex == nullptr) {
+        m_cannotTell = true;
+        m_error = said;
+        return;
+    }
+    m_first = said != ERROR_ALREADY_EXISTS;
 
     // A pipe's name is the whole PC's: the session's number makes it this session's.
     DWORD session = 0;
@@ -41,6 +50,19 @@ SingleInstance::SingleInstance(const QString& name, QObject* parent) : QObject(p
     } else {
         tellTheFirst(pipe);
     }
+}
+
+QString SingleInstance::whyNot() const
+{
+    if (!m_cannotTell) {
+        return {};
+    }
+    return QCoreApplication::translate("SingleInstance",
+                                       "qKVM cannot start: Windows did not let it see whether qKVM is running already "
+                                       "in this Windows session (error %1). qKVM may be running here for another "
+                                       "Windows account (Run as different user). Quit it there, then start qKVM "
+                                       "again.")
+        .arg(m_error);
 }
 
 SingleInstance::~SingleInstance()

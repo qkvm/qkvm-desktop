@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <string>
 #include <utility>
 
 #include <QCryptographicHash>
@@ -13,6 +14,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimeZone>
 
 #include <qkvm/core/exchange.h>
 #include <qkvm/core/server_client.h>
@@ -31,6 +33,7 @@
 #include "own_wall.h"
 
 #include "pretend_tray.h"
+#include "program_end.h"
 #include "server_session.h"
 #include "session_view.h"
 #include "stand_in.h"
@@ -38,6 +41,11 @@
 #include "wall_pace.h"
 #include "wall_view.h"
 #include "wall_windows.h"
+#include "win/hand_over_end.h"
+#include "win/quit_requests.h"
+
+// Windows' own header.
+#include <windows.h>
 
 using namespace Qt::StringLiterals;
 using namespace qkvm;
@@ -90,6 +98,85 @@ class AskingWindow : public QQuickWindow {
 
 signals:
     void windowAsked();
+};
+
+// The program's own record of servers whose BIOS setup boot override may be set (core::SetupOverrides::program()),
+// kept for as long as this lives in a file of the test's and on a wall clock of the test's, `at`; and left as it was
+// found: empty, in memory alone, on the real clock.
+struct ProgramOverrides {
+    ProgramOverrides(const QTemporaryDir& folder, const QDateTime& at)
+        : file(folder.filePath(u"settings.json.setup-overrides"_s))
+    {
+        core::SetupOverrides::program().useWallClock([&at] { return at.toUTC(); });
+        // (And the clock nothing puts right, on which a doubt noted in this run is measured: time passes on both
+        // alike.)
+        core::SetupOverrides::program().useSteadyClock([&at] { return at.toMSecsSinceEpoch(); });
+        core::SetupOverrides::program().keepIn(file);
+    }
+    ~ProgramOverrides()
+    {
+        core::SetupOverrides& kept = core::SetupOverrides::program();
+        for (const core::SetupOverrides::Left& one : kept.all()) {
+            kept.forget(QUrl(one.address), one.machine);
+        }
+        kept.keepIn(QString());
+        kept.useWallClock({});
+        kept.useSteadyClock({});
+    }
+    ProgramOverrides(const ProgramOverrides&) = delete;
+    ProgramOverrides& operator=(const ProgramOverrides&) = delete;
+    ProgramOverrides(ProgramOverrides&&) = delete;
+    ProgramOverrides& operator=(ProgramOverrides&&) = delete;
+
+    // What the file holds now.
+    QByteArray bytes() const
+    {
+        QFile read(file);
+        return read.open(QIODevice::ReadOnly) ? read.readAll() : QByteArray();
+    }
+
+    QString file;
+};
+
+// qKVM's Setup asking the program to close (ui/win/quit_requests.h), played as tests/test_quit_requests.cpp plays it,
+// under names of the test's own (never the contract's): its mutex held, its request standing while it waits, the
+// request's event set with the one right of setting it.
+struct SetupAsks {
+    explicit SetupAsks(const QString& tag)
+    {
+        const QString of = u"%1 %2"_s.arg(QCoreApplication::applicationPid()).arg(tag);
+        names = {u"Local\\qKVM-Desktop-Quit test "_s + of, u"qKVM Desktop quit answer test "_s + of,
+                 u"Local\\qKVM-Desktop-Quit-Wanted test "_s + of, u"Local\\qKVM-Desktop-Setup test "_s + of};
+        const std::wstring setup = names.setup.toStdWString();
+        const std::wstring wanted = names.wanted.toStdWString();
+        runs = CreateMutexW(nullptr, FALSE, setup.c_str());
+        // (Setup's request stands from here on: its ticket made and set once, as the setup does, review R1.)
+        stands = CreateEventW(nullptr, FALSE, TRUE, wanted.c_str());
+    }
+    ~SetupAsks()
+    {
+        CloseHandle(stands);
+        CloseHandle(runs);
+    }
+    SetupAsks(const SetupAsks&) = delete;
+    SetupAsks& operator=(const SetupAsks&) = delete;
+    SetupAsks(SetupAsks&&) = delete;
+    SetupAsks& operator=(SetupAsks&&) = delete;
+
+    bool ask() const
+    {
+        const std::wstring event = names.event.toStdWString();
+        const HANDLE asked = OpenEventW(EVENT_MODIFY_STATE, FALSE, event.c_str());
+        const bool set = asked != nullptr && SetEvent(asked) != FALSE;
+        if (asked != nullptr) {
+            CloseHandle(asked);
+        }
+        return set;
+    }
+
+    ui::QuitNames names;
+    HANDLE runs = nullptr;
+    HANDLE stands = nullptr;
 };
 
 // What the keeper of the windows is given, for one test: settings in a file of the test's, an icon
@@ -602,11 +689,12 @@ private slots:
                  u"An action sent to a machine has not been answered yet. Wait for its answer before installing."_s);
         QTRY_COMPARE_WITH_TIMEOUT(desk.windows.whatHoldsAnUpdate(), QString(), 10000);
 
-        // This PC's own server starting into BIOS setup, or its override that may still be set.
+        // This PC's own server starting into BIOS setup: a change of its override may still come.
         const QUrl controller(u"https://192.168.1.61"_s);
         static_cast<void>(core::SetupOverrides::program().mayBeSet(controller, QString(),
                                                                    QDateTime::currentDateTimeUtc().addSecs(60)));
-        QVERIFY(desk.windows.whatHoldsAnUpdate().startsWith(u"A start into BIOS setup is under way"_s));
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(),
+                 u"A start into BIOS setup of a server is under way. Install once it has ended."_s);
         core::SetupOverrides::program().drop(controller, QString());
         QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
 
@@ -629,6 +717,132 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!media.busy(), 10000);
         QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
         media.letGo();
+    }
+
+    // B12, on 0.1.0's own profile: a record left from a start into BIOS setup whose doubt was long over, of a server on
+    // a card that never answers, held Install and restart, and so Setup's request to close, for good. Nothing of such a
+    // record can come any more: it holds nothing. Install and restart goes on, Setup's request ends the program as
+    // where nothing holds it, and the record is through the hand-over byte for byte what it was (it is told on its card
+    // and at the next start, as before).
+    void anOverrideWhoseDoubtIsOverHoldsNoUpdate()
+    {
+        const QTemporaryDir folder;
+        Desk desk(fileWith(folder, {}));
+        desk.own = std::make_unique<ui::OwnWall>(desk.settings, desk.secrets, quick());
+        desk.session.useOwnWall(desk.own->wall());
+        // A server on a card, at a port of this PC's own address where nothing answers.
+        core::OwnKvm server;
+        server.address = u"https://127.0.0.1:9"_s;
+        server.name = u"Storage server"_s;
+        server.kind = u"redfish"_s;
+        QVERIFY(desk.own->wall().add(server, u"secret"_s).ok());
+        QVERIFY(desk.windows.openAll());
+        const QDateTime at(QDate(2026, 11, 14), QTime(13, 0), QTimeZone(QTimeZone::UTC));
+        const ProgramOverrides kept(folder, at);
+        // Its doubt over at 12:02, as B12 found it.
+        static_cast<void>(
+            core::SetupOverrides::program().mayBeSet(QUrl(server.address), QString(), at.addSecs(qint64{-58} * 60)));
+        const QByteArray before = kept.bytes();
+        QVERIFY(!before.isEmpty());
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
+        // Setup's request to close: the program ends, the hand-over's goodbyes included.
+        const SetupAsks setup(u"over-on-a-card"_s);
+        ui::HandOverEnd handOver(ui::HandOverPace{}, [] {});
+        int ended = 0;
+        const ui::QuitRequests requests(
+            setup.names, [&desk] { return desk.windows.whatHoldsAnUpdate(); },
+            [&] {
+                ++ended;
+                handOver.begin();
+                desk.windows.end();
+                ui::endTheProgram(*desk.own, handOver);
+            });
+        QVERIFY(requests.listens());
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(ended, 1);
+        handOver.cancel();
+        QCOMPARE(requests.answer(), u"1"_s);
+        QCOMPARE(kept.bytes(), before);
+        QCOMPARE(core::SetupOverrides::program().all().size(), 1);
+    }
+
+    // The same of a server that is on no card (taken off the wall since): its record holds nothing either.
+    void anOverrideWhoseDoubtIsOverOfAServerOnNoCardHoldsNoUpdate()
+    {
+        const QTemporaryDir folder;
+        Desk desk(fileWith(folder, {}));
+        QVERIFY(desk.windows.openAll());
+        const QDateTime at(QDate(2026, 11, 14), QTime(13, 0), QTimeZone(QTimeZone::UTC));
+        const ProgramOverrides kept(folder, at);
+        static_cast<void>(
+            core::SetupOverrides::program().mayBeSet(QUrl(u"https://127.0.0.1:8"_s), QString(), at.addSecs(-60)));
+        const QByteArray before = kept.bytes();
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
+        const SetupAsks setup(u"over-on-no-card"_s);
+        int ended = 0;
+        const ui::QuitRequests requests(
+            setup.names, [&desk] { return desk.windows.whatHoldsAnUpdate(); }, [&ended] { ++ended; });
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(ended, 1);
+        QCOMPARE(kept.bytes(), before);
+    }
+
+    // A record still in doubt (a change of the override may still come) holds both, in plain words; once its doubt is
+    // over, on the wall clock the records keep, the hold lifts by itself: what holds it is read anew at each press and
+    // at each answer, with no restart and no timer.
+    void anOverrideStillInDoubtHoldsUntilItsDoubtIsOver()
+    {
+        const QTemporaryDir folder;
+        Desk desk(fileWith(folder, {}));
+        QVERIFY(desk.windows.openAll());
+        QDateTime at(QDate(2026, 11, 14), QTime(13, 0), QTimeZone(QTimeZone::UTC));
+        const ProgramOverrides kept(folder, at);
+        static_cast<void>(
+            core::SetupOverrides::program().mayBeSet(QUrl(u"https://127.0.0.1:7"_s), QString(), at.addSecs(60)));
+        const QString held = u"A start into BIOS setup of a server is under way. Install once it has ended."_s;
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), held);
+        const SetupAsks setup(u"in-doubt"_s);
+        int ended = 0;
+        const ui::QuitRequests requests(
+            setup.names, [&desk] { return desk.windows.whatHoldsAnUpdate(); }, [&ended] { ++ended; });
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(requests.answer(), u"1 "_s + held);
+        QCOMPARE(ended, 0);
+        // A second before its doubt is over, still; a second after, no more.
+        at = at.addSecs(59);
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), held);
+        at = at.addSecs(2);
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(ended, 1);
+        QCOMPARE(core::SetupOverrides::program().all().size(), 1);
+    }
+
+    // Review 012-hold's LOW 1: a press whose window let go of it runs on in its driver, and it holds both until it is
+    // settled, whatever the wall clock says of the doubt it noted; then the hold lifts by itself.
+    void aPressUnderWayHoldsWhateverItsDoubtSays()
+    {
+        const QTemporaryDir folder;
+        Desk desk(fileWith(folder, {}));
+        QVERIFY(desk.windows.openAll());
+        const QDateTime at(QDate(2026, 11, 14), QTime(13, 0), QTimeZone(QTimeZone::UTC));
+        const ProgramOverrides kept(folder, at);
+        static_cast<void>(
+            core::SetupOverrides::program().mayBeSet(QUrl(u"https://127.0.0.1:6"_s), QString(), at.addSecs(-60)));
+        std::shared_ptr<void> press = core::SetupOverrides::program().pressUnderWay();
+        const QString held = u"A start into BIOS setup of a server is under way. Install once it has ended."_s;
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), held);
+        const SetupAsks setup(u"press-under-way"_s);
+        int ended = 0;
+        const ui::QuitRequests requests(
+            setup.names, [&desk] { return desk.windows.whatHoldsAnUpdate(); }, [&ended] { ++ended; });
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(requests.answer(), u"1 "_s + held);
+        QCOMPARE(ended, 0);
+        press.reset();
+        QCOMPARE(desk.windows.whatHoldsAnUpdate(), QString());
+        QVERIFY(setup.ask());
+        QTRY_COMPARE(ended, 1);
     }
 
     void initTestCase()

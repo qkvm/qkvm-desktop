@@ -80,6 +80,9 @@ public:
     bool passAsCookie = false; // as the other maker hands it over
     int signInStatus = 200;
     int signInAfterMs = 0; // its sign-ins are answered only after this long, a yes and a no alike
+    // Told of every sign-in as it comes, before it is answered (and before signInAfterMs begins): for a test that does
+    // something while one is out, whatever holds the test up meanwhile.
+    std::function<void()> whenSignedInTo;
     bool signal = true;
     int width = 1920;
     int height = 1080;
@@ -199,6 +202,9 @@ private:
         }
         if (path == "/api/auth/login") {
             ++signIns;
+            if (whenSignedInTo) {
+                whenSignedInTo();
+            }
             Answered said = signIn(asked);
             said.afterMs = std::max(said.afterMs, signInAfterMs);
             return said;

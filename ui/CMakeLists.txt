@@ -82,6 +82,7 @@ qt_add_qml_module(qkvm_ui
         win/file_dialogs.h win/file_dialogs.cpp
         win/keyboard_hook.h win/keyboard_hook.cpp
         win/pointer_capture.h win/pointer_capture.cpp
+        win/quit_requests.h win/quit_requests.cpp
         win/show_file.h win/show_file.cpp
         win/single_instance.h win/single_instance.cpp
         win/tray.cpp
@@ -290,6 +291,8 @@ qkvm_add_test(test_ui_notices SOURCES tests/test_notices.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_pc_source SOURCES tests/test_pc_source.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 qkvm_add_test(test_ui_server_source SOURCES tests/test_server_source.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 qkvm_add_test(test_ui_single_instance SOURCES tests/test_single_instance.cpp LIBRARIES qkvm_ui)
+# Setup's request to end an installed copy, under names of the test's own.
+qkvm_add_test(test_ui_quit_requests SOURCES tests/test_quit_requests.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_tray_keeper SOURCES tests/test_tray_keeper.cpp LIBRARIES qkvm_ui qkvm_ui_pretend)
 qkvm_add_test(test_ui_wall SOURCES tests/test_wall.cpp LIBRARIES qkvm_ui qkvm_ui_pretend)
 qkvm_add_test(test_ui_wall_news SOURCES tests/test_wall_news.cpp LIBRARIES qkvm_ui)
@@ -364,6 +367,49 @@ qkvm_add_test(test_ui_own_screen_alerts SOURCES tests/test_own_screen_alerts.cpp
 qkvm_add_test(test_ui_quick_access SOURCES tests/test_quick_access.cpp
     LIBRARIES qkvm_ui qkvm_core_stand_in qkvm_ui_pretend)
 
+# A whole profile as a person makes one, by this build's own code, with its secrets in memory and its one server a
+# stand-in on this PC's own address: what made the upgrade fixtures of each published version, built at that version
+# (tests/fixtures/profiles/README.md). For tests only; never in a package.
+qt_add_executable(qkvm-test-make-profile tests/profile_maker.cpp)
+target_link_libraries(qkvm-test-make-profile PRIVATE qkvm_build qkvm_test_quiet qkvm_ui qkvm_core_stand_in Qt6::Test)
+target_compile_definitions(qkvm-test-make-profile PRIVATE QKVM_DESKTOP_VERSION="${PROJECT_VERSION}"
+    QKVM_EXPORT_EXAMPLES="${CMAKE_SOURCE_DIR}/core/tests/data/export")
+# What a version's own Windows code makes of each secret of a fixture (review 012, M3): its windows_secrets.cpp
+# compiled against a Credential Manager in memory; built at each fixture's commit as the maker is. For tests only.
+qt_add_executable(qkvm-test-credential-shape tests/credential_shape.cpp tests/credential_capture.h
+    tests/windows_secrets_in_memory.h)
+target_link_libraries(qkvm-test-credential-shape PRIVATE qkvm_build qkvm_test_quiet qkvm_core)
+# The VM step's writer: a fixture into the Credential Manager and profile folder of a throwaway VM's user, by the
+# fixture's own version's Windows code (built at its commit). It refuses on any machine not made for it. For tests only.
+qt_add_executable(qkvm-test-write-profile tests/profile_writer.cpp tests/profile_writing.h tests/disposable_machine.h)
+target_link_libraries(qkvm-test-write-profile PRIVATE qkvm_build qkvm_test_quiet qkvm_core shell32 ole32)
+# What this build's Windows code finds of the records each published version's own wrote (credentials.json of each
+# fixture): their names, their type, their bytes; and that it writes them in the same shape.
+qkvm_add_test(test_ui_credential_shapes SOURCES tests/test_credential_shapes.cpp tests/credential_capture.h
+    tests/windows_secrets_in_memory.h LIBRARIES qkvm_core)
+target_compile_definitions(test_ui_credential_shapes PRIVATE
+    QKVM_PROFILE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/profiles")
+# Everything each published version kept, read by this build as the person left it (SPEC.md section 11): its own
+# profile, made by that version's code, from a scratch folder and a store in memory; and its one server a stand-in at
+# the port the fixture names, on this PC's own address. Each version's app password is derived once (scrypt).
+qkvm_add_test(test_ui_upgrade_continuity SOURCES tests/test_upgrade_continuity.cpp
+    LIBRARIES qkvm_ui qkvm_core_stand_in TIMEOUT 300)
+target_compile_definitions(test_ui_upgrade_continuity PRIVATE
+    QKVM_PROFILE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/profiles")
+# The VM step "upgrade keeps everything" (tools/test_upgrade_keeps_vm.ps1), its check: what an upgrade made of a
+# published version's profile (put in place by that version's writer above) read back as this build reads it, and
+# compared with the fixture. For a throwaway virtual machine only (it refuses anywhere else); a test program, never in
+# a package.
+qt_add_executable(qkvm-test-check-profile tests/profile_checker.cpp tests/profile_loading.h tests/profile_writing.h
+    tests/disposable_machine.h)
+target_link_libraries(qkvm-test-check-profile PRIVATE qkvm_build qkvm_test_quiet qkvm_core shell32 ole32)
+target_compile_definitions(qkvm-test-check-profile PRIVATE QKVM_DESKTOP_VERSION="${PROJECT_VERSION}")
+# Its own test: into a store in memory and a scratch folder; the program itself is started only to be seen to refuse.
+qkvm_add_test(test_ui_profile_loading SOURCES tests/test_profile_loading.cpp tests/profile_loading.h tests/profile_writing.h
+    tests/disposable_machine.h LIBRARIES qkvm_core qkvm_core_stand_in shell32 ole32)
+target_compile_definitions(test_ui_profile_loading PRIVATE
+    QKVM_PROFILE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/profiles")
+add_dependencies(test_ui_profile_loading qkvm-test-check-profile qkvm-test-write-profile)
 qkvm_add_test(test_ui_shared_live SOURCES tests/test_shared_live.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_fixture_phase SOURCES tests/test_fixture_phase.cpp tests/fixture_phase.h LIBRARIES Qt6::Core)
 qkvm_add_test(test_ui_details_view SOURCES tests/test_details_view.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)

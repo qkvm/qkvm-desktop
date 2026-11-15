@@ -804,23 +804,32 @@ private slots:
     {
         // (The pacing's second reading, M2.) The wall's driver has the wrong password out; a person types the same one
         // in the Edit box and saves (tryAfresh): the box's sign-in waits for the one that is out, and its no is the
-        // box's no too. One strike, not two.
+        // box's no too. One strike, not two. (Typed as the wall's sign-in reaches the KVM, and so while it is out,
+        // whatever holds the test up: typed a moment after it was seen, gate 47 had the test held up past the KVM's no,
+        // and the box's sign-in was a password typed after a no, tried as for the first time, as it is to be.)
         MadeUpKvm kvm;
         kvm.password = u"changed on the KVM"_s;
         kvm.signInAfterMs = 1500;
         KvmdDevice::Pace pace = quick();
         pace.pacing = std::make_shared<core::SignInPacing>();
         KvmdDevice wall(kvm.where(), u"secret"_s, pace);
+        KvmdDevice box(kvm.where(), u"secret"_s, pace);
         QList<std::string> codes;
         const auto keep = [&codes](const base::Result<KvmdDevice::Identity>& said) {
             codes.append(said.ok() ? std::string("ok") : said.error().code);
         };
+        bool typed = false;
+        kvm.whenSignedInTo = [&typed, &kvm, &pace, &box, &keep] {
+            if (!typed) {
+                typed = true;
+                KvmdDevice::tryAfresh(kvm.where(), u"secret"_s, pace);
+                box.identify(keep);
+            }
+        };
         wall.identify(keep);
-        QTRY_COMPARE(kvm.signIns, 1);
-        KvmdDevice::tryAfresh(kvm.where(), u"secret"_s, pace);
-        KvmdDevice box(kvm.where(), u"secret"_s, pace);
-        box.identify(keep);
         QTRY_COMPARE_WITH_TIMEOUT(codes.size(), 2, 10000);
+        kvm.whenSignedInTo = {};
+        QVERIFY(typed);
         QCOMPARE(kvm.signIns, 1);
         QCOMPARE(codes, (QList<std::string>{"auth_failed", "auth_failed"}));
     }

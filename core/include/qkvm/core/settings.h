@@ -6,6 +6,7 @@
 #include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QList>
 #include <QSet>
 #include <QString>
@@ -356,6 +357,18 @@ public:
     base::Result<void> writeDown();
     // Whether something is remembered that the file does not say yet.
     bool hasUnwritten() const { return m_unwritten; }
+    // The settings are owed a copy, under `name` (profile::keepCopy, VersionChange): the start of another version
+    // could not keep it (profile::afterRecording). Before anything is written, it is kept, and the version then
+    // recorded (profile::recordVersion); only then are the settings written. While it cannot be kept, nothing is
+    // written, and each writing says why: what is remembered changes, the settings stay as the version before left
+    // them, and so the next start owes the copy still. This is the instance that writes, and it asks again at each
+    // writing: settings that another program held a moment at the start are copied once they are free (outside review
+    // of 0.1.2, C2 and C9).
+    void owesACopy(const QString& name);
+    QString owedCopy() const { return m_owedCopy; }
+    // The file as remember() writes it for `what`, by the program whose version QCoreApplication says ("written_by",
+    // where it says one a profile records: profile::namesAVersion).
+    static QJsonObject documentOf(const Remembered& what);
     // How often the file was written since this was made: for whoever has to know that many
     // notes were one writing (a test among them).
     quint64 writings() const { return m_writings; }
@@ -370,6 +383,7 @@ private:
     // The file that could not be read is still where it was, and in the way of what is written.
     bool m_inTheWay = false;
     QString m_putAside;
+    QString m_owedCopy;
 };
 
 // One window's own part of what is remembered. Which of the windows it is, counted from 0 in the

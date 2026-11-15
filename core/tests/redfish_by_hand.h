@@ -161,6 +161,9 @@ public:
     QString bootTarget = QStringLiteral("None");
     int bootStatus = 0;
     bool bootNotKept = false;
+    // A change of it answered with this, and not kept (a task the controller only queued: a 200 with a Task body and
+    // its monitor's Location, say).
+    std::optional<Answered> bootQueuedAs;
     int bootTakesMs = 0;
     int clearStatus = 0;
     // ...a clearing made and answered with this in place of 204 (200: with no body, as some controllers do); and, where
@@ -648,6 +651,11 @@ private:
                     Answered accepted{202, {}};
                     accepted.afterMs = bootTakesMs;
                     return accepted;
+                }
+                if (bootQueuedAs && !clearing) {
+                    Answered queued = *bootQueuedAs;
+                    queued.afterMs = bootTakesMs;
+                    return queued;
                 }
                 if (boot.contains(QStringLiteral("BootSourceOverrideEnabled"))) {
                     bootEnabled = boot.value(QStringLiteral("BootSourceOverrideEnabled")).toString();

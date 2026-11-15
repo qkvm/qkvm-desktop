@@ -18,6 +18,7 @@
 #include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/redfish_device.h>
+#include <qkvm/core/setup_overrides.h>
 #include <qkvm/core/tls.h>
 #include <qkvm/core/wiped.h>
 
@@ -1470,6 +1471,8 @@ base::Result<void> LocalWall::remove(QString id)
     }
     const QString name = calledInASentence(*kvm);
     const QUrl address(kvm->address);
+    const bool aServer = kvm->kind == "redfish"_L1;
+    const QString machine = kvm->machine;
     QList<OwnKvm> without = kvms();
     without.removeIf([&id](const OwnKvm& known) { return known.id == id; });
     // (And the certificate itself that was kept beside it goes with it, and so does the mark that
@@ -1490,8 +1493,12 @@ base::Result<void> LocalWall::remove(QString id)
     const auto gone = std::ranges::find_if(m_held, [&id](const Held& one) { return one.id == id; });
     letGo(*gone, unknown());
     m_held.erase(gone);
-    // (And what its screen watches knew of it, and its picture.)
+    // (And what its screen watches knew of it, and its picture; and, a server's, what stood for it of a start into BIOS
+    // setup that may have left its override set, one the controller only queued too: it goes with its card, D1.)
     m_screens.forget(id);
+    if (aServer) {
+        (m_paces.redfish.overrides ? *m_paces.redfish.overrides : SetupOverrides::program()).forget(address, machine);
+    }
     emit changed();
     return {};
 }

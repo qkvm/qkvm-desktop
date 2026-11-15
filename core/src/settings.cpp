@@ -5,6 +5,7 @@
 #include <qkvm/core/exchange.h>
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/own_actions.h>
+#include <qkvm/core/profile.h>
 #include <qkvm/core/server_client.h>
 #include <qkvm/core/server_types.h>
 
@@ -15,6 +16,7 @@
 #include <optional>
 #include <utility>
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -581,6 +583,11 @@ QString Settings::usualFile()
     return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath(u"settings.json"_s);
 }
 
+void Settings::owesACopy(const QString& name)
+{
+    m_owedCopy = name;
+}
+
 void Settings::note(const Remembered& what)
 {
     m_remembered = what;
@@ -597,12 +604,8 @@ base::Result<void> Settings::writeDown()
     return remember(asItIs);
 }
 
-base::Result<void> Settings::remember(const Remembered& what)
+QJsonObject Settings::documentOf(const Remembered& what)
 {
-    m_remembered = what;
-    // Until the file says it: a writing that fails leaves it unwritten, and the next one, or
-    // writeDown(), brings it.
-    m_unwritten = true;
     QJsonObject certificates;
     for (auto known = what.certificates.begin(); known != what.certificates.end(); ++known) {
         certificates.insert(known.key(), QString::fromLatin1(known.value().toHex()));
@@ -694,6 +697,35 @@ base::Result<void> Settings::remember(const Remembered& what)
         actions.append(written(action));
     }
     said.insert(u"actions"_s, actions);
+    // Which version wrote them, from 0.1.2 on (a version before drops it when it writes them: profile::recordStart).
+    if (const QString version = QCoreApplication::applicationVersion(); profile::namesAVersion(version)) {
+        said.insert(u"written_by"_s, version);
+    }
+    return said;
+}
+
+base::Result<void> Settings::remember(const Remembered& what)
+{
+    m_remembered = what;
+    // Until the file says it: a writing that fails leaves it unwritten, and the next one, or
+    // writeDown(), brings it.
+    m_unwritten = true;
+    // The copy owed first, and the version recorded once it is kept; nothing written while it is not.
+    if (!m_owedCopy.isEmpty()) {
+        const base::Result<QString> kept = profile::keepCopy(m_file, profile::CopyKind::VersionChange, m_owedCopy);
+        if (!kept) {
+            return base::Error{"settings", "The settings are not written until a copy of them is kept, and it could "
+                                           "not be: " +
+                                               kept.error().message};
+        }
+        m_owedCopy.clear();
+        if (const QString version = QCoreApplication::applicationVersion(); profile::namesAVersion(version)) {
+            if (const base::Result<void> noted = profile::recordVersion(m_file, version); !noted) {
+                qWarning("qKVM: %s", noted.error().message.c_str());
+            }
+        }
+    }
+    const QJsonObject said = documentOf(what);
     if (!QDir().mkpath(QFileInfo(m_file).absolutePath())) {
         return base::Error{"settings", "The folder for the program's settings could not be made."};
     }

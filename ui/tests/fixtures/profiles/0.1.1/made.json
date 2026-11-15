@@ -1,0 +1,200 @@
+{
+    "actions": [
+        {
+            "danger": true,
+            "enter": false,
+            "id": "68a3a3b4",
+            "keys": "ControlLeft,AltLeft,Delete",
+            "name": "Restart (Ctrl+Alt+Del)",
+            "text": "",
+            "types": false
+        },
+        {
+            "danger": false,
+            "enter": true,
+            "id": "cb4b126a",
+            "keys": "",
+            "name": "Type the BIOS password",
+            "text": "made-up typed text",
+            "types": true
+        },
+        {
+            "danger": false,
+            "enter": false,
+            "id": "d8863b3b",
+            "keys": "",
+            "name": "Type the long note",
+            "text": "made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text made-up long text éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+            "types": true
+        }
+    ],
+    "alert": {
+        "machine": "f67cf67c",
+        "minutes": 1,
+        "picture": "/9j/4AAQSkZJRgABAQEAZABkAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAkAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDkKKKK9g8AKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigAooooAKKKKACiiigD/2Q==",
+        "stamp": "1794657600290",
+        "watch": "no_signal"
+    },
+    "app_password": "made-up app password 4271",
+    "automatic": true,
+    "incidents": [
+        {
+            "id": "2bdd9163-baae-4239-bb59-3a8bbe65f02d",
+            "key": "f67cf67c#no_signal",
+            "minutes": 15,
+            "name": "Lab KVM",
+            "opened": "2026-11-14T12:00:00.000Z",
+            "paused_until": "2026-11-14T13:00:00.000Z",
+            "scope": "pc",
+            "state": "screen-no_signal"
+        }
+    ],
+    "kvm_of_another_family": {
+        "address": "https://198.51.100.32",
+        "asked": false,
+        "certificate": "",
+        "display": 2,
+        "group": "Rack B",
+        "id": "0f1e2d3c",
+        "kind": "vnc",
+        "known_by_certificate": false,
+        "machine": "",
+        "name": "A family of later",
+        "number": "",
+        "user": "admin"
+    },
+    "kvms": [
+        {
+            "address": "https://192.0.2.10",
+            "certificate": "e623fcaada7fbf8bcc0ca3baade2d54084b24f6ab7b933794f2e4135519c0161",
+            "certificate_pem": "",
+            "group": "Rack A",
+            "id": "089dcc50",
+            "kind": "kvmd",
+            "known_by_certificate": true,
+            "machine": "",
+            "name": "Build server",
+            "no_signal_minutes": 0,
+            "number": "",
+            "password": "made-up kvmd password",
+            "unchanged_minutes": 0,
+            "user": "admin"
+        },
+        {
+            "address": "http://192.0.2.11:8080",
+            "certificate": "",
+            "certificate_pem": "",
+            "group": "Rack A",
+            "id": "f67cf67c",
+            "kind": "kvmd",
+            "known_by_certificate": false,
+            "machine": "",
+            "name": "Lab KVM",
+            "no_signal_minutes": 15,
+            "number": "",
+            "password": "made-up lab password",
+            "unchanged_minutes": 60,
+            "user": "operator"
+        },
+        {
+            "address": "http://192.0.2.12",
+            "certificate": "",
+            "certificate_pem": "",
+            "group": "Desk",
+            "id": "6c899e40",
+            "kind": "jetkvm",
+            "known_by_certificate": false,
+            "machine": "",
+            "name": "Desk JetKVM",
+            "no_signal_minutes": 0,
+            "number": "jetkvm:42b7ce146108415bc503cc89f029fdae",
+            "password": "made-up JetKVM password",
+            "unchanged_minutes": 0,
+            "user": "admin"
+        },
+        {
+            "address": "https://198.51.100.30",
+            "certificate": "8a5d0bac661cb594e6ee523ec5b47a124557cf61a3517a509c9c37e3dcd4d1fc",
+            "certificate_pem": "",
+            "group": "Rack B",
+            "id": "d5a167e9",
+            "kind": "redfish",
+            "known_by_certificate": true,
+            "machine": "server:8d04392184451f1aa001bbd476951b0b9ca7cb7aa4534f62bb06cdda3c8e91c7",
+            "name": "Storage server",
+            "no_signal_minutes": 0,
+            "number": "",
+            "password": "made-up controller password",
+            "unchanged_minutes": 0,
+            "user": "operator"
+        },
+        {
+            "address": "https://198.51.100.31",
+            "certificate": "de09352984d3d4c8d6e3bd2d8e29efba91f508b3e4a6950d69e5b1df7567ef24",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIBHzCBxqADAgECAgID6DAKBggqhkjOPQQDAjAZMRcwFQYDVQQDDA5hbiBleGFt\ncGxlIEtWTTAeFw0yNjAxMDEwMDAwMDBaFw0zNTEyMzAwMDAwMDBaMBkxFzAVBgNV\nBAMMDmFuIGV4YW1wbGUgS1ZNMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEkoYW\n6kW9oO3ILuXrYCeiDLKpt4eq/ON7DwCe1F6av2t9ygp9QbxUMJBePxGOkOLuiQoT\nJW8q35yG1qcAPd9gujAKBggqhkjOPQQDAgNIADBFAiEA3xyTzdfJz+sYMmDqd0/9\nf18OyJhT9K1FPBtZBVRLdj8CICcxZ6T++/Z1QCNp3ZqXhAsCk9P+kXQrJuCsPA43\nCOJH\n-----END CERTIFICATE-----\n",
+            "group": "Rack B",
+            "id": "73ffc292",
+            "kind": "kvmd",
+            "known_by_certificate": true,
+            "machine": "",
+            "name": "Imported KVM",
+            "no_signal_minutes": 0,
+            "number": "",
+            "password": "made-up imported password",
+            "unchanged_minutes": 0,
+            "user": "admin"
+        }
+    ],
+    "made_by": {
+        "commit": "15fcb72ade1923a28951e552c82f1d7839500b2d",
+        "kind": "person",
+        "version": "0.1.1"
+    },
+    "now": "2026-11-14T12:00:00Z",
+    "now_ms": 1794657600000,
+    "pacing": [
+        {
+            "address": "http://192.0.2.11:8080",
+            "left_ms": 300000,
+            "noes": 2,
+            "password": "a wrong made-up password",
+            "road": "login",
+            "silent": 0,
+            "user": "operator"
+        },
+        {
+            "address": "http://192.0.2.12",
+            "left_ms": 10000,
+            "noes": 0,
+            "password": "made-up JetKVM password",
+            "road": "login",
+            "silent": 1,
+            "user": ""
+        }
+    ],
+    "server": {
+        "account": "anna",
+        "account_id": "u1",
+        "address": "http://127.0.0.1:47391/",
+        "password": "made-up server password",
+        "port": 47391,
+        "scope": "server-419f3afcbef0771291790fd8d16d479fe7b9816a4c847793b8e9ee29ac8e5d7b",
+        "session": "q8Zr2vN0x4LmT7cY1pK9dW3sH6fJ5gB0aE2uR8iO1nM"
+    },
+    "setup_overrides": [
+        {
+            "address": "https://198.51.100.30",
+            "doubt_until": "2026-11-14T12:02:00.000Z",
+            "machine": "server:8d04392184451f1aa001bbd476951b0b",
+            "since": "2026-11-14T12:00:00.000Z"
+        }
+    ],
+    "update": {
+        "from": "0.1.1",
+        "setup_log": {
+            "file": "updates/setup-0.1.2.log",
+            "text": "2026-11-14 12:00:01.000   Log opened. (Time zone: UTC+00:00)\r\n2026-11-14 12:00:01.001   Setup version: Inno Setup version 6.7.4\r\n2026-11-14 12:01:01.002   qKVM-RESULT: 105 the program was still running after 60 seconds; nothing was changed\r\n2026-11-14 12:01:01.003   Log closed.\r\n"
+        },
+        "to": "0.1.2"
+    }
+}

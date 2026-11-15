@@ -87,6 +87,26 @@ Dialog {
                 visible: !box.unavailable
                 text: box.resets ? qsTr("Reset erases every saved KVM password, saved-action text, server session and display link on this PC. Your KVM inventory stays. qKVM closes after the reset; open it again to set a new app password and re-enter the KVM passwords.") : box.mode === "setup" ? qsTr("Choose an app password with 10 to 256 characters. Keep it somewhere safe: forgetting it requires erasing saved secrets.") : box.mode === "export" ? qsTr("Enter the local app password again to export saved secrets.") : qsTr("Enter the app password for this PC.")
             }
+            // Why the reset is asked for, while it is reviewed (in red while it is the box's problem), and what is
+            // kept before anything is erased.
+            Text {
+                objectName: "appResetReason"
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Theme.text
+                text: box.security !== null ? box.security.reason : ""
+                visible: box.resets && text !== "" && box.security !== null && text !== box.security.problem
+            }
+            Text {
+                objectName: "appResetKeeps"
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.WordWrap
+                color: Theme.muted
+                text: box.security !== null ? box.security.keptAside : ""
+                visible: box.resets && text !== ""
+            }
             Field {
                 id: current
                 objectName: "appCurrentPassword"

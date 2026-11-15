@@ -30,9 +30,15 @@ in place. The program and Setup keep a contract between them, and neither change
   action or file operation under way, `readyForUpdate`); no box with changes that are not saved (Add a KVM, Edit,
   Type text, a saved action's editor: the window's `unsavedEdit`, the box's title); no virtual media being uploaded or
   changed in any window; no action sent from a card or menu that is not answered yet (the list of what is under way
-  that every window writes into: a start into BIOS setup through a server among them); and no start into BIOS setup of
-  this PC's own servers under way, nor an override of one that may still be set (`core::SetupOverrides`: the program's
-  end would wait up to 30 s for its clearing). In this order:
+  that every window writes into: a start into BIOS setup through a server among them); and no change of the BIOS setup
+  boot override of this PC's own servers that may still come (`core::SetupOverrides::changeMayStillCome`: a start into
+  BIOS setup under way, counted by no clock from its note to its end or its driver's hand-over, one its window let go
+  of included; or a record whose doubt is not over and reaches no further than the longest doubt a press notes, ten
+  minutes, `SetupOverrides::longestDoubtMs`, as one that reaches further was noted by a clock that ran ahead; the
+  program's end would wait up to 30 s for its clearing). A record whose doubt is over holds nothing, whether its
+  server answers or is on a card at all: it stays in its file, on its card and in the notice at the next start (B12,
+  0.1.2). Each press, and each answer to Setup's request, reads all of this anew, so a hold lifts by itself. In this
+  order:
   1. The download's own folder of the update cache (`%LOCALAPPDATA%\qKVM\Cache\Downloads\update-XXXXXX`, never
      Downloads or a shared Temp) was made with its own list of who may do what, in the one call that made it
      (`CreateDirectoryW` with that security descriptor): this user, SYSTEM and the administrators, all of it, and
@@ -71,7 +77,10 @@ in place. The program and Setup keep a contract between them, and neither change
      that Setup, which waits up to 60 s for the single-instance mutex (it goes only with the process) and then gives
      up changing nothing, is never left waiting in vain.
 * **A start while Setup works** (`ui::whileSetupWorks`, first in `main`, before any window and before the
-  single-instance mutex). Setup holds `Local\qKVM-Desktop-Setup` while it runs. A start while it is there ends at once
+  single-instance mutex). Setup holds `Local\qKVM-Desktop-Setup` while it runs, and its event
+  `Local\qKVM-Desktop-Setup-<its process number>` (the uninstall holds both too; `setupRunsName`). A start while the
+  mutex is there and a process that runs has that event (a handle to the mutex kept after Setup ended is no Setup at
+  work; review R2; a known limit of this is in SECURITY.md) ends at once
   and without a word (no box: one that waits for a click keeps the program loaded, and Setup, which tries a file in
   use for four seconds, would give up and roll back): a program that runs while Setup replaces its files keeps
   them from being replaced (its Qt libraries are loaded the moment it starts), and Setup would give up halfway. Only
@@ -80,8 +89,11 @@ in place. The program and Setup keep a contract between them, and neither change
   started anew without the argument through the person's own shell (`ui::startAnewThroughTheShell`: the desktop's
   `Shell.Application`, `IShellDispatch2::ShellExecute`), so that it is a child of the person's Explorer and takes
   nothing of Setup's (Inno Setup's RedirectionGuard, which a lowest-privilege setup hands down, keeps a program from
-  crossing a junction the person made), and Setup's start ends without a window. Where that cannot be done, it goes
-  on itself. The argument means nothing else and skips nothing.
+  crossing a junction the person made), and Setup's start ends without a window. It never goes on itself, with
+  Setup's token (review C1): where it runs above the person (elevated, or above medium integrity), where the shell
+  is not the person's own (another user's desktop, or a shell above them) or cannot start it, it ends starting
+  nothing, and the person starts qKVM from the Start menu; a setup that runs with administrator rights starts nothing
+  at all, and says so in its log. The argument means nothing else and skips nothing.
 * **Data that cannot be read** (`core::whyDataCannotBeRead`, in `main` after the single-instance mutex, before the
   settings are read). The data folder, the list of what is in it, and the settings: where Windows says any of them is
   plainly not there, that is a first start; where it cannot be read for any other reason (a list that shuts the

@@ -23,6 +23,7 @@
 
 #include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/local_wall.h>
+#include <qkvm/core/setup_overrides.h>
 
 #include "jetkvm_by_hand.h"
 #include "jetkvm_viewer_by_hand.h"
@@ -595,6 +596,38 @@ private slots:
         // One that is not there is not taken off.
         QCOMPARE(wall.remove(first).error().code, std::string("not_found"));
         QCOMPARE(wall.remove(u"00000000"_s).error().code, std::string("not_found"));
+    }
+
+    // A server taken off the wall takes with it what stood for it of a start into BIOS setup that may have left its
+    // override set, a queued one too (outside review's confirm round of 0.1.2, D1): its card is gone, and so is the
+    // record. Another server's stays.
+    void aServerTakenOffTakesItsBiosSetupRecordWithIt()
+    {
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        core::DriverPaces paces = quickDrivers();
+        paces.redfish.overrides = std::make_shared<core::SetupOverrides>();
+        LocalWall wall(settings, secrets, paces);
+        OwnKvm one;
+        one.kind = u"redfish"_s;
+        one.address = u"https://127.0.0.1:1"_s;
+        one.name = u"One"_s;
+        OwnKvm other = one;
+        other.address = u"https://127.0.0.1:2"_s;
+        other.name = u"Other"_s;
+        const base::Result<QString> first = wall.add(one, u"secret"_s);
+        QVERIFY2(first.ok(), codeOf(first).c_str());
+        QVERIFY(wall.add(other, u"secret"_s).ok());
+        const QDateTime later = QDateTime::currentDateTimeUtc().addSecs(60);
+        static_cast<void>(paces.redfish.overrides->mayBeSet(QUrl(one.address), QString(), later));
+        paces.redfish.overrides->markQueued(QUrl(one.address), QString());
+        static_cast<void>(paces.redfish.overrides->mayBeSet(QUrl(other.address), QString(), later));
+        paces.redfish.overrides->markQueued(QUrl(other.address), QString());
+        QVERIFY(wall.remove(first.value()).ok());
+        QVERIFY2(!paces.redfish.overrides->standing(QUrl(one.address), QString()).has_value(),
+                 "a server taken off the wall left its BIOS setup record standing");
+        QVERIFY(paces.redfish.overrides->standing(QUrl(other.address), QString()).has_value());
     }
 
     void eachKvmFailsByItself()

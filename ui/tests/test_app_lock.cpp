@@ -4,7 +4,10 @@
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <QtTest>
+
+#include <windows.h>
 
 #include "app_lock.h"
 #include "memory_secrets.h"
@@ -1484,6 +1487,187 @@ private slots:
         const auto current = view.entries().first().toMap();
         QVERIFY(!view.remove(id, current.value(u"revision"_s).toInt()).isEmpty());
         QCOMPARE(actions.all().size(), 1);
+    }
+
+    // A way back before any reset (the owner, 2026-11-14: everything survives an upgrade). Before "Reset saved
+    // secrets" erases anything, the settings are kept beside them as settings.json.<version>.bak, byte for byte, and
+    // the box says so, with where.
+    //   PASS: the copy is there when the first secret is erased, and is the settings as they were.
+    //   FAIL (before): no copy.
+    void theResetKeepsTheSettingsBeforeItErasesAnything()
+    {
+        QTemporaryDir directory;
+        const QString profile = directory.filePath(u"settings.json"_s);
+        QCoreApplication::setApplicationVersion(u"0.1.2"_s);
+        const auto unset = qScopeGuard([] { QCoreApplication::setApplicationVersion({}); });
+        MemorySecrets store;
+        AppLock lock(store, fast, [] { return 1000; }, nullptr, profile + u".locked"_s);
+        setUp(lock);
+        qkvm::core::Settings settings(profile);
+        auto inventory = settings.remembered();
+        inventory.server = u"https://example.invalid"_s;
+        inventory.theme = u"light"_s;
+        QVERIFY(settings.remember(inventory));
+        QFile written(profile);
+        QVERIFY(written.open(QIODevice::ReadOnly));
+        const QByteArray before = written.readAll();
+        written.close();
+        store.all.insert(u"kvm:0a1b2c3d"_s, "a saved password");
+        lock.forgot();
+        const QString kept = profile + u".reset-0.1.2.bak"_s;
+        QVERIFY2(lock.keptAside().contains(u"settings.json.reset-0.1.2.bak"_s), qPrintable(lock.keptAside()));
+        QVERIFY(lock.keptAside().contains(QDir::toNativeSeparators(directory.path())));
+        bool keptFirst = false;
+        store.onErased = [&](const QString&) {
+            QFile copy(kept);
+            keptFirst = keptFirst || (copy.open(QIODevice::ReadOnly) && copy.readAll() == before);
+        };
+        const QSignalSpy done(&lock, &AppLock::resetFinished);
+        lock.resetSecrets(true);
+        QCOMPARE(done.size(), 1);
+        QVERIFY(keptFirst);
+        QVERIFY(store.all.isEmpty());
+        QFile copy(kept);
+        QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), before);
+    }
+
+    //   PASS: where the copy cannot be made (the settings held by another program), nothing is erased, and it is said.
+    //   FAIL (before): the reset erases every secret.
+    void aResetWhoseCopyCannotBeMadeErasesNothing()
+    {
+        QTemporaryDir directory;
+        const QString profile = directory.filePath(u"settings.json"_s);
+        qkvm::core::Settings settings(profile);
+        auto inventory = settings.remembered();
+        inventory.server = u"https://example.invalid"_s;
+        QVERIFY(settings.remember(inventory));
+        MemorySecrets store;
+        AppLock lock(store, fast, [] { return 1000; }, nullptr, profile + u".locked"_s);
+        QCOMPARE(lock.mode(), u"recovery"_s);
+        store.all.insert(u"kvm:0a1b2c3d"_s, "a saved password");
+        const auto before = store.all;
+        lock.forgot();
+        const HANDLE held = CreateFileW(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(profile).utf16()),
+                                        GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(held != INVALID_HANDLE_VALUE);
+        const QSignalSpy done(&lock, &AppLock::resetFinished);
+        lock.resetSecrets(true);
+        CloseHandle(held);
+        QCOMPARE(done.size(), 0);
+        QVERIFY(store.all == before);
+        QVERIFY(lock.restricted());
+        QVERIFY2(lock.problem().contains(u"Nothing was erased"_s), qPrintable(lock.problem()));
+        // Once it can be made, the reset goes on.
+        lock.resetSecrets(true);
+        QCOMPARE(done.size(), 1);
+        QVERIFY(store.all.isEmpty());
+    }
+
+    // Review 012, L4 (b): the box names the file the copy goes to, numbered where the first name is taken.
+    //   FAIL (before): it named settings.json.<version>.bak whatever the copy was named.
+    void theBoxNamesTheFileTheCopyGoesTo()
+    {
+        QTemporaryDir directory;
+        const QString profile = directory.filePath(u"settings.json"_s);
+        QCoreApplication::setApplicationVersion(u"0.1.2"_s);
+        const auto unset = qScopeGuard([] { QCoreApplication::setApplicationVersion({}); });
+        qkvm::core::Settings settings(profile);
+        auto inventory = settings.remembered();
+        inventory.server = u"https://example.invalid"_s;
+        QVERIFY(settings.remember(inventory));
+        QFile taken(profile + u".reset-0.1.2.bak"_s);
+        QVERIFY(taken.open(QIODevice::WriteOnly) && taken.write("kept before") > 0);
+        taken.close();
+        MemorySecrets store;
+        store.all.insert(u"kvm:0a1b2c3d"_s, "a saved password");
+        AppLock lock(store, fast, [] { return 1000; }, nullptr, profile + u".locked"_s);
+        QCOMPARE(lock.mode(), u"recovery"_s);
+        QVERIFY2(lock.keptAside().contains(u" settings.json.reset-0.1.2-2.bak "_s), qPrintable(lock.keptAside()));
+        lock.forgot();
+        QVERIFY2(lock.keptAside().contains(u" settings.json.reset-0.1.2-2.bak "_s), qPrintable(lock.keptAside()));
+        lock.resetSecrets(true);
+        QVERIFY(store.all.isEmpty());
+        QVERIFY(QFile::exists(profile + u".reset-0.1.2-2.bak"_s));
+        QFile before(profile + u".reset-0.1.2.bak"_s);
+        QVERIFY(before.open(QIODevice::ReadOnly));
+        QCOMPARE(before.readAll(), QByteArray("kept before"));
+    }
+
+    // (a): a copy that cannot be made stops the reset once, and says so; chosen again, the reset goes on (with the
+    // copy, where it can be made by then): a person in recovery is never kept out for good.
+    //   FAIL (before): refused at every try for as long as the copy cannot be made.
+    void aResetIsNeverStoppedForGoodByItsCopy()
+    {
+        QTemporaryDir directory;
+        const QString profile = directory.filePath(u"settings.json"_s);
+        qkvm::core::Settings settings(profile);
+        auto inventory = settings.remembered();
+        inventory.server = u"https://example.invalid"_s;
+        QVERIFY(settings.remember(inventory));
+        MemorySecrets store;
+        store.all.insert(u"kvm:0a1b2c3d"_s, "a saved password");
+        AppLock lock(store, fast, [] { return 1000; }, nullptr, profile + u".locked"_s);
+        lock.forgot();
+        const HANDLE held = CreateFileW(reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(profile).utf16()),
+                                        GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(held != INVALID_HANDLE_VALUE);
+        const auto release = qScopeGuard([held] { CloseHandle(held); });
+        const QSignalSpy done(&lock, &AppLock::resetFinished);
+        lock.resetSecrets(true);
+        QCOMPARE(done.size(), 0);
+        QVERIFY(!store.all.isEmpty());
+        QVERIFY2(lock.problem().contains(u"again"_s), qPrintable(lock.problem()));
+        QCOMPARE(lock.mode(), u"reset"_s);
+        lock.resetSecrets(true);
+        QCOMPARE(done.size(), 1);
+        QVERIFY(store.all.isEmpty());
+    }
+
+    // Why the reset is asked for, said plainly, case by case. A profile made by a test build of qKVM from before the
+    // app password existed keeps secrets with neither its record nor its marker.
+    //   PASS: each says its own reason, and keeps it in sight while the reset is reviewed.
+    //   FAIL (before): one sentence for all ("missing or cannot be read").
+    void theReasonForAResetIsSaidPlainly_data()
+    {
+        QTest::addColumn<int>("profile");
+        QTest::addColumn<QString>("said");
+        QTest::newRow("made before the app password existed") << 0
+                                                              << u"This profile was made by a test build of qKVM "
+                                                                 u"from before the app password existed."_s;
+        QTest::newRow("the record gone, the marker there") << 1 << u"app password was set on this PC"_s;
+        QTest::newRow("a record of a newer version") << 2 << u"newer version of qKVM"_s;
+        QTest::newRow("a record that cannot be read") << 3 << u"cannot be read"_s;
+    }
+    void theReasonForAResetIsSaidPlainly()
+    {
+        QFETCH(int, profile);
+        QFETCH(QString, said);
+        QTemporaryDir directory;
+        const QString settings = directory.filePath(u"settings.json"_s);
+        MemorySecrets store;
+        store.all.insert(u"kvm:0a1b2c3d"_s, "a saved password");
+        store.all.insert(u"session at https://example.invalid/"_s, "a session");
+        if (profile == 1) {
+            store.all.insert(u"app password established"_s, "1");
+        } else if (profile == 2 || profile == 3) {
+            store.all.insert(u"app password established"_s, "1");
+            const QByteArray json =
+                profile == 2 ? QByteArray(R"({"v":2,"what":"a newer version's record"})") : QByteArray("{not json");
+            QByteArray record("\0QKVM\1", 6);
+            record.resize(10);
+            qToBigEndian<quint32>(static_cast<quint32>(json.size()), record.data() + 6);
+            record.append(json);
+            record.append(json.size() % 2 == 0 ? 1 : 2, '\0');
+            store.all.insert(AppLock::recordName(), record);
+        }
+        AppLock lock(store, fast, [] { return 1000; }, nullptr, settings + u".locked"_s);
+        QCOMPARE(lock.mode(), u"recovery"_s);
+        QVERIFY2(lock.reason().contains(said), qPrintable(lock.reason()));
+        QCOMPARE(lock.problem(), lock.reason());
+        lock.forgot();
+        QCOMPARE(lock.mode(), u"reset"_s);
+        QVERIFY2(lock.reason().contains(said), qPrintable(lock.reason()));
     }
 };
 QTEST_GUILESS_MAIN(TestAppLock)

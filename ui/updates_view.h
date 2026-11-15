@@ -35,7 +35,9 @@ public:
     explicit UpdatesView(core::Updates& updates, QObject* parent = nullptr);
     QString currentVersion() const { return m_updates.currentVersion(); }
     QString status() const;
-    QString problem() const { return m_problem.isEmpty() ? m_updates.problem() : m_problem; }
+    // What went wrong, or what kept Install from going on at its press: that said only while it still holds, read anew
+    // here, and gone for good once it is read free (review 012-hold's INFO 3); a press reads it anew.
+    QString problem() const;
     QString lastChecked() const;
     QString version() const;
     QString notes() const;
@@ -86,6 +88,12 @@ private:
     std::function<QString()> m_holds;
     // What keeps it from installing, where something does: what `holds` says, or what is always said.
     QString held() const;
+    // Whether Install is still held, read anew: what `idle` says, and an open handler where an installer is opened.
+    bool stillHeld() const;
+    // What a press, a check, a download or a recovery starts from: nothing said.
+    void clearProblem();
+    // What held Install at its press, in the person's words (held()), until it is read free.
+    mutable QString m_heldAtPress;
     bool m_shownFile = false;
     bool m_handedOver = false;
 };

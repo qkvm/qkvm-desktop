@@ -10,8 +10,10 @@
 
 #include "win/single_instance.h"
 
-// Windows' own header.
+// Windows' own headers; the first has to come first.
 #include <windows.h>
+
+#include <sddl.h>
 
 using namespace Qt::StringLiterals;
 using namespace qkvm;
@@ -169,6 +171,36 @@ private slots:
             hungUpOn = caller.waitForDisconnected(3000);
         }));
         QVERIFY(hungUpOn);
+    }
+
+    // A copy that Windows does not let at the mutex (another account's in this session, which lets nobody else at it:
+    // Run as different user) can tell nothing of the others: it is never taken for the first, so that two copies never
+    // write one profile; and it neither listens nor tells (outside review of 0.1.2, C3).
+    void aCopyThatCannotOpenTheMutexIsNeverTheFirst()
+    {
+        const QString name = aName();
+        // The mutex as another account's is to this one: a list that lets nobody at it.
+        PSECURITY_DESCRIPTOR nobody = nullptr;
+        QVERIFY(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:", SDDL_REVISION_1, &nobody, nullptr));
+        SECURITY_ATTRIBUTES attributes{sizeof(attributes), nobody, FALSE};
+        const std::wstring mutex = (u"Local\\"_s + name).toStdWString();
+        const HANDLE theirs = CreateMutexW(&attributes, FALSE, mutex.c_str());
+        LocalFree(nobody);
+        QVERIFY(theirs != nullptr);
+        const ui::SingleInstance mine(name);
+        const bool first = mine.isFirst();
+        const bool listened = say(name, "show\n");
+        CloseHandle(theirs);
+        QVERIFY2(!first, "a copy that could not open the mutex took itself for the first");
+        QVERIFY(!listened);
+        QVERIFY(mine.cannotTell());
+        QVERIFY2(mine.whyNot().contains(u"another Windows account"_s), qPrintable(mine.whyNot()));
+        QVERIFY(mine.whyNot().contains(QString::number(ERROR_ACCESS_DENIED)));
+        // (And a copy that can tell is never one that cannot.)
+        const ui::SingleInstance alone(aName());
+        QVERIFY(alone.isFirst());
+        QVERIFY(!alone.cannotTell());
+        QCOMPARE(alone.whyNot(), QString());
     }
 
     void aCallerThatSaysNothingAndStaysDoesNotKeepOthersOut()

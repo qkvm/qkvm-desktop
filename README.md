@@ -14,21 +14,21 @@ Open source. No server, no cloud, no account. Built in C++ and Qt 6 for video th
 <img src="https://img.shields.io/badge/Qt-6.12-0b6bff" alt="Qt 6.12">
 <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-0b6bff" alt="Licence: AGPL-3.0"></a>
 
-[Website](https://qkvm.com) · [Download](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1) · [qKVM server](https://github.com/qkvm/qkvm) · [Live demo of the web app](https://demo.qkvm.com) · [Documentation](https://docs.qkvm.com) · [Security](SECURITY.md)
+[Website](https://qkvm.com) · [Download](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2) · [qKVM server](https://github.com/qkvm/qkvm) · [Live demo of the web app](https://demo.qkvm.com) · [Documentation](https://docs.qkvm.com) · [Security](SECURITY.md)
 
 <br>
 
-<a href="https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-light.svg" width="100%" alt="qKVM Desktop: a wall of nine machines with their live screens, names and state, one of them shown large and live with the real keyboard, and a server's power and sensors."></picture></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-light.svg" width="100%" alt="qKVM Desktop: a wall of nine machines with their live screens, names and state, one of them shown large and live with the real keyboard, and a server's power and sensors."></picture></a>
 
 <sub>An illustration of the wall. The machines are made up.</sub>
 
 <br>
 
-<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe"><img src="https://img.shields.io/badge/Download-the%20setup%2C%2019%20MB-0b6bff?style=for-the-badge" alt="Download the setup" height="38"></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe"><img src="https://img.shields.io/badge/Download-the%20setup%2C%2019%20MB-0b6bff?style=for-the-badge" alt="Download the setup" height="38"></a>
 &nbsp;
-<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip"><img src="https://img.shields.io/badge/Download-the%20ZIP%2C%20no%20install-1f2937?style=for-the-badge" alt="Download the ZIP" height="38"></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip"><img src="https://img.shields.io/badge/Download-the%20ZIP%2C%20no%20install-1f2937?style=for-the-badge" alt="Download the ZIP" height="38"></a>
 
-<sub>Version 0.1.1, a beta. For Windows 10 (22H2) and Windows 11, x64. No administrator rights needed.</sub>
+<sub>Version 0.1.2, a beta. For Windows 10 (22H2) and Windows 11, x64. No administrator rights needed.</sub>
 
 </div>
 
@@ -116,7 +116,7 @@ Both are free and open source under the same licence. Pick by where you work; ma
 | **Updates** | Signed feed; Install and restart | In place, or by pip or Docker |
 | **Licence** | AGPL-3.0 | AGPL-3.0 |
 
-<sub>As of qKVM Desktop 0.1.1 and qKVM server 0.3. "Planned" has no date yet.</sub>
+<sub>As of qKVM Desktop 0.1.2 and qKVM server 0.3. "Planned" has no date yet.</sub>
 
 ## Why native C++, and not Electron?
 
@@ -147,7 +147,7 @@ but our own code and your graphics card.
 
 ## Get started in a minute
 
-1. **Download** the [setup](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe)
+1. **Download** the [setup](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe)
    (or the ZIP) and start it.
 2. **Choose an app password.** It guards the passwords of your devices. Leave "Sign in automatically on this PC"
    ticked only if the PC is yours alone.
@@ -162,19 +162,19 @@ your own.
 For Windows 10 (22H2) and Windows 11, x64, the same program in two forms:
 
 - **The setup**,
-  [qKVM-Desktop-0.1.1-windows-x64-setup.exe](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64-setup.exe).
+  [qKVM-Desktop-0.1.2-windows-x64-setup.exe](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe).
   It installs the program for you alone, without asking for an administrator, into
   `%LOCALAPPDATA%\Programs\qKVM Desktop`, and adds it to the Start menu (to the desktop only if
   you tick that) and to Settings, Apps.
 - **The ZIP**,
-  [qKVM-Desktop-0.1.1-windows-x64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip).
+  [qKVM-Desktop-0.1.2-windows-x64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip).
   Nothing is installed: unpack the whole ZIP into a folder of its own and start
   `qkvm-desktop.exe` in it.
 
 The same files are also at
-[download.qkvm.com](https://download.qkvm.com/desktop/0.1.1/qKVM-Desktop-0.1.1-windows-x64.zip), where
-copies of 0.1.0 take their update from. Both files, their `SHA256SUMS` and the release notes are on the
-[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.1). At the first start
+[download.qkvm.com](https://download.qkvm.com/desktop/0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip), where
+installed copies and ZIP copies take their updates from. Both files, their `SHA256SUMS` and the release notes are on the
+[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2). At the first start
 the program asks for a password of its own.
 
 **This is a beta.** Try it first where a mistake costs little.
@@ -187,8 +187,8 @@ More info, then Run anyway.
 Before you run the setup or unpack the ZIP, compare its SHA-256 with the line for it in
 `SHA256SUMS` on the release page. In PowerShell, in the folder you downloaded it to:
 
-    Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64-setup.exe -Algorithm SHA256
-    Get-FileHash .\qKVM-Desktop-0.1.1-windows-x64.zip -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.1.2-windows-x64-setup.exe -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.1.2-windows-x64.zip -Algorithm SHA256
 
 If the two differ, do not run it. `SHA256SUMS` itself is signed with the release key the program pins
 (`SHA256SUMS.sig`).
@@ -196,8 +196,28 @@ If the two differ, do not run it. `SHA256SUMS` itself is signed with the release
 ### Upgrade and uninstall
 
 To upgrade an installed copy, run the setup of the newer version: it installs over the copy
-you have, where it is. Close the program first: while it runs, the setup asks you to close
-it, and so does the uninstall.
+you have, where it is. Its first page says which version is installed and which one it
+installs, and that your wall, settings and passwords are kept.
+
+If qKVM is running, in a window or only behind its icon in the notification area, the setup
+offers to close it when you choose Install: *Close qKVM and continue*. qKVM then ends the way
+it does for Install and restart: it lets its consoles go, releases any key held down and
+clears a start into BIOS setup. It closes only where nothing would be cut short: while
+something is under way (control of a machine, an upload, a box with changes not saved), it
+stays open and the setup shows what qKVM says. Finish that, then choose Try again. If qKVM does
+not close within about 10 seconds, the setup offers End it now, which ends it at once, or
+Cancel, which changes nothing. qKVM 0.1.0 and 0.1.1 cannot be asked to close: quit them from
+their icon (right-click it, then Quit), or choose End it now. At the end the setup offers
+*Start qKVM Desktop*, ticked when it closed qKVM. A copy from the ZIP, running from its own
+folder, is left alone.
+
+A silent setup (`/VERYSILENT /SUPPRESSMSGBOXES`) closes qKVM the same way and starts it again
+afterwards. Where qKVM stays open, the setup changes nothing and ends with exit code 7, and its
+log (`/LOG="<file>"`) has one line that begins with `qKVM-RESULT:` and says why. Add
+`/FORCECLOSE=1` to end qKVM by force where it does not close.
+
+The uninstall does not close qKVM: quit it first, from its icon. While it runs, the uninstall
+asks you to close it. Nor does it begin while a qKVM setup is open: let the setup finish first.
 
 An installed copy can also do it itself: when Settings, Updates offers a newer release, choose
 Install and restart. qKVM checks the setup it downloaded against its signed feed, closes, lets
@@ -208,7 +228,9 @@ run the setup instead. Either finds your wall as it was (see below).
 
 If an update was cut off (the PC lost power or the setup was ended) and qKVM no longer
 starts, run the setup again, the newer one or the one you have: it puts the program back
-first.
+first. The same goes for an update or upgrade that stops partway through its copy (a file in
+use, a full disk): the earlier qKVM may not start until you run the setup again, and nothing
+of your wall, settings or passwords is lost.
 
 To uninstall it: Settings, Apps, Installed apps, qKVM Desktop, Uninstall. A copy from the ZIP
 is removed by closing the program and deleting its folder.

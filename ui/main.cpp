@@ -15,6 +15,7 @@
 #include <qkvm/core/data_folder.h>
 #include <qkvm/core/jetkvm_connection.h>
 #include <qkvm/core/pacing_file.h>
+#include <qkvm/core/profile.h>
 #include <qkvm/core/redfish_device.h>
 #include <qkvm/core/screen_watch.h>
 #include <qkvm/core/secrets.h>
@@ -54,6 +55,7 @@
 #include "win/hand_over_end.h"
 #include "win/keyboard_hook.h"
 #include "win/own_temp.h"
+#include "win/quit_requests.h"
 #include "win/setup_wait.h"
 #include "win/shell_start.h"
 #include "win/show_file.h"
@@ -80,11 +82,20 @@ int main(int argc, char* argv[])
     // While qKVM's Setup is at work, a start that is not Setup's own (with --after-update) ends at once, before any
     // window and before the single-instance mutex, saying nothing: a program that runs while Setup replaces its files
     // keeps them from being replaced. Setup's own waits for it to be over, and starts the program anew through the
-    // person's shell (no child of Setup's, with none of its mitigations), and ends; where that fails, it goes on
-    // itself.
+    // person's shell (no child of Setup's, with none of its mitigations), and ends; it never goes on itself, with
+    // Setup's token (review C1): where it runs above the person, or the shell cannot start it as the person this
+    // install is of, it ends starting nothing, and the person starts qKVM from the Start menu.
     if (!checksThePackage) {
-        switch (qkvm::ui::whileSetupWorks(QString::fromLatin1(qkvm::ui::setupMutexName), afterUpdate,
-                                          std::chrono::minutes(2), &qkvm::ui::startAnewThroughTheShell)) {
+        // (Setup's own start waits for Setup's process, which started it, to end: never for its mutex alone, which a
+        // handle kept elsewhere keeps there, review C4.)
+        void* const setup = afterUpdate ? qkvm::ui::openTheStarter() : nullptr;
+        const auto waited = qkvm::ui::whileSetupWorks(QString::fromLatin1(qkvm::ui::setupMutexName), afterUpdate,
+                                                      std::chrono::minutes(2), &qkvm::ui::startAnewThroughTheShell,
+                                                      &qkvm::ui::runsAboveThePerson, setup);
+        if (setup != nullptr) {
+            CloseHandle(setup);
+        }
+        switch (waited) {
         case qkvm::ui::WhileSetupWorks::GoOn:
             break;
         case qkvm::ui::WhileSetupWorks::StartedAnew:
@@ -94,6 +105,9 @@ int main(int argc, char* argv[])
             // click would keep this program and its libraries loaded, and Setup could not replace them (it tries a file
             // in use for four seconds, then rolls back).
             return 0;
+        case qkvm::ui::WhileSetupWorks::NotStartedAgain:
+            // (Nothing run, nothing shown: Setup's log says why where Setup could tell, review C1.)
+            return 3;
         }
     } else {
         qkvm::installer::preparePackageCheckEnvironment();
@@ -117,8 +131,14 @@ int main(int argc, char* argv[])
         return result;
     }
 
-    // One running copy: started again, the program shows the copy that runs, and ends here.
+    // One running copy: started again, the program shows the copy that runs, and ends here. Where Windows does not let
+    // it see whether another runs (another account's copy in this session), it says so, and ends: two copies never
+    // write one profile.
     const qkvm::ui::SingleInstance only(u"QKVM Desktop"_s);
+    if (only.cannotTell()) {
+        MessageBoxW(nullptr, only.whyNot().toStdWString().c_str(), L"qKVM", MB_OK | MB_ICONERROR);
+        return 1;
+    }
     if (!only.isFirst()) {
         return 0;
     }
@@ -153,8 +173,17 @@ int main(int argc, char* argv[])
     // the icon and the messages. Empty until somebody is signed in to a QKVM.
     qkvm::ui::WallView wall;
     qkvm::ui::SessionView session;
+    // At the first start of another version than the one that left the profile, the settings are kept as they were
+    // found, before anything of them is written, and only then is this version recorded (SPEC.md section 11.2). Where
+    // the copy cannot be made, nothing is recorded, the person is told (below), and the settings owe the copy: the
+    // Settings that writes them keeps it before it writes anything, and writes nothing while it cannot.
+    const qkvm::core::profile::AtStart atStart =
+        qkvm::core::profile::atStart(qkvm::core::Settings::usualFile(), QCoreApplication::applicationVersion());
     // What is remembered on this PC, read before the first window: how the program looks is part of it.
     qkvm::core::Settings settings(qkvm::core::Settings::usualFile());
+    if (!atStart.owedCopy.isEmpty()) {
+        settings.owesACopy(atStart.owedCopy);
+    }
     qkvm::ui::Look look(settings);
     // Whether the program starts with Windows is asked of Windows, and changed there, for the file
     // this program was started from.
@@ -190,12 +219,13 @@ int main(int argc, char* argv[])
     // What the sign-ins of the run before were told (the wrong-password counts and how long each waits), read back
     // before anything of this run can sign in anywhere, and kept beside the settings from now on (a9).
     qkvm::core::PacingFile signIns(qkvm::core::SignInPacing::program(),
-                                   qkvm::core::Settings::usualFile() + u".sign-ins"_s, *secrets);
+                                   qkvm::core::profile::signInsFile(qkvm::core::Settings::usualFile()), *secrets);
     signIns.read();
-    qkvm::ui::AppLock security(*secrets, qkvm::core::Settings::usualFile() + u".locked"_s);
+    qkvm::ui::AppLock security(*secrets, qkvm::core::profile::lockFile(qkvm::core::Settings::usualFile()));
     // Which servers' BIOS setup boot override may be set, a start into BIOS setup of the run before not having ended
     // (review 4's MEDIUM 1): read before any of their drivers is made, and kept beside the settings from now on.
-    qkvm::core::SetupOverrides::program().keepIn(qkvm::core::Settings::usualFile() + u".setup-overrides"_s);
+    qkvm::core::SetupOverrides::program().keepIn(
+        qkvm::core::profile::setupOverridesFile(qkvm::core::Settings::usualFile()));
     // This PC's own wall: the KVMs that were added in the program, and the adding of one.
     qkvm::ui::OwnWall own(settings, *secrets);
     own.useAppLock(security);
@@ -217,13 +247,13 @@ int main(int argc, char* argv[])
     server.useOwnWall(own.wall());
     server.useAppLock(security);
     // Persistent incidents follow completed observations; hidden windows can notify through the icon.
-    qkvm::core::Incidents incidents(qkvm::core::Settings::usualFile() + u".incidents"_s);
+    qkvm::core::Incidents incidents(qkvm::core::profile::incidentsFile(qkvm::core::Settings::usualFile()));
     qkvm::ui::AlertsView alerts(incidents, security);
     ownSettings.useAlerts(alerts);
     // This PC's own screen watches (c7): their pictures kept beside the settings, and their alerts told as the changes
     // of state are.
     own.wall().screens().shrinkWith(&qkvm::ui::shrunkScreen);
-    own.wall().screens().keepIn(QFileInfo(qkvm::core::Settings::usualFile()).absolutePath() + u"/alert-pictures"_s);
+    own.wall().screens().keepIn(qkvm::core::profile::alertPicturesFolder(qkvm::core::Settings::usualFile()));
     QObject::connect(&own.wall().screens(), &qkvm::core::ScreenWatch::alerted, &alerts,
                      [&alerts](const qkvm::core::ScreenWatch::Event& event) { alerts.screenAlertFor(u"pc"_s, event); });
     server.useAlerts(alerts);
@@ -329,11 +359,24 @@ int main(int argc, char* argv[])
     // A Setup copy's: once Setup has started, the windows close and the program ends, Setup waiting for its single-
     // instance mutex to go before it installs. Where the quit is held up, the program is ended by force 9 s after its
     // goodbyes, and within 50 s in any case (Setup gives up after 60 s): ui::HandOverEnd.
-    updateView.handOverWith([&windows, &handOverEnd] {
+    const auto handOver = [&windows, &handOverEnd] {
         handOverEnd.begin();
         windows.end();
         QCoreApplication::quit();
-    });
+    };
+    updateView.handOverWith(handOver);
+    // And the same end where qKVM's Setup asks an installed copy for it, to upgrade it ("Close qKVM and continue", or a
+    // silent install): only where nothing that the end would cut is under way (what Install and restart waits for);
+    // otherwise the program stays and says what holds it, and Setup shows that (ui/win/quit_requests.h). A portable
+    // copy is never asked, and listens for nothing.
+    std::unique_ptr<qkvm::ui::QuitRequests> quitRequests;
+    if (updates.kind() == qkvm::core::UpdateKind::Setup) {
+        quitRequests = std::make_unique<qkvm::ui::QuitRequests>(
+            qkvm::ui::QuitNames{
+                QString::fromLatin1(qkvm::ui::quitRequestEvent), QString::fromLatin1(qkvm::ui::quitAnswerWindow),
+                QString::fromLatin1(qkvm::ui::quitWantedEvent), QString::fromLatin1(qkvm::ui::setupMutexName)},
+            [&windows] { return windows.whatHoldsAnUpdate(); }, handOver);
+    }
     // A portable copy's verified update is shown in its folder, for the person to unpack: never opened or run here.
     updateView.showWith(
         [&security](const QString& file) { return !security.restricted() && qkvm::ui::showFileInItsFolder(file); });
@@ -348,6 +391,9 @@ int main(int argc, char* argv[])
     // this PC's own KVMs was in it.
     if (const QString said = qkvm::ui::OwnWall::saidOfSettingsThatCouldNotBeRead(settings); !said.isEmpty()) {
         windows.actions(0)->tell(said, false);
+    } // And that no copy of the settings could be kept at this version's first start: once, at this start.
+    if (!atStart.said.isEmpty()) {
+        windows.actions(0)->tell(atStart.said, false);
     }
     // And a server whose BIOS setup boot override may still be set from the run before: told, until somebody sees it
     // (its card says it too, until a look shows the override off).

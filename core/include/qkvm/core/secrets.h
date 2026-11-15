@@ -49,8 +49,15 @@ public:
 // The largest secret that is kept: Windows takes no more for one entry.
 inline constexpr qsizetype largestSecretBytes = 2560;
 
+// What the program's own secrets are kept under in Windows Credential Manager: every profile from 0.1.0 on has its
+// secrets there by this (SPEC.md section 11.4), so it changes only by a migration.
+inline constexpr const char* programsSecretsUnder = "QKVM Desktop";
+
+// The name Windows keeps a secret of this name under: `under`, a colon and a blank, and the name.
+QString windowsTargetOf(const QString& name, const QString& under = QString::fromLatin1(programsSecretsUnder));
+
 // Windows Credential Manager, for this PC only: what is kept does not travel to the user's other
 // PCs. Every name is kept under `under`, which a test sets to something of its own.
-std::unique_ptr<SecretStore> windowsSecrets(const QString& under = QStringLiteral("QKVM Desktop"));
+std::unique_ptr<SecretStore> windowsSecrets(const QString& under = QString::fromLatin1(programsSecretsUnder));
 
 } // namespace qkvm::core

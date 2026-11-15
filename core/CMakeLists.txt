@@ -13,6 +13,7 @@ qt_add_library(qkvm_core STATIC
     include/qkvm/core/updates.h src/updates.cpp
     include/qkvm/core/update_cache.h src/update_cache.cpp
     include/qkvm/core/data_folder.h src/data_folder.cpp
+    include/qkvm/core/profile.h src/profile.cpp
     include/qkvm/core/auto_start.h
     include/qkvm/core/awake_line.h
     include/qkvm/core/connection.h
@@ -196,6 +197,8 @@ qkvm_add_test(test_core_connection SOURCES tests/test_connection.cpp LIBRARIES q
 # cores with a build beside it. 300, about 56% above that.
 qkvm_add_test(test_core_sign_in_pacing SOURCES tests/test_sign_in_pacing.cpp LIBRARIES qkvm_core TIMEOUT 300)
 qkvm_add_test(test_core_pacing_file SOURCES tests/test_pacing_file.cpp tests/memory_secrets.h LIBRARIES qkvm_core)
+# The profile's way back at a start of another version (SPEC.md section 11.2), in a scratch folder.
+qkvm_add_test(test_core_profile SOURCES tests/test_profile.cpp LIBRARIES qkvm_core)
 # A device's password and what is made of it for a sign-in, written over at every boundary where it changes hands (the
 # outside review, F5): under the debug heap's hook, which a release build has not (those cases are skipped there).
 qkvm_add_test(test_core_secrets_wiped SOURCES tests/test_secrets_wiped.cpp LIBRARIES qkvm_core qkvm_core_stand_in)

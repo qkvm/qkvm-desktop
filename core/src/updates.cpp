@@ -940,6 +940,14 @@ void Updates::lookAtHandOver()
         tellAfterSetup(tr("Updated to qKVM %1.").arg(version), false, false);
         return;
     }
+    // A hand-over to a version older than this one is one a newer install has gone past since (that version's own
+    // setup, or a copy of the zip): let go of, and Setup's TEMP with it (only where that is empty), and nothing told
+    // or looked for: it is no update of this version's, and none is to be offered again for it.
+    if (updateVersion(version) < updateVersion(m_channel.currentVersion)) {
+        QFile::remove(file);
+        letGoOfSetupsTemp();
+        return;
+    }
     // Setup may still be at work: the process that was started (by its start time, not only its number), not ended.
     HANDLE setup = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(process));
     FILETIME began{};

@@ -140,9 +140,13 @@ QString WallWindows::whatHoldsAnUpdate() const
     if (m_server.actionsUnderWay()) {
         return words("An action sent to a machine has not been answered yet. Wait for its answer before installing.");
     }
-    if (!core::SetupOverrides::program().all().isEmpty()) {
-        return words("A start into BIOS setup is under way, or a server's BIOS setup boot override may still be set "
-                     "(its card says so). Install once its card no longer says that.");
+    // A change of a server's BIOS setup boot override that may still come (a start into BIOS setup under way, by no
+    // clock, its window's or one its window let go of; or a change sent that may still be made): what the end could
+    // cut short. A record whose doubt is over holds nothing, whether its server is on a card or answers or not: it
+    // stays in its file, on its card and in the notice at the next start, whatever becomes of the program (B12). Read
+    // anew at each press and each answer, so the hold lifts by itself.
+    if (core::SetupOverrides::program().changeMayStillCome()) {
+        return words("A start into BIOS setup of a server is under way. Install once it has ended.");
     }
     return {};
 }

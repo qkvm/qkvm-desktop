@@ -94,6 +94,28 @@ void UpdatesView::holdWith(std::function<QString()> holds)
     m_holds = std::move(holds);
 }
 
+QString UpdatesView::problem() const
+{
+    if (!m_heldAtPress.isEmpty() && !stillHeld()) {
+        m_heldAtPress.clear();
+    }
+    if (!m_heldAtPress.isEmpty()) {
+        return m_heldAtPress;
+    }
+    return m_problem.isEmpty() ? m_updates.problem() : m_problem;
+}
+
+bool UpdatesView::stillHeld() const
+{
+    return !m_idle || !m_idle() || (!restarts() && !m_open);
+}
+
+void UpdatesView::clearProblem()
+{
+    m_problem.clear();
+    m_heldAtPress.clear();
+}
+
 QString UpdatesView::held() const
 {
     const QString said = m_holds ? m_holds() : QString();
@@ -110,7 +132,7 @@ void UpdatesView::recoverWith(std::function<bool(bool)> recover)
 
 void UpdatesView::recover(bool previous)
 {
-    m_problem.clear();
+    clearProblem();
     if (busy() || !m_idle || !m_recover || !m_idle()) {
         m_problem = tr("Finish active control, actions and file operations in all qKVM windows before recovery.");
     } else if (!m_recover(previous)) {
@@ -121,7 +143,7 @@ void UpdatesView::recover(bool previous)
 
 void UpdatesView::check()
 {
-    m_problem.clear();
+    clearProblem();
     m_openedInstaller = false;
     m_shownFile = false;
     m_handedOver = false;
@@ -131,7 +153,7 @@ void UpdatesView::check()
 
 void UpdatesView::download()
 {
-    m_problem.clear();
+    clearProblem();
     m_openedInstaller = false;
     m_shownFile = false;
     m_handedOver = false;
@@ -141,7 +163,7 @@ void UpdatesView::download()
 
 void UpdatesView::cancel()
 {
-    m_problem.clear();
+    clearProblem();
     m_openedInstaller = false;
     m_shownFile = false;
     m_handedOver = false;
@@ -154,14 +176,14 @@ void UpdatesView::install()
     if (!ready()) {
         return;
     }
-    m_problem.clear();
+    clearProblem();
     if (restarts()) {
         // Setup is started only where every window is idle and the program can then close them and end: Setup waits
         // for that before it installs.
         if (!m_handOver) {
             m_problem = tr("This copy of qKVM cannot close itself for qKVM Setup.");
         } else if (!m_idle || !m_idle()) {
-            m_problem = held();
+            m_heldAtPress = held();
         } else if (m_updates.runSetup()) {
             m_handedOver = true;
             emit changed();
@@ -174,7 +196,7 @@ void UpdatesView::install()
         return;
     }
     if (!m_idle || !m_open || !m_idle()) {
-        m_problem = held();
+        m_heldAtPress = held();
     } else {
         m_openedInstaller = m_updates.openInstaller(m_open);
     }
@@ -191,7 +213,7 @@ void UpdatesView::showFile()
     if (!ready() || !showsFile()) {
         return;
     }
-    m_problem.clear();
+    clearProblem();
     if (!m_show) {
         m_problem = tr("This copy of qKVM cannot show the file.");
     } else {

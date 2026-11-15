@@ -36,6 +36,8 @@ class AppLock final : public QObject {
     Q_PROPERTY(bool busy READ busy NOTIFY changed)
     Q_PROPERTY(QString mode READ mode NOTIFY changed)
     Q_PROPERTY(QString problem READ problem NOTIFY changed)
+    Q_PROPERTY(QString reason READ reason NOTIFY changed)
+    Q_PROPERTY(QString keptAside READ keptAside NOTIFY changed)
     Q_PROPERTY(int retryAfter READ retryAfter NOTIFY changed)
 
 public:
@@ -56,6 +58,12 @@ public:
     bool busy() const { return m_busy; }
     QString mode() const { return m_mode; }
     QString problem() const { return m_problem; }
+    // Why "Reset saved secrets" is asked for, in plain words, case by case (from the start that found it so to the
+    // reset's end, also while the reset is reviewed); empty where it was not asked for, but chosen (Forgot password).
+    QString reason() const { return m_reason; }
+    // What is kept before a reset erases anything, and where: the settings, beside them, as
+    // settings.json.<version>.bak; empty where there are no settings to keep.
+    QString keptAside() const;
     int retryAfter() const;
     bool canStartSources() const { return !m_setup && !m_recovery && !m_unavailable; }
 
@@ -97,6 +105,8 @@ private:
     // The wait the current count of wrong tries owes: 1, 2, 4 ... seconds, at most 300.
     qint64 owedWait() const;
     void becomeUnavailable();
+    // The file the copy of the settings goes to before a reset, as the box says it (keptAside).
+    void nameTheCopy();
     void invalidate();
     void finish(quint64 turn, const QString& purpose, bool matches, bool worked, const QByteArray& salt,
                 const QByteArray& verifier, bool automatic);
@@ -107,6 +117,10 @@ private:
     QJsonObject m_record;
     QString m_mode;
     QString m_problem;
+    QString m_reason;
+    QString m_copyAs;
+    // The copy could not be made at the reset just tried: chosen again, the reset goes on all the same.
+    bool m_copyRefused = false;
     bool m_setup = false;
     bool m_passwordSaved = false;
     bool m_marked = false;

@@ -42,6 +42,15 @@ reproduce it helps most.
 - A qKVM server the program signs in to is trusted with what it shows and what it is asked to
   do. Its accounts, roles and device passwords stay on that server; the program keeps none of
   that server's device passwords.
+- **A BIOS setup boot override that a server's controller only queued.** Where a controller
+  answers Start into BIOS setup by queueing the change (a 202, or a task), qKVM cannot follow
+  that task to its end: the change may be made at any time later, and the server's next boot
+  may then land in its BIOS setup. qKVM marks the server's record queued and writes it down at
+  once, at that answer. No look and no time lets it go: the server's card says "The controller
+  queued a change qKVM could not follow; check the boot override in its BMC" until a later
+  start into BIOS setup on that server ends as it should (its change seen made, then the
+  override seen off), or the server is taken off the wall. Check the override in the BMC
+  yourself. The real fix, the task monitor that follows the task to its end, comes in 0.2.0.
 
 ## What is kept, and where
 
@@ -71,6 +80,30 @@ reproduce it helps most.
 
 Nothing else: no telemetry, no licence check, nothing that reports use. It takes no incoming
 network connection.
+
+## What it listens for on this PC
+
+- A second start of the program, which can only ask the running copy to show its window, over
+  a pipe that only your Windows account may open.
+- In a copy the setup installed (0.1.2 and later), the setup's request to close it for an
+  upgrade: an event of your Windows session that only your Windows account may set, and that
+  carries nothing. The program then ends the way Install and restart ends it, and only where
+  nothing would be cut short and that setup still waits for it (one it gave up on is refused);
+  otherwise it stays, and says what holds it in the title of a
+  hidden window of its own, which nothing else may set. A copy from the ZIP listens for no such
+  request. Any program running as you could ask qKVM to close this way, as it could end qKVM in
+  any case.
+- The setup ends qKVM by force only when you choose End it now, or when a silent setup is
+  given `/FORCECLOSE=1`.
+- While a setup or the uninstall works, a start of qKVM ends at once: the setup's mutex is
+  there, and an event named with the number of a process that runs says that it is at work.
+  The uninstall does not begin while a setup is open, or while qKVM runs.
+- Known limit: a program running as you that deliberately keeps the setup's handles open, or
+  keeps its event until Windows gives that process number to another program, can delay a
+  start of qKVM or the uninstall, or make a start take a setup to be at work; 0.2.0's
+  account-qualified coordination is the real fix.
+- Known limit: a start of qKVM in the instant between the uninstall's last look for it and the
+  removal of its files is not stopped; 0.2.0's account-qualified coordination is the real fix.
 
 ## Checking what you install
 

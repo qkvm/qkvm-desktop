@@ -1,0 +1,7 @@
+# The profiles are kept byte for byte as each version wrote them: git changes nothing in them.
+*.json -text
+*.sign-ins -text
+*.incidents -text
+*.setup-overrides -text
+*.locked -text
+*.jpg binary

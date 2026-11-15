@@ -5,6 +5,7 @@
 #include <chrono>
 #include <utility>
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -13,6 +14,7 @@
 #include <QtEndian>
 
 #include <qkvm/core/pacing_file.h>
+#include <qkvm/core/profile.h>
 #include <qkvm/core/scrypt.h>
 #include <qkvm/core/sealing.h>
 #include <qkvm/core/settings.h>
@@ -78,6 +80,20 @@ bool passwordFits(const QString& text)
 bool theProgramsOwn(const QString& name)
 {
     return name.compare(QLatin1StringView(core::PacingFile::keyName), Qt::CaseInsensitive) == 0;
+}
+
+// The settings the lock's marker is named after (main.cpp: core::profile::lockFile); none where it is named otherwise.
+QString settingsBeside(const QString& lockFile)
+{
+    return lockFile.endsWith(u".locked"_s) ? lockFile.chopped(7) : QString();
+}
+
+// What the copy of the settings kept before a reset is named by: the program's version (main.cpp's), or a word where
+// it names none (a test's).
+QString copyName()
+{
+    const QString version = QCoreApplication::applicationVersion();
+    return core::profile::namesAVersion(version) ? version : u"unversioned"_s;
 }
 } // namespace
 
@@ -149,7 +165,7 @@ void AppLock::load()
                                    profile.completeBaseName() + u".unreadable*."_s + profile.suffix()};
         for (const QString& name :
              profile.dir().entryList(remnants, QDir::Files | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot)) {
-            if (name.startsWith(profile.fileName() + u".incidents"_s)) {
+            if (name.startsWith(QFileInfo(core::profile::incidentsFile(profile.filePath())).fileName())) {
                 priorProfile = true;
                 break;
             }
@@ -195,9 +211,28 @@ void AppLock::load()
         failures.toInt(-1) > 30 || !next.isDouble() || next.toInteger(-1) < 0 || !lastFits) {
         m_recovery = true;
         m_mode = u"recovery"_s;
-        m_problem = resetting
-                        ? tr("A saved-secret reset is unfinished. Finish the reset to continue.")
-                        : tr("The app password record is missing or cannot be read. Reset saved secrets to continue.");
+        // Why, in plain words, each case its own (the owner, 2026-11-14). Secrets with neither the record nor its
+        // marker were kept by a test build from before the app password existed; a record of a later form was written
+        // by a newer version, and that version still opens it.
+        const bool othersKept = std::ranges::any_of(names.value(), [](const QString& name) {
+            return !theProgramsOwn(name) && name.compare(recordName(), Qt::CaseInsensitive) != 0 &&
+                   name.compare(setupMarkerName(), Qt::CaseInsensitive) != 0;
+        });
+        m_reason =
+            resetting ? tr("A saved-secret reset is unfinished. Finish the reset to continue.")
+            : !m_passwordSaved && !m_marked && othersKept
+                ? tr("This profile was made by a test build of qKVM from before the app password existed. Its saved "
+                     "secrets were kept without one, and qKVM does not take them over unprotected: reset saved "
+                     "secrets to continue, then set an app password and enter the KVM passwords again.")
+            : !m_passwordSaved && m_marked
+                ? tr("The app password record is missing from Windows Credential Manager, though an app password was "
+                     "set on this PC. qKVM does not open without it: reset saved secrets to continue.")
+            : m_record.value(u"v"_s).toInt() > 1
+                ? tr("The app password was saved by a newer version of qKVM. Open that version again to keep "
+                     "everything, or reset saved secrets to continue with this one.")
+                : tr("The app password record is missing or cannot be read. Reset saved secrets to continue.");
+        m_problem = m_reason;
+        nameTheCopy();
         return;
     }
     m_automatic = m_record.value(u"automatic"_s).toBool();
@@ -210,6 +245,25 @@ void AppLock::load()
     m_next = std::min(next.toInteger(), m_now() + owedWait());
     m_last = std::min(last.toInteger(0), m_now());
     m_mode = m_locked ? u"unlock"_s : QString();
+}
+
+QString AppLock::keptAside() const
+{
+    const QString settings = settingsBeside(m_lockFile);
+    if (settings.isEmpty() || !QFileInfo(settings).isFile() || m_copyAs.isEmpty()) {
+        return {};
+    }
+    // (The very file the copy goes to: resetSecrets writes it there.)
+    return tr("Before anything is erased, qKVM keeps a copy of its settings, with no password in it, as %1 in %2.")
+        .arg(QFileInfo(m_copyAs).fileName(), QDir::toNativeSeparators(QFileInfo(settings).absolutePath()));
+}
+
+void AppLock::nameTheCopy()
+{
+    const QString settings = settingsBeside(m_lockFile);
+    m_copyAs =
+        settings.isEmpty() ? QString() : core::profile::nextCopy(settings, core::profile::CopyKind::Reset, copyName());
+    m_copyRefused = false;
 }
 
 qint64 AppLock::owedWait() const
@@ -258,6 +312,7 @@ void AppLock::tryAgain()
     m_record = {};
     m_mode.clear();
     m_problem.clear();
+    m_reason.clear();
     load();
     emit changed();
 }
@@ -642,6 +697,7 @@ void AppLock::forgot()
     invalidate();
     m_mode = u"reset"_s;
     m_problem.clear();
+    nameTheCopy();
     emit changed();
 }
 
@@ -649,6 +705,22 @@ void AppLock::resetSecrets(bool understood)
 {
     if (!understood || m_mode != u"reset" || m_busy || m_unavailable) {
         return;
+    }
+    // A way back first (the owner, 2026-11-14): the settings as they are, kept beside them under the name the box
+    // shows, before anything is erased. Where that cannot be done, nothing is, and it is said; chosen again, the reset
+    // goes on, with the copy where it can be made by then and without it where not (review 012, L4: a person in
+    // recovery is never kept out for good; the reset erases the secrets, never the settings).
+    if (const QString settings = settingsBeside(m_lockFile); !settings.isEmpty()) {
+        const base::Result<QString> kept =
+            core::profile::keepCopy(settings, core::profile::CopyKind::Reset, copyName(), m_copyAs);
+        if (!kept && !m_copyRefused) {
+            m_copyRefused = true;
+            m_problem = tr("The settings could not be kept aside before the reset (%1). Nothing was erased. Choose "
+                           "Erase saved secrets again to erase them all the same; the settings themselves stay.")
+                            .arg(QString::fromStdString(kept.error().message));
+            emit changed();
+            return;
+        }
     }
     invalidate();
     m_recovery = true;

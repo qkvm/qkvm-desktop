@@ -26,7 +26,8 @@ using namespace Qt::StringLiterals;
 // And stricter than the web's stop, which only logs (review 4's MEDIUM 1): a driver let go of mid-way (at the program's
 // end too) has the goodbyes clear it on the way out, bounded, read back before its session goes; and from the moment
 // the change can go out the server is noted beside the settings as "may be set" (setup_overrides.h), let go of only
-// where it is seen off with nothing of the change still on its way, and told at the next start otherwise.
+// where it is seen off with nothing of the change still on its way, and told at the next start otherwise; one whose
+// change the controller only queued, by no look at all (D1).
 namespace qkvm::core {
 
 namespace {
@@ -43,6 +44,20 @@ QString notCleared()
 QString lookAgain()
 {
     return u"Look at the server's boot override, or start into BIOS setup again."_s;
+}
+
+// Whether an answer's body is a task (Redfish's Task, by its type or its state): what a controller that only queues a
+// change answers with.
+bool aTask(const QJsonObject& said)
+{
+    return said.value("@odata.type"_L1).toString().startsWith(u"#Task."_s) || said.contains("TaskState"_L1);
+}
+
+// What a press says beside what came of it where the controller only queued the change and it was not seen made (D1).
+QString queuedSaid()
+{
+    return u"The controller queued the change, and qKVM cannot follow it to its end: it may still be made later. Look "
+           u"at the server's boot override in its BMC before you rely on it."_s;
 }
 
 // What a press that restarted nothing says, `lead` first, then what became of the override (`left`: nothing where it
@@ -103,12 +118,20 @@ struct RedfishDevice::Setup {
     // until when what stood there before this press doubted; until when the change it sent may still come to be made
     // (this driver's clock); whether that change was seen made (a 204, a 200 or a read that shows it, a read before a
     // clearing that shows it), so that nothing of it can come later; and when the override was seen off at the end
-    // (taken, cleared, another tool's in its place).
+    // (taken, cleared, another tool's in its place). And, from its note on, that it is under way, by no clock
+    // (SetupOverrides::pressUnderWay, review 012-hold's LOW 1): given back as this goes, with the press's last step, at
+    // its end (settleTheNote) or as its driver hands it over (handTheSetupsOver), whatever its window did; set (not
+    // empty) from its note on.
     bool noted = false;
-    std::optional<QDateTime> before;
+    std::shared_ptr<void> underWay;
+    std::optional<SetupOverrides::Earlier> before;
     qint64 lateUntil = 0;
     bool landed = false;
+    // The controller only queued the change (a 202, or a task: D1): it may be made later than any time waited here.
+    bool queued = false;
     std::optional<qint64> seenOffAt;
+    // The press ended as a start into BIOS setup should (done, not refused, timed out or cut off).
+    bool endedWell = false;
 };
 
 void RedfishDevice::startIntoSetup(const std::shared_ptr<Pressing>& pressing)
@@ -222,6 +245,8 @@ void RedfishDevice::setTheOverride(const std::shared_ptr<Setup>& setup, const QB
     change.doesSomething = true;
     change.command = true;
     change.quietMs = m_pace.bootQuietMs;
+    // (Where a controller that queues the change names the task's monitor.)
+    change.headers = {"Location"_ba};
     // A controller wants to be shown the state the change was decided on; one that will not take the mark it gave
     // (or gave none) is told that the change is meant whatever the state, once the computer was read and looked at
     // again (setupRead).
@@ -230,11 +255,20 @@ void RedfishDevice::setTheOverride(const std::shared_ptr<Setup>& setup, const QB
         change.sent = {{"If-Match"_ba, shown}};
     }
     // From here on what comes may have set it: it may be set from the moment it can go out (a driver let go of has it
-    // cleared on the way out), and it is noted beside the settings before it goes (review 4's MEDIUM 1).
+    // cleared on the way out), and it is noted beside the settings before it goes (review 4's MEDIUM 1). Where that
+    // note cannot be written, it does not go: a program that then ended would know nothing of it (outside review of
+    // 0.1.2, C6). The press ends there, with nothing changed on the server; what stood before stands (settleTheNote).
+    setup->lateUntil = now() + m_pace.bootQuietMs + m_pace.transferMs;
+    if (!noteMayBeSet(setup)) {
+        setup->maySet = false;
+        setupOver(setup, base::Error{"storage", "qKVM could not save the note that this server may boot into its "
+                                                "BIOS setup, so it did not ask the server: nothing was changed on it. "
+                                                "Check the free space and the folder of qKVM's settings, and try "
+                                                "again."});
+        return;
+    }
     sentFor(setup->pressing);
     setup->maySet = true;
-    setup->lateUntil = now() + m_pace.bootQuietMs + m_pace.transferMs;
-    noteMayBeSet(setup);
     request(change, [this, setup, meant](const base::Result<Reply>& reply) {
         if (setup->over) {
             return;
@@ -275,6 +309,18 @@ void RedfishDevice::setTheOverride(const std::shared_ptr<Setup>& setup, const QB
             return;
         }
         setup->maySet = true;
+        // A change the controller only queued (a 202, the monitor of a task named, or a Task as the answer): it may be
+        // made later than any time this press waits, and the task is not followed to its end here (its monitor: 0.2.0).
+        // Its server's record is marked so now, and written down at once, before anything else of the press (a program
+        // ended by force then leaves it marked): no look lets it go any more, only a later start into BIOS setup that
+        // ends as it should, or the server taken off the wall (outside review's confirm round of 0.1.2, D1). Read back
+        // as ever; and where it is not seen made, told. (A header asked for is there, empty, where the answer has
+        // none.)
+        setup->queued = setup->queued || status == 202 || !reply.value().headers.value("location").isEmpty() ||
+                        aTask(QJsonDocument::fromJson(reply.value().body).object());
+        if (setup->queued) {
+            overrides().markQueued(m_where.address, m_machine);
+        }
         if (status != 200 && status != 202 && status != 204) {
             QString said = redfish::errorSaid(reply.value().body);
             if (said.isEmpty()) {
@@ -540,7 +586,18 @@ void RedfishDevice::setupOver(const std::shared_ptr<Setup>& setup, const base::R
         return;
     }
     m_setups.removeOne(setup);
+    setup->endedWell = result.ok();
     settleTheNote(setup);
+    // (A change the controller only queued, and that was not seen made: said beside whatever else came of it.)
+    if (setup->queued && setup->maySet && !setup->landed) {
+        if (result) {
+            pressed(setup->pressing, Done{(result.value().note + u' ' + queuedSaid()).trimmed()});
+        } else {
+            pressed(setup->pressing,
+                    base::Error{result.error().code, result.error().message + ' ' + queuedSaid().toStdString()});
+        }
+        return;
+    }
     pressed(setup->pressing, result);
 }
 
@@ -556,16 +613,18 @@ QDateTime RedfishDevice::wallAt(qint64 ms) const
     return QDateTime::currentDateTimeUtc().addMSecs(ms - now());
 }
 
-void RedfishDevice::noteMayBeSet(const std::shared_ptr<Setup>& setup)
+bool RedfishDevice::noteMayBeSet(const std::shared_ptr<Setup>& setup)
 {
     // Until the press can do nothing more: its end, the clearing then (a read and the change, each waited for as long
     // as the change), and a change still on its way after that.
     const qint64 last =
         std::max(setup->endsAt, setup->lateUntil) + (qint64{2} * m_pace.bootQuietMs) + m_pace.transferMs;
-    const std::optional<QDateTime> before = overrides().mayBeSet(m_where.address, m_machine, wallAt(last));
+    const SetupOverrides::Noted noted = overrides().mayBeSet(m_where.address, m_machine, wallAt(last));
     if (!std::exchange(setup->noted, true)) {
-        setup->before = before;
+        setup->before = noted.before;
+        setup->underWay = overrides().pressUnderWay();
     }
+    return noted.written;
 }
 
 void RedfishDevice::settleTheNote(const std::shared_ptr<Setup>& setup)
@@ -575,19 +634,27 @@ void RedfishDevice::settleTheNote(const std::shared_ptr<Setup>& setup)
     }
     SetupOverrides& kept = overrides();
     if (!setup->maySet) {
-        // Nothing of this press's was set (refused for certain, or never sent): what stood before stands as it did.
+        // Nothing of this press's was set (refused for certain, or never sent): what stood before stands as it did, its
+        // doubt on the clock it ran on (R3).
         if (setup->before) {
-            kept.settle(m_where.address, m_machine, *setup->before);
+            kept.restore(m_where.address, m_machine, *setup->before);
         } else {
-            kept.drop(m_where.address, m_machine);
+            static_cast<void>(kept.drop(m_where.address, m_machine));
         }
         return;
     }
-    // Seen off, and nothing of the change this press sent can come after that: let go of. Else it stands, and a look
-    // lets it go once that change can no longer come (the web's CLEARED_LATE: a change accepted, or whose answer was
-    // lost, may be made after the clearing).
-    if (setup->seenOffAt && (setup->landed || *setup->seenOffAt >= setup->lateUntil)) {
-        kept.drop(m_where.address, m_machine);
+    // It ended as a start into BIOS setup should, its change seen made and the override seen off after it: let go of, a
+    // record marked queued too, of this press or of one before (D1).
+    if (setup->endedWell && setup->landed && setup->seenOffAt) {
+        kept.forget(m_where.address, m_machine);
+        return;
+    }
+    // Seen off, and nothing of the change this press sent can come after that: let go of, but not one marked queued (a
+    // queued change may be made after any look: D1). Else it stands, and a look lets it go once that change can no
+    // longer come (the web's CLEARED_LATE: a change accepted, or whose answer was lost, may be made after the
+    // clearing); its doubt, which alone holds an update, as for any press, until then.
+    if (setup->seenOffAt && (setup->landed || *setup->seenOffAt >= setup->lateUntil) &&
+        kept.drop(m_where.address, m_machine)) {
         return;
     }
     kept.settle(m_where.address, m_machine, wallAt(std::max(now(), setup->lateUntil)));
@@ -619,24 +686,27 @@ bool RedfishDevice::handTheSetupsOver()
         }
         clearing = true;
         landed = landed && setup->landed;
+        const bool queued = setup->queued && !setup->landed;
         lateUntil = std::max(lateUntil, setup->lateUntil);
         place = setup->place;
         // Its press is told as it is (on the program's loop, as every press is: pressed): the override may be set, and
         // is cleared on the way out.
-        pressed(
-            setup->pressing,
-            base::Error{"timeout",
-                        "The connection to the controller was let go of while the server was starting into its "
-                        "BIOS setup: the BIOS setup boot override may be set, so the next boot may land in the BIOS "
-                        "setup. It is cleared as the connection goes, and the server's card says so until a look "
-                        "shows it off. Look at the server's boot override, or start into BIOS setup again."});
+        std::string said = "The connection to the controller was let go of while the server was starting into its "
+                           "BIOS setup: the BIOS setup boot override may be set, so the next boot may land in the BIOS "
+                           "setup. It is cleared as the connection goes, and the server's card says so until a look "
+                           "shows it off. Look at the server's boot override, or start into BIOS setup again.";
+        if (queued) {
+            said += ' ' + queuedSaid().toStdString();
+        }
+        pressed(setup->pressing, base::Error{"timeout", said});
     }
     m_setups.clear();
     if (!clearing) {
         return false;
     }
     // From now on a look (of a driver made anew for it) lets it go once nothing of these changes can come any more; and
-    // the clearing below, where it is seen off after the change was seen made.
+    // the clearing below, where it is seen off after the change was seen made. Neither lets one marked queued go (its
+    // mark written at the controller's answer: D1).
     kept.settle(m_where.address, m_machine, wallAt(landed ? now() : std::max(now(), lateUntil)));
     // Under this driver's session, which only its controller knows; and where the server is not known by its number,
     // only under the session it was last judged under.
@@ -658,7 +728,7 @@ bool RedfishDevice::handTheSetupsOver()
     clearingOf.then = [overrides = m_pace.overrides, address = m_where.address, machine = m_machine,
                        landed](bool off, bool oursFirst) {
         if (off && (landed || oursFirst)) {
-            (overrides ? *overrides : SetupOverrides::program()).drop(address, machine);
+            static_cast<void>((overrides ? *overrides : SetupOverrides::program()).drop(address, machine));
         }
     };
     (m_pace.goodbyes ? *m_pace.goodbyes : ControllerGoodbyes::program()).clearSetupOverride(std::move(clearingOf));

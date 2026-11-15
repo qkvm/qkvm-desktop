@@ -1614,6 +1614,19 @@ private slots:
             desk.security->submit({}, u"example-password"_s, u"example-password"_s);
             QVERIFY(desk.security->restricted());
             QCOMPARE(desk.secrets.all.value(u"existing KVM password"_s), QByteArray("preserve me"));
+            // The reset reviewed: why it is asked for stays in sight, in plain words (secrets with neither the record
+            // nor its marker: a profile of a test build from before the app password existed).
+            QVERIFY(QMetaObject::invokeMethod(desk.box(u"appPasswordSubmit"_s), "clicked"));
+            QTRY_COMPARE(desk.security->mode(), u"reset"_s);
+            QTRY_VERIFY(desk.box(u"appResetReason"_s) != nullptr &&
+                        desk.box(u"appResetReason"_s)->property("visible").toBool());
+            QVERIFY(desk.box(u"appResetReason"_s)
+                        ->property("text")
+                        .toString()
+                        .contains(u"made by a test build of qKVM from before the app password existed"_s));
+            QTest::qWait(200);
+            keepPictureOf(desk.window, u"app-password-reset-review"_s + suffix);
+            QCOMPARE(desk.secrets.all.value(u"existing KVM password"_s), QByteArray("preserve me"));
             QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
             return;
         }

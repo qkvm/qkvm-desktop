@@ -30,6 +30,7 @@
 #include "win/hand_over_end.h"
 #include "win/own_temp.h"
 #include "win/setup_wait.h"
+#include "win/shell_start.h"
 
 #include <sddl.h>
 
@@ -240,6 +241,28 @@ private slots:
         view.install();
         QCOMPARE(opened, 0);
         QVERIFY(view.problem().contains(u"all qKVM windows"_s));
+        // Once the hold lifts, its words go as they are read next, and for good (review 012-hold's INFO 3): nothing is
+        // opened before a press, and a hold that comes again is said at the next press. What another refusal says is
+        // its own, and a copy that cannot open an installer goes on saying so.
+        idle = true;
+        QVERIFY(view.problem().isEmpty());
+        idle = false;
+        QVERIFY(view.problem().isEmpty());
+        QCOMPARE(opened, 0);
+        view.install();
+        QVERIFY(view.problem().contains(u"all qKVM windows"_s));
+        view.recover(false);
+        QVERIFY2(view.problem().contains(u"before recovery"_s), qPrintable(view.problem()));
+        view.installWith([] { return true; }, {});
+        view.install();
+        for (int read = 0; read < 2; ++read) {
+            QVERIFY(view.problem().contains(u"all qKVM windows"_s));
+        }
+        view.installWith([&] { return idle; },
+                         [&](const QString&) {
+                             ++opened;
+                             return true;
+                         });
         idle = true;
         view.install();
         QCOMPARE(opened, 1);
@@ -358,6 +381,12 @@ private slots:
         view.install();
         QCOMPARE(view.problem(), u"\"Add a KVM\" has changes that are not saved."_s);
         QCOMPARE(handedOver, 0);
+        // Once it lifts, its words go as they are read next (review 012-hold's INFO 3); nothing is run before a press.
+        idle = true;
+        QVERIFY(view.problem().isEmpty());
+        QCOMPARE(handedOver, 0);
+        QVERIFY(!view.status().contains(u"qKVM closes now"_s));
+        idle = false;
         view.holdWith({});
         // No way to hand over: nothing is run either.
         idle = true;
@@ -510,7 +539,16 @@ private slots:
         const HANDLE setup =
             CreateMutexW(nullptr, TRUE, QString::fromLatin1(ui::setupMutexName).toStdWString().c_str());
         QVERIFY(setup != nullptr);
-        const auto letGo = qScopeGuard([setup] { CloseHandle(setup); });
+        // (And Setup's own event, as one at work makes it: named with its process's number, this test's here, review
+        // R2.)
+        const HANDLE runs = CreateEventW(
+            nullptr, TRUE, FALSE,
+            ui::setupRunsName(QString::fromLatin1(ui::setupMutexName).toStdWString(), GetCurrentProcessId()).c_str());
+        QVERIFY(runs != nullptr);
+        const auto letGo = qScopeGuard([setup, runs] {
+            CloseHandle(runs);
+            CloseHandle(setup);
+        });
         const std::wstring desk = L"qkvm-test-" + std::to_wstring(GetCurrentProcessId());
         // (Its own, open to this user at low integrity too, for the program is started so below.)
         HANDLE token = nullptr;
@@ -587,7 +625,8 @@ private slots:
     }
     // While qKVM's Setup is at work (its mutex there), a start ends at once, unless it is Setup's own (--after-update),
     // which waits for Setup to be over, at most so long, and then starts the program anew through the person's shell
-    // (a starter of the test's own here) and ends; where that fails, it goes on itself (the contract with Setup).
+    // (a starter of the test's own here) and ends; where that fails, or it runs above the person, it ends starting
+    // nothing, and never goes on itself (the contract with Setup; review C1).
     void aStartWhileSetupWorksEndsUnlessItIsSetupsOwn()
     {
         const QString name = u"Local\\qkvm-test-setup-"_s + QString::number(QCoreApplication::applicationPid()) + u'-' +
@@ -610,24 +649,38 @@ private slots:
                  WhileSetupWorks::StartedAnew);
         QCOMPARE(starts, 1);
         QVERIFY(clock.elapsed() < 1000);
-        // Where it cannot start anew, it goes on itself.
+        // Where it cannot start anew, it never goes on itself, with Setup's token: it ends, starting nothing (review
+        // C1).
         startsWell = false;
-        QCOMPARE(ui::whileSetupWorks(name, true, std::chrono::milliseconds(5000), starter), WhileSetupWorks::GoOn);
+        QCOMPARE(ui::whileSetupWorks(name, true, std::chrono::milliseconds(5000), starter),
+                 WhileSetupWorks::NotStartedAgain);
         QCOMPARE(starts, 2);
         startsWell = true;
+        // Where it runs above the person (elevated, or above medium integrity), it ends at once, and starts nothing
+        // through the shell either; a person's own start is not asked that.
+        const auto above = [] { return true; };
+        QCOMPARE(ui::whileSetupWorks(name, true, std::chrono::milliseconds(5000), starter, above),
+                 WhileSetupWorks::NotStartedAgain);
+        QCOMPARE(starts, 2);
+        QCOMPARE(ui::whileSetupWorks(name, false, std::chrono::milliseconds(5000), starter, above),
+                 WhileSetupWorks::GoOn);
         // There for 700 ms: a person's start ends at once; Setup's own waits until it is gone, and only then starts
         // anew.
         std::atomic<bool> made{false};
         std::atomic<bool> letGo{false};
         std::atomic<qint64> goneAt{-1};
         std::thread setup([&] {
+            // (As Setup is at work: its mutex, and its own event named with its process's number, this test's here.)
             const HANDLE held = CreateMutexW(nullptr, TRUE, name.toStdWString().c_str());
+            const HANDLE runs = CreateEventW(nullptr, TRUE, FALSE,
+                                             ui::setupRunsName(name.toStdWString(), GetCurrentProcessId()).c_str());
             made = true;
             while (!letGo) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(700));
             goneAt = clock.elapsed();
+            CloseHandle(runs);
             CloseHandle(held);
         });
         QTRY_VERIFY(made.load());
@@ -642,17 +695,137 @@ private slots:
         setup.join();
         QCOMPARE(starts, 3);
         QVERIFY2(startedAt.load() >= goneAt.load(), qPrintable(u"%1 < %2"_s.arg(startedAt.load()).arg(goneAt.load())));
+        // Review C4 (the outside review): a handle to Setup's mutex kept elsewhere keeps it there after Setup has
+        // ended. Setup's own start waits for Setup's own process (here: a thread of the test's that ends after 700 ms)
+        // to end, never for the mutex, and starts anew then though the mutex is still there.
+        {
+            const HANDLE kept = CreateMutexW(nullptr, FALSE, name.toStdWString().c_str());
+            QVERIFY(kept != nullptr);
+            const auto letGoOfIt = qScopeGuard([kept] { CloseHandle(kept); });
+            std::atomic<qint64> setupEndedAt{-1};
+            std::thread setupRuns([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(700));
+                setupEndedAt = clock.elapsed();
+            });
+            const auto joined = qScopeGuard([&setupRuns] {
+                if (setupRuns.joinable()) {
+                    setupRuns.join();
+                }
+            });
+            QCOMPARE(ui::whileSetupWorks(
+                         name, true, std::chrono::milliseconds(10000), starter, [] { return false; },
+                         setupRuns.native_handle()),
+                     WhileSetupWorks::StartedAnew);
+            QCOMPARE(starts, 4);
+            QVERIFY2(startedAt.load() >= setupEndedAt.load() && setupEndedAt.load() >= 0,
+                     qPrintable(u"%1 < %2"_s.arg(startedAt.load()).arg(setupEndedAt.load())));
+            // And Setup's own process that does not end within `most`: it gives up, and starts nothing.
+            const HANDLE never = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            QVERIFY(never != nullptr);
+            const auto closeNever = qScopeGuard([never] { CloseHandle(never); });
+            QCOMPARE(ui::whileSetupWorks(
+                         name, true, std::chrono::milliseconds(300), starter, [] { return false; }, never),
+                     WhileSetupWorks::StillUpdating);
+            QCOMPARE(starts, 4);
+        }
+        // The starter of this test program is found, began before it, and is not this program.
+        const HANDLE starterOfThis = ui::openTheStarter();
+        QVERIFY(starterOfThis != nullptr);
+        QVERIFY(GetProcessId(starterOfThis) != GetCurrentProcessId());
+        CloseHandle(starterOfThis);
+        // Review R2 (the outside review's confirm round): a handle to Setup's mutex kept elsewhere after Setup has
+        // ended, with no process that runs saying it is that Setup (none, or one named with a number no process has):
+        // a person's start goes on, the restart through the shell among them; only a Setup that runs holds it.
+        {
+            const HANDLE kept = CreateMutexW(nullptr, FALSE, name.toStdWString().c_str());
+            QVERIFY(kept != nullptr);
+            const auto letGoOfIt = qScopeGuard([kept] { CloseHandle(kept); });
+            QCOMPARE(ui::whileSetupWorks(name, false, std::chrono::milliseconds(5000), starter), WhileSetupWorks::GoOn);
+            const HANDLE ofNone =
+                CreateEventW(nullptr, TRUE, FALSE, ui::setupRunsName(name.toStdWString(), 0xFFFFFFFCUL).c_str());
+            QVERIFY(ofNone != nullptr);
+            const auto closeOfNone = qScopeGuard([ofNone] { CloseHandle(ofNone); });
+            QCOMPARE(ui::whileSetupWorks(name, false, std::chrono::milliseconds(5000), starter), WhileSetupWorks::GoOn);
+            const HANDLE runs = CreateEventW(nullptr, TRUE, FALSE,
+                                             ui::setupRunsName(name.toStdWString(), GetCurrentProcessId()).c_str());
+            QVERIFY(runs != nullptr);
+            const auto closeRuns = qScopeGuard([runs] { CloseHandle(runs); });
+            QCOMPARE(ui::whileSetupWorks(name, false, std::chrono::milliseconds(5000), starter),
+                     WhileSetupWorks::BeingUpdated);
+            QCOMPARE(starts, 4);
+        }
         // There all the time: Setup's own start gives up after `most`, and starts nothing.
         const HANDLE held = CreateMutexW(nullptr, TRUE, name.toStdWString().c_str());
         QVERIFY(held != nullptr);
+        const HANDLE heldRuns =
+            CreateEventW(nullptr, TRUE, FALSE, ui::setupRunsName(name.toStdWString(), GetCurrentProcessId()).c_str());
+        QVERIFY(heldRuns != nullptr);
+        const auto closeHeldRuns = qScopeGuard([heldRuns] { CloseHandle(heldRuns); });
         const qint64 waited = clock.elapsed();
         QCOMPARE(ui::whileSetupWorks(name, true, std::chrono::milliseconds(800), starter),
                  WhileSetupWorks::StillUpdating);
         QVERIFY2(clock.elapsed() - waited >= 700 && clock.elapsed() - waited < 5000,
                  qPrintable(QString::number(clock.elapsed() - waited)));
-        QCOMPARE(starts, 3);
+        QCOMPARE(starts, 4);
         CloseHandle(held);
     }
+    // Review C1: what runs above the person (elevated, or at an integrity above medium) is never let start qKVM after
+    // an update; this test runs as the person, and so does its own process, by the rule the shell is held to; a process
+    // of the system's, or none, is not the person's.
+    void aboveThePersonIsElevatedOrAboveMediumAndTheShellIsHeldToThePerson()
+    {
+        QVERIFY(ui::aboveThePerson(true, SECURITY_MANDATORY_MEDIUM_RID));
+        QVERIFY(ui::aboveThePerson(false, SECURITY_MANDATORY_HIGH_RID));
+        QVERIFY(ui::aboveThePerson(false, SECURITY_MANDATORY_MEDIUM_PLUS_RID));
+        QVERIFY(ui::aboveThePerson(false, SECURITY_MANDATORY_SYSTEM_RID));
+        QVERIFY(!ui::aboveThePerson(false, SECURITY_MANDATORY_MEDIUM_RID));
+        QVERIFY(!ui::aboveThePerson(false, SECURITY_MANDATORY_LOW_RID));
+        HANDLE token = nullptr;
+        QVERIFY(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token) != FALSE);
+        TOKEN_ELEVATION elevation{};
+        DWORD size = 0;
+        const bool told = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) != FALSE;
+        CloseHandle(token);
+        QVERIFY(told);
+        if (elevation.TokenIsElevated != 0) {
+            QSKIP("This test program runs elevated: the person's own process is not what it is here.");
+        }
+        QVERIFY(!ui::runsAboveThePerson());
+        QVERIFY(ui::processIsThePersons(GetCurrentProcessId()));
+        // (The system's own process, and a number of none.)
+        QVERIFY(!ui::processIsThePersons(4));
+        QVERIFY(!ui::processIsThePersons(0));
+        // Another user's token is not the person's: Windows' anonymous one stands for it here. One of the person's own
+        // at low integrity is theirs, and not above them.
+        HANDLE ours = nullptr;
+        QVERIFY(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT, &ours) !=
+                FALSE);
+        const auto closeOurs = qScopeGuard([ours] { CloseHandle(ours); });
+        QVERIFY(ui::tokenIsThePersons(ours, ours));
+        QVERIFY(ImpersonateAnonymousToken(GetCurrentThread()) != FALSE);
+        HANDLE anonymous = nullptr;
+        const bool openedAnonymous = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &anonymous) != FALSE;
+        QVERIFY(RevertToSelf() != FALSE);
+        QVERIFY(openedAnonymous);
+        const auto closeAnonymous = qScopeGuard([anonymous] { CloseHandle(anonymous); });
+        QVERIFY(!ui::tokenIsThePersons(anonymous, ours));
+        HANDLE low = nullptr;
+        QVERIFY(DuplicateTokenEx(ours, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, nullptr, SecurityImpersonation, TokenPrimary,
+                                 &low) != FALSE);
+        const auto closeLow = qScopeGuard([low] { CloseHandle(low); });
+        PSID lowLevel = nullptr;
+        QVERIFY(ConvertStringSidToSidW(L"S-1-16-4096", &lowLevel) != FALSE);
+        TOKEN_MANDATORY_LABEL label{};
+        label.Label.Attributes = SE_GROUP_INTEGRITY;
+        label.Label.Sid = lowLevel;
+        const bool lowered =
+            SetTokenInformation(low, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid(lowLevel)) != FALSE;
+        LocalFree(lowLevel);
+        QVERIFY(lowered);
+        QVERIFY(ui::tokenIsThePersons(low, ours));
+        QVERIFY(!ui::tokenRunsAboveThePerson(low));
+    }
+
     // The program that Setup started at its end has Setup's own TEMP and TMP: put back to the person's own at its
     // start, and only those.
     void setupsOwnTempIsPutBackAtTheStart()

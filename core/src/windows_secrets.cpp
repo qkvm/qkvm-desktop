@@ -111,12 +111,17 @@ public:
     }
 
 private:
-    std::wstring targetOf(const QString& name) const { return (m_under + QStringLiteral(": ") + name).toStdWString(); }
+    std::wstring targetOf(const QString& name) const { return windowsTargetOf(name, m_under).toStdWString(); }
 
     QString m_under;
 };
 
 } // namespace
+
+QString windowsTargetOf(const QString& name, const QString& under)
+{
+    return under + QStringLiteral(": ") + name;
+}
 
 std::unique_ptr<SecretStore> windowsSecrets(const QString& under)
 {
