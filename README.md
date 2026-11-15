@@ -2,7 +2,7 @@
 
 <a href="https://qkvm.com"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm/main/.github/brand/qkvm-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm/main/.github/brand/qkvm-light.svg" alt="qKVM" height="64"></picture></a>
 
-# qKVM Desktop
+# qKVM Desktop for Windows
 
 **Every KVM and server screen you run, on one native Windows wall.**<br>
 Open source. No server, no cloud, no account. Built in C++ and Qt 6 for video that feels like you are sitting at the machine.
@@ -43,7 +43,7 @@ operating system is down. Homelabs, offices and data centers use them to look af
 **qKVM** puts all of those screens on one wall. You see every machine live at a glance, and with one click you work on
 one of them as if you were there. qKVM comes in two forms that share one look and one way of working:
 
-- **qKVM Desktop** (this repository): a native Windows program for one PC. Nothing else to run.
+- **qKVM Desktop for Windows** (this repository): a native program for one Windows 10 or 11 PC. Nothing else to run.
 - **[qKVM server](https://github.com/qkvm/qkvm)**: a self-hosted web app for a team, opened in any browser.
 
 They work together: the desktop can sign in to a qKVM server and show that server's wall beside its own.
