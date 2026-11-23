@@ -245,6 +245,35 @@ private slots:
         QCOMPARE(titles(shown), (QStringList{QString(), u"Keyboard"_s, u"Your actions"_s}));
         QCOMPARE(rows(shown, u"Keyboard"_s), keyboard);
 
+        // After the rebase onto the VNC servers: a VNC server and a Proxmox guest, each by what it can (`can`), and
+        // picked together, what either can. The VNC server has no power and no media; the guest has both; together the
+        // keyboard of both and the guest's power, and nothing that neither lists (no mouse jiggler).
+        MenuOf guest;
+        guest.machine = server();
+        guest.machine.id = u"g1"_s;
+        guest.machine.kind = u"proxmox"_s;
+        guest.status = serverThatIs(true, std::nullopt);
+        guest.status->capabilities = QStringList{u"power"_s, u"reset"_s, u"power_state"_s, u"media"_s,  u"screen"_s,
+                                                 u"keys"_s,  u"text"_s,  u"live"_s,        u"control"_s};
+        guest.saved = {pressing, typing};
+        guest.media = true;
+        MenuOf vncToo = vnc;
+        vncToo.media = true; // (whoever may have media is offered none where the machine has none)
+        const Menu ofTheVncServer = ui::menuFor(vncToo);
+        QVERIFY(!titles(ofTheVncServer).contains(u"Power"_s));
+        QVERIFY(ofTheVncServer.row(u"media"_s) == nullptr);
+        const Menu ofTheGuest = ui::menuFor(guest);
+        QVERIFY(titles(ofTheGuest).contains(u"Power"_s));
+        QVERIFY(ofTheGuest.row(u"media"_s) != nullptr);
+        QCOMPARE(rows(ofTheGuest, u"Keyboard"_s), keyboard);
+        const Menu both = ui::menuForSeveral({vncToo, guest});
+        QCOMPARE(rows(both, u"Keyboard"_s), keyboard);
+        const QStringList bothPower = rows(both, u"Power"_s);
+        QVERIFY2(bothPower.contains(u"power:power_on"_s) && bothPower.contains(u"power:power_off"_s),
+                 qPrintable(bothPower.join(u',')));
+        QVERIFY2(!bothPower.contains(u"power:jiggler_on"_s) && !bothPower.contains(u"power:jiggler_off"_s),
+                 qPrintable(bothPower.join(u',')));
+
         // Several of them: what any of them can.
         MenuOf one;
         one.machine = server();

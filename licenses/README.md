@@ -15,6 +15,12 @@
   the copyright file of the Ubuntu package it was taken from (mingw-w64-x86-64-dev 11.0.1-3build1,
   pinned by its SHA-256 in `tools/build_ffmpeg.ps1`), `usr/share/doc/mingw-w64-x86-64-dev/copyright`,
   SHA-256 `af23297b7d17e8e31817a5d58088de6fdafe34705bb5a7d1d330f08711b31314`.
+- `arm64/mingw-w64-runtime.txt`: the same for the ARM64 package, whose FFmpeg DLLs are built with llvm-mingw
+  and linked against the MinGW-w64 runtime it builds for ARM64 (mingw-w64 15.0.0): a few lines that say so,
+  then, unchanged, `aarch64-w64-mingw32/share/mingw32/COPYING.MinGW-w64-runtime.txt` of the llvm-mingw archive
+  pinned in `tools/build_ffmpeg.ps1` (llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64.tar.xz), SHA-256
+  `1db8da07b436c68833c0673ffee3d9fcb2526047f3820b81661865dfedc79a1f`. `tools/package.ps1 -Arch arm64` puts it in
+  the ARM64 package's `licenses/` in place of the x64 one.
 - `Inno-Setup-license.txt`: the licence of Inno Setup, whose setup and uninstall program are inside the
   setup (`tools/build_setup.ps1`) and left by it in the program's folder: `license.txt` as Inno Setup 6.7.4
   unpacks it (`tools/fetch_inno.ps1`; SHA-256

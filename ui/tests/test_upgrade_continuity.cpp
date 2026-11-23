@@ -4,20 +4,26 @@
 #include <optional>
 #include <utility>
 
+#include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
+#include <QVersionNumber>
 
 #include <qkvm/core/incidents.h>
 #include <qkvm/core/kvmd_device.h>
+#include <qkvm/core/local_wall.h>
 #include <qkvm/core/pacing_file.h>
 #include <qkvm/core/profile.h>
 #include <qkvm/core/screen_watch.h>
@@ -53,7 +59,7 @@ using core::testing::StandIn;
 namespace {
 
 // Every version that was published: a fixture of each, of a person at the PC and of a wall screen, and none may go.
-const QStringList published{u"0.1.0"_s, u"0.1.1"_s};
+const QStringList published{u"0.1.0"_s, u"0.1.1"_s, u"0.1.2"_s};
 const QString wallScreen = u"-wall-screen"_s;
 
 QJsonObject jsonIn(const QString& file)
@@ -63,6 +69,24 @@ QJsonObject jsonIn(const QString& file)
         return {};
     }
     return QJsonDocument::fromJson(kept.readAll()).object();
+}
+
+// A version after every published one, as the version that upgrades them starts (this build's own number may still be
+// the last published one's until it is released), and after every version that made a fixture here: a release's own
+// fixture, made with this build's maker, is there before its version is in `published` (the merged release review,
+// part C, M1: a first start of "0.2.0" over the 0.2.0 fixture was no start of another version).
+QString aLaterVersion()
+{
+    QVersionNumber last;
+    for (const QString& one : published) {
+        last = std::max(last, QVersionNumber::fromString(one));
+    }
+    const QDir all(QStringLiteral(QKVM_PROFILE_FIXTURES));
+    for (const QString& name : all.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QJsonObject made = jsonIn(all.filePath(name + u"/made.json"_s));
+        last = std::max(last, QVersionNumber::fromString(made["made_by"_L1]["version"_L1].toString()));
+    }
+    return QVersionNumber(last.majorVersion(), last.minorVersion() + 1, 0).toString();
 }
 
 // A published version's fixture, as it is kept here (read only).
@@ -197,6 +221,75 @@ void lostFrom(const QJsonValue& old, const QJsonValue& now, const QString& at, Q
     }
 }
 
+// 0.1.2's own reading of a KVM's password, copied from its source (core/src/local_wall.cpp at 5b6c0956: savedFor,
+// 242 to 255, and passwordIn, 291 to 311): the three lines it saves a password for, and the password only where the
+// secret begins with them. A record of two (from 0.2.0 on) begins otherwise: it reads none of it.
+QByteArray linesBy012(const core::OwnKvm& kvm)
+{
+    QByteArray lines = "QKVM-KVM-2\n" + kvm.address.toUtf8().toPercentEncoding(":/[]") + '\n';
+    lines += kvm.knownByCertificate ? "sha256:" + kvm.certificate.toHex() : QByteArray("none");
+    return lines + '\n';
+}
+
+QString passwordBy012(const QByteArray& secret, const core::OwnKvm& kvm)
+{
+    const QByteArray lines = linesBy012(kvm);
+    return secret.startsWith(lines) ? QString::fromUtf8(secret.sliced(lines.size())) : QString();
+}
+
+// What 0.1.2 does with a yes to another certificate of a KVM over HTTPS that no other KVM of its wall is known by,
+// copied from its source (knowBy and alter, 1545 to 1732): the kept password goes along where it reads one for the
+// KVM as it was, saved anew for that certificate, and stays marked; where it reads none, nothing is written to the
+// store, and the mark that a password is kept goes. The KVM is not asked what it is from then on, and the certificate
+// kept beside it goes. (Nothing it does erases a record but the removal of its KVM, a change that is taken back, and
+// "Reset saved secrets".) The settings as this build writes them, with what 0.1.2 writes of the KVM.
+void aYesBy012(const QString& settingsFile, core::SecretStore& secrets, const QString& id, const QByteArray& to)
+{
+    core::Settings settings(settingsFile);
+    core::Remembered with = settings.remembered();
+    const auto kvm = std::ranges::find_if(with.kvms, [&id](const core::OwnKvm& one) { return one.id == id; });
+    QVERIFY(kvm != with.kvms.end());
+    core::OwnKvm moved = *kvm;
+    moved.knownByCertificate = true;
+    moved.certificate = to;
+    moved.askedWhatItIs = false;
+    const QString name = core::LocalWall::secretOf(id);
+    const QString kept = passwordBy012(secrets.kept(name), *kvm);
+    if (kept.isEmpty()) {
+        with.kvmPasswordsKept.remove(id);
+    } else {
+        QVERIFY(secrets.keep(name, linesBy012(moved) + kept.toUtf8()).ok());
+        with.kvmPasswordsKept.insert(id);
+    }
+    with.kvmCertificates.remove(id);
+    *kvm = moved;
+    QVERIFY(static_cast<bool>(settings.remember(with)));
+}
+
+// A start of this build over the profile: the password of the KVM `id` as the file of the wall takes it, and whether
+// the wall marks one kept for it.
+struct StartedWith {
+    QString password;
+    bool marked = false;
+};
+
+StartedWith aStartOf(const QString& settingsFile, core::SecretStore& secrets, const QString& id)
+{
+    core::Settings settings(settingsFile);
+    core::testing::WallOfATest wall(settings, secrets, core::KvmdDevice::Pace{});
+    const core::LocalWall::AsAFile file = wall.asAFile(true);
+    const QList<core::exchange::Device> devices = file.content.devices.value_or(QList<core::exchange::Device>());
+    const auto kvm = std::ranges::find_if(wall.kvms(), [&id](const core::OwnKvm& one) { return one.id == id; });
+    StartedWith started;
+    if (kvm != wall.kvms().end()) {
+        const auto device = std::ranges::find_if(
+            devices, [&kvm](const core::exchange::Device& one) { return one.address == kvm->address; });
+        started.password = device != devices.end() ? device->password : QString();
+    }
+    started.marked = wall.marksAPasswordFor(id);
+    return started;
+}
+
 // A QKVM as far as signing in goes: whoever brings the session it gave is signed in.
 Answered aQkvm(const Asked& asked, bool signedIn)
 {
@@ -256,6 +349,51 @@ class TestUpgradeContinuity : public QObject {
     {
         QFETCH(QString, folder);
         return Fixture(folder);
+    }
+
+    // The rows: every fixture whose KVM a cut change left with a record of two (made.json's `cut_change`, from 0.2.0
+    // on), and one that fails where none is there.
+    static void fixturesWithACut()
+    {
+        QTest::addColumn<QString>("folder");
+        const QDir all(QStringLiteral(QKVM_PROFILE_FIXTURES));
+        bool any = false;
+        for (const QString& name : all.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)) {
+            if (Fixture(all.filePath(name)).made["cut_change"_L1].isObject()) {
+                QTest::newRow(qPrintable(name)) << all.filePath(name);
+                any = true;
+            }
+        }
+        if (!any) {
+            QTest::newRow("none holds a record of two") << QString();
+        }
+    }
+
+    // Where the fixture's card of that id keeps its server's computer, as made.json says its maker noted it: none where
+    // it says none, or nothing (every version before 0.2.0).
+    static core::ServerPlace placeMadeFor(const Fixture& fixture, const QString& id)
+    {
+        for (const QJsonValue one : fixture.made["kvms"_L1].toArray()) {
+            if (one["id"_L1].toString() == id) {
+                const QJsonObject place = one["server_place"_L1].toObject();
+                return place.isEmpty()
+                           ? core::ServerPlace{}
+                           : core::ServerPlace{place["place"_L1].toString(), place["among_several"_L1].toBool()};
+            }
+        }
+        return {};
+    }
+
+    // The KVM of the row's cut change, as made.json has it.
+    static QJsonObject cutKvm(const Fixture& fixture)
+    {
+        const QString id = fixture.made["cut_change"_L1]["id"_L1].toString();
+        for (const QJsonValue one : fixture.made["kvms"_L1].toArray()) {
+            if (one["id"_L1].toString() == id) {
+                return one.toObject();
+            }
+        }
+        return {};
     }
 
 private slots:
@@ -364,7 +502,11 @@ private slots:
         // This PC's own wall, in its order, each KVM as it was added, with its group; and as the wall has them.
         const QJsonArray kvms = fixture.made["kvms"_L1].toArray();
         QCOMPARE(now.kvms.size(), kvms.size());
-        // A KVM of a family this build does not speak to, as a newer build left it: kept as it stands.
+        // A KVM of a family this build does not speak to, as a newer build left it: kept as it stands. (Of a kind no
+        // version speaks to: "vnc" stood here, which this build reads from 0.2.0 on, and the test no longer tried what
+        // it is for. An entry of a family this build reads that it cannot read is kept too: test_core_settings.)
+        QVERIFY2(!core::OwnKvm::namesAFamily(fixture.made["kvm_of_another_family"_L1]["kind"_L1].toString()),
+                 "the fixture's KVM of another family is of a family this build speaks to");
         QCOMPARE(now.kvmsItDoesNotRead, QJsonArray{fixture.made["kvm_of_another_family"_L1]});
         for (qsizetype index = 0; index < kvms.size(); ++index) {
             const QJsonValue made = kvms.at(index);
@@ -379,6 +521,23 @@ private slots:
             QCOMPARE(QString::fromLatin1(kvm.certificate.toHex()), made["certificate"_L1].toString());
             QCOMPARE(kvm.number, made["number"_L1].toString());
             QCOMPARE(kvm.machine, made["machine"_L1].toString());
+            // ...and where a server's controller keeps its computer (from 0.2.0's fixture on; none before it, and a
+            // card of before keeps none: outside review of 0.2.0's Redfish fixes, M1).
+            const QJsonValue at = made["server_place"_L1];
+            QVERIFY2(kvm.serverPlace == (core::ServerPlace{at["place"_L1].toString(), at["among_several"_L1].toBool()}),
+                     qPrintable(kvm.name));
+            // A Proxmox guest's node and number (from 0.2.0's fixture on; none before it).
+            QCOMPARE(kvm.node, made["node"_L1].toString());
+            QCOMPARE(kvm.vmid, made["vmid"_L1].toInteger());
+            // ...and the boot order its driver replaced and had not put back yet (from 0.2.0's fixture on).
+            const QJsonValue was = made["boot_order_was"_L1];
+            QCOMPARE(kvm.bootOrderWas.has_value(), was.isObject());
+            if (kvm.bootOrderWas) {
+                QCOMPARE(kvm.bootOrderWas->order, was["order"_L1].toString());
+                QCOMPARE(kvm.bootOrderWas->written, was["written"_L1].toString());
+                QCOMPARE(kvm.bootOrderWas->vmid, was["vmid"_L1].toInteger());
+                QCOMPARE(kvm.bootOrderWas->machine, was["machine"_L1].toString());
+            }
             QCOMPARE(kvm.noSignalMinutes, made["no_signal_minutes"_L1].toInt());
             QCOMPARE(kvm.unchangedMinutes, made["unchanged_minutes"_L1].toInt());
             QCOMPARE(kvm.askedWhatItIs, old["kvms"_L1][index]["asked"_L1].toBool());
@@ -415,11 +574,82 @@ private slots:
         Profile profile(fixture);
         const core::Settings read(profile.settingsFile);
         const QString again = profile.home.filePath(u"again/settings.json"_s);
+        // (Written by the version that upgrades, as the program names itself.)
+        QCoreApplication::setApplicationVersion(aLaterVersion());
+        const auto unnamed = qScopeGuard([] { QCoreApplication::setApplicationVersion({}); });
         core::Settings written(again);
         QVERIFY(written.remember(read.remembered()));
+        // Which version wrote them is the one thing that is to change (from 0.1.2 on: "written_by"), and it names the
+        // version that wrote them now; the copy of them as they were found keeps the old name (SPEC.md section 11.2).
+        const QJsonObject now = jsonIn(again);
+        QCOMPARE(now["written_by"_L1].toString(), aLaterVersion());
+        QJsonObject old = fixture.settings;
+        old.remove(u"written_by"_s);
         QStringList lost;
-        lostFrom(fixture.settings, jsonIn(again), {}, lost);
+        lostFrom(old, now, {}, lost);
         QVERIFY2(lost.isEmpty(), qPrintable(lost.join(u"; "_s)));
+    }
+
+    // Where a server's controller keeps its computer (OwnKvm::serverPlace, from 0.2.0: outside review of 0.2.0's
+    // Redfish fixes, M1), read as the fixture keeps it (none before 0.2.0, the maker's own place from 0.2.0's fixture
+    // on: the merged review of 0.2.0, C-M1), then noted elsewhere beside the server card as this build's wall notes a
+    // place its driver found: read as it was, and written again as it was. The way back to 0.1.2, whose written() names
+    // the keys it writes of a card (copied from its source at 5b6c0956: id, kind, name, address, user, group,
+    // known_by_certificate, certificate, asked, number, machine and the two screen watches), drops it and nothing else:
+    // up again, the card is as one from before (its place learnt anew at its computer's next number), its mark and the
+    // rest as they were.
+    void whereAServersComputerIsIsKeptAndTheWayBackTo012DropsItAlone_data() { fixtures(); }
+    void whereAServersComputerIsIsKeptAndTheWayBackTo012DropsItAlone()
+    {
+        const Fixture fixture = TestUpgradeContinuity::fixture();
+        QVERIFY2(fixture.whole(), "the fixture of a published version is missing or incomplete");
+        Profile profile(fixture);
+        const core::ServerPlace elsewhere{u"/redfish/v1/Systems/1"_s, false};
+        QList<core::OwnKvm> noted;
+        {
+            core::Settings settings(profile.settingsFile);
+            core::Remembered with = settings.remembered();
+            const auto server =
+                std::ranges::find_if(with.kvms, [](const core::OwnKvm& one) { return one.kind == "redfish"_L1; });
+            QVERIFY2(server != with.kvms.end(), "the fixture has no server's controller");
+            const core::ServerPlace made = placeMadeFor(fixture, server->id);
+            QVERIFY2(
+                server->serverPlace == made,
+                qPrintable(
+                    u"%1 (among several: %2)"_s.arg(server->serverPlace.place).arg(server->serverPlace.amongSeveral)));
+            QVERIFY(made != elsewhere);
+            server->serverPlace = elsewhere;
+            QVERIFY(settings.remember(with).ok());
+            noted = with.kvms;
+        }
+        QVERIFY(core::Settings(profile.settingsFile).remembered().kvms == noted);
+        QJsonObject file = jsonIn(profile.settingsFile);
+        QJsonArray kvms = file["kvms"_L1].toArray();
+        int dropped = 0;
+        for (qsizetype index = 0; index < kvms.size(); ++index) {
+            QJsonObject one = kvms.at(index).toObject();
+            if (one.contains("server_place"_L1)) {
+                QCOMPARE(one["kind"_L1].toString(), u"redfish"_s);
+                QCOMPARE(one["server_place"_L1].toObject(),
+                         (QJsonObject{{u"place"_s, elsewhere.place}, {u"among_several"_s, elsewhere.amongSeveral}}));
+                one.remove(u"server_place"_s);
+                ++dropped;
+            }
+            kvms[index] = one;
+        }
+        QCOMPARE(dropped, 1);
+        file.insert(u"kvms"_s, kvms);
+        QFile back(profile.settingsFile);
+        QVERIFY(back.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QVERIFY(back.write(QJsonDocument(file).toJson()) > 0);
+        back.close();
+        const QList<core::OwnKvm> up = core::Settings(profile.settingsFile).remembered().kvms;
+        QCOMPARE(up.size(), noted.size());
+        for (qsizetype index = 0; index < up.size(); ++index) {
+            core::OwnKvm asBefore = noted.at(index);
+            asBefore.serverPlace = {};
+            QVERIFY2(up.at(index) == asBefore, qPrintable(asBefore.name));
+        }
     }
 
     // Every KVM's password, and every saved action's typed text, is read by the code that uses it: none is missing.
@@ -461,6 +691,103 @@ private slots:
             QCOMPARE(action->text, made["text"_L1].toString());
         }
         QVERIFY(typing > 0);
+    }
+
+    // A KVM whose change a cut left with a record of two (QKVM-KVM-2+, from 0.2.0 on: SPEC.md section 11.4) opens with
+    // its password, and the start makes the record one: the one for the KVM as the settings have it, alone; nothing
+    // else of the store changes, and the next start keeps nothing (review cx6-1, M2).
+    void aRecordOfTwoACutChangeLeftOpensWithItsPasswordAndIsMadeOne_data() { fixturesWithACut(); }
+    void aRecordOfTwoACutChangeLeftOpensWithItsPasswordAndIsMadeOne()
+    {
+        const Fixture fixture = TestUpgradeContinuity::fixture();
+        QVERIFY2(fixture.whole(), "no fixture holds a record of two that a cut change left");
+        Profile profile(fixture);
+        const QJsonObject made = cutKvm(fixture);
+        QVERIFY(!made.isEmpty());
+        const QString id = made["id"_L1].toString();
+        const QString name = core::LocalWall::secretOf(id);
+        const QByteArray password = made["password"_L1].toString().toUtf8();
+        const QString address = made["address"_L1].toString();
+        // As the fixture has it: the record for the KVM as it was, and the one for it as the settings have it.
+        const QJsonObject cut = fixture.made["cut_change"_L1].toObject();
+        const QByteArray wasKnownBy = QByteArray::fromHex(cut["certificate_before"_L1].toString().toLatin1());
+        const QByteArray isKnownBy = QByteArray::fromHex(made["certificate"_L1].toString().toLatin1());
+        const QByteArray before = core::testing::savedFor(password, address, wasKnownBy);
+        const QByteArray now = core::testing::savedFor(password, address, isKnownBy);
+        QCOMPARE(profile.secrets.all.value(name),
+                 "QKVM-KVM-2+\n" + QByteArray::number(before.size()) + '\n' + before + now);
+        QHash<QString, QByteArray> others = profile.secrets.all;
+        others.remove(name);
+        const StartedWith started = aStartOf(profile.settingsFile, profile.secrets, id);
+        QCOMPARE(started.password, made["password"_L1].toString());
+        QVERIFY(started.marked);
+        QCOMPARE(profile.secrets.all.value(name), now);
+        QHash<QString, QByteArray> othersNow = profile.secrets.all;
+        othersNow.remove(name);
+        QCOMPARE(othersNow, others);
+        const int keeps = profile.secrets.keeps;
+        QCOMPARE(aStartOf(profile.settingsFile, profile.secrets, id).password, made["password"_L1].toString());
+        QCOMPARE(profile.secrets.keeps, keeps);
+    }
+
+    // The way back to 0.1.2 and up again (review cx6-1, M2), by 0.1.2's own rules copied from its source (aYesBy012):
+    // 0.1.2 reads a record of two as no password, and erases nothing of it. Up again with nothing done to that KVM
+    // there, this build has its password. Where this build started once between the cut and the way back, the record
+    // was made one: 0.1.2 reads it, and a yes there to a renewed certificate takes it along, as ever. Where 0.1.2 came
+    // straight after the cut and a yes was said there, 0.1.2 took the KVM on without its password and dropped its mark:
+    // up again, the KVM has none, and asks for it (the record stays, used for nothing). That one is lost: SPEC.md
+    // section 11.4 and the changelog's known limits say so.
+    void theWayBackTo012AndUpAgainKeepsThePasswordWhereThisBuildStartedBetween_data() { fixturesWithACut(); }
+    void theWayBackTo012AndUpAgainKeepsThePasswordWhereThisBuildStartedBetween()
+    {
+        const Fixture fixture = TestUpgradeContinuity::fixture();
+        QVERIFY2(fixture.whole(), "no fixture holds a record of two that a cut change left");
+        const QJsonObject made = cutKvm(fixture);
+        QVERIFY(!made.isEmpty());
+        const QString id = made["id"_L1].toString();
+        const QString name = core::LocalWall::secretOf(id);
+        const QString password = made["password"_L1].toString();
+        core::OwnKvm asMade;
+        asMade.address = made["address"_L1].toString();
+        asMade.knownByCertificate = true;
+        asMade.certificate = QByteArray::fromHex(made["certificate"_L1].toString().toLatin1());
+        const QByteArray renewed = QCryptographicHash::hash("renewed on the way back", QCryptographicHash::Sha256);
+        {
+            // Nothing done to it there: up again, it has its password.
+            Profile profile(fixture);
+            QCOMPARE(passwordBy012(profile.secrets.all.value(name), asMade), QString());
+            const StartedWith up = aStartOf(profile.settingsFile, profile.secrets, id);
+            QCOMPARE(up.password, password);
+            QVERIFY(up.marked);
+        }
+        {
+            // This build started once between: 0.1.2 reads it, takes it along to a renewed certificate, and up again
+            // it is there.
+            Profile profile(fixture);
+            QCOMPARE(aStartOf(profile.settingsFile, profile.secrets, id).password, password);
+            QCOMPARE(passwordBy012(profile.secrets.all.value(name), asMade), password);
+            aYesBy012(profile.settingsFile, profile.secrets, id, renewed);
+            if (QTest::currentTestFailed()) {
+                return;
+            }
+            const StartedWith up = aStartOf(profile.settingsFile, profile.secrets, id);
+            QCOMPARE(up.password, password);
+            QVERIFY(up.marked);
+        }
+        {
+            // 0.1.2 straight after the cut, and a yes there: up again, it has none, and its record stays as it was.
+            Profile profile(fixture);
+            const QByteArray two = profile.secrets.all.value(name);
+            aYesBy012(profile.settingsFile, profile.secrets, id, renewed);
+            if (QTest::currentTestFailed()) {
+                return;
+            }
+            QCOMPARE(profile.secrets.all.value(name), two);
+            const StartedWith up = aStartOf(profile.settingsFile, profile.secrets, id);
+            QCOMPARE(up.password, QString());
+            QVERIFY(!up.marked);
+            QCOMPARE(profile.secrets.all.value(name), two);
+        }
     }
 
     // The server signed in to is still signed in to: the program goes back to its wall by the session it kept, and
@@ -568,6 +895,13 @@ private slots:
             QCOMPARE(one.since, QDateTime::fromString(left.at(index)["since"_L1].toString(), Qt::ISODateWithMs));
             QCOMPARE(one.doubtUntil,
                      QDateTime::fromString(left.at(index)["doubt_until"_L1].toString(), Qt::ISODateWithMs));
+            // (From 0.1.2 on, a record the controller only queued: no look lets it go, however late.)
+            QCOMPARE(one.queued, left.at(index)["queued"_L1].toBool());
+            QDateTime dayAfter = now.addDays(1);
+            core::SetupOverrides looked(core::profile::setupOverridesFile(profile.settingsFile),
+                                        [dayAfter] { return dayAfter; });
+            QCOMPARE(looked.seenOff(QUrl(one.address), one.machine, dayAfter), !one.queued);
+            QCOMPARE(looked.standing(QUrl(one.address), one.machine).has_value(), one.queued);
         }
     }
 
@@ -586,6 +920,10 @@ private slots:
             QFileInfo(core::profile::lockFile(settings)).fileName(),
             QFileInfo(core::profile::incidentsFile(settings)).fileName(),
             QFileInfo(core::profile::setupOverridesFile(settings)).fileName(),
+            // (From 0.1.2 on, the record of the version that started with it.)
+            QFileInfo(core::profile::versionFile(settings)).fileName(),
+            // (And from 0.2.0 on, the file whose lock says which copy writes it: it holds nothing.)
+            QFileInfo(core::profile::runningFile(settings)).fileName(),
         };
         // (And the folders beside them: the screen watches' pictures, and the notes of an update.)
         const QString pictures = QFileInfo(core::profile::alertPicturesFolder(settings)).fileName() + u'/';
@@ -612,36 +950,56 @@ private slots:
         QCOMPARE(core::windowsTargetOf(u"kvm:0a1b2c3d"_s), u"QKVM Desktop: kvm:0a1b2c3d"_s);
     }
 
-    // The first start of this version keeps the settings as the old one left them, byte for byte, and records the
-    // version (from 0.1.2: SPEC.md section 11.2); the copy changes nothing of how the profile starts.
-    void theFirstStartKeepsTheOldSettingsAsTheyWere_data() { fixtures(); }
+    // The first start of a later version keeps the settings as the old one left them, byte for byte, named by the
+    // version that wrote them where they say one (from 0.1.2 on), else as found before this one; and records the
+    // version, with the one recorded before it (SPEC.md section 11.2). The copy changes nothing of how the profile
+    // starts.
+    void theFirstStartKeepsTheOldSettingsAsTheyWere_data() { fixtures(false, true); }
     void theFirstStartKeepsTheOldSettingsAsTheyWere()
     {
         const Fixture fixture = TestUpgradeContinuity::fixture();
         QVERIFY2(fixture.whole(), "the fixture of a published version is missing or incomplete");
         Profile profile(fixture);
-        const auto started = core::profile::recordStart(profile.settingsFile, u"0.1.2"_s);
+        const QString later = aLaterVersion();
+        const QString writer = fixture.settings["written_by"_L1].toString();
+        const std::optional<core::profile::Record> before =
+            core::profile::recorded(QDir(fixture.profileFolder()).filePath(u"settings.json"_s));
+        // (What each version kept: 0.1.2 says it wrote them, and recorded its start; one before it, neither.)
+        const QString version = fixture.made["made_by"_L1]["version"_L1].toString();
+        const bool recordsItself = QVersionNumber::fromString(version) >= QVersionNumber(0, 1, 2);
+        QCOMPARE(writer, recordsItself ? version : QString());
+        QCOMPARE(before.has_value(), recordsItself);
+        QCOMPARE(before.value_or(core::profile::Record{}).version, recordsItself ? version : QString());
+        const auto started = core::profile::recordStart(profile.settingsFile, later);
         QVERIFY(started);
         QVERIFY(started.value().another);
-        QCOMPARE(started.value().previous, QString());
-        QCOMPARE(QFileInfo(started.value().keptAs).fileName(), u"settings.json.before-0.1.2.bak"_s);
+        QCOMPARE(started.value().previous, before.value_or(core::profile::Record{}).version);
+        QCOMPARE(QFileInfo(started.value().keptAs).fileName(),
+                 u"settings.json.%1.bak"_s.arg(writer.isEmpty() ? u"before-"_s + later : writer));
         QFile kept(started.value().keptAs);
         QVERIFY(kept.open(QIODevice::ReadOnly));
         QFile old(QDir(fixture.profileFolder()).filePath(u"settings.json"_s));
         QVERIFY(old.open(QIODevice::ReadOnly));
         QCOMPARE(kept.readAll(), old.readAll());
-        QCOMPARE(core::profile::recorded(profile.settingsFile).value_or(core::profile::Record{}).version, u"0.1.2"_s);
+        const core::profile::Record now =
+            core::profile::recorded(profile.settingsFile).value_or(core::profile::Record{});
+        QCOMPARE(now.version, later);
+        QCOMPARE(now.previous, before.value_or(core::profile::Record{}).version);
         // A second start of it keeps nothing more.
-        const auto again = core::profile::recordStart(profile.settingsFile, u"0.1.2"_s);
+        const auto again = core::profile::recordStart(profile.settingsFile, later);
         QVERIFY(again && again.value().keptAs.isEmpty());
-        // And the lock comes up as before, the copy beside the settings.
+        // And the lock comes up as before, the copy beside the settings: open, or asking for its password where it was
+        // left locked (a wall screen), never for a reset.
         core::SignInPacing pacing;
         core::PacingFile signIns(pacing, core::profile::signInsFile(profile.settingsFile), profile.secrets,
                                  paceOf(fixture));
         signIns.read();
         const std::unique_ptr<ui::AppLock> lock = lockOf(profile, fixture);
-        QCOMPARE(lock->mode(), QString());
-        QVERIFY(!lock->restricted());
+        const bool locked = fixture.made["locked"_L1].toBool();
+        QCOMPARE(lock->mode(), locked ? u"unlock"_s : QString());
+        QCOMPARE(lock->locked(), locked);
+        QVERIFY(locked || !lock->restricted());
+        QCOMPARE(lock->problem(), QString());
     }
 
     // The screen watch's alert, with the picture that set it off: told again, and its picture there to be shown.

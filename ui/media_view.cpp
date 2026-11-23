@@ -4,7 +4,6 @@
 #include <utility>
 
 #include <QCoreApplication>
-#include <QCryptographicHash>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QLocale>
@@ -135,19 +134,25 @@ QString mountedText(const std::optional<core::MountedMedia>& mounted)
     });
 }
 
-// Who is signed in at which server: an answer to what was asked as somebody else, or of another server, is nobody's.
-QByteArray identityOf(const core::ServerClient* client)
+// Who answers there (MediaPlace::mediaIdentity): an answer to what was asked as somebody else, or of another server,
+// is nobody's. Nobody where the place is gone.
+QByteArray identityOf(const core::MediaPlace* place, const QPointer<QObject>& alive)
 {
-    return client == nullptr ? QByteArray()
-                             : QCryptographicHash::hash(client->address().toEncoded() + '\n' + client->session(),
-                                                        QCryptographicHash::Sha256);
+    return place == nullptr || alive == nullptr ? QByteArray() : place->mediaIdentity();
 }
 
-// Whether an error of something that was to be done is no answer of the server's: it may have been done (the page's
-// `unanswered`). The server's own words are said as they are, its `timeout` and `dropped` among them, which say so.
-bool unanswered(const base::Error& error)
+// What an error of something that was to be done is marked with where it is no answer of the place's own: it may have
+// been done (the page's `unanswered`; MediaPlace::saidNothing). The place's own words are said as they are, a server's
+// `timeout` and `dropped` among them, which say so, and every word of a KVM's of this PC's own wall.
+constexpr const char* nothingCameBack = "desktop:nothing_came_back";
+// The code of an upload the box refused itself, with nothing sent, where the look before it found why (B-L2).
+constexpr const char* refusedHere = "desktop:refused_here";
+base::Error markedBy(const core::MediaPlace* place, const QPointer<QObject>& alive, base::Error error)
 {
-    return error.code == core::ServerClient::unreachable || error.code == "internal";
+    if (place != nullptr && alive != nullptr && place->saidNothing(error)) {
+        error.code = nothingCameBack;
+    }
+    return error;
 }
 
 } // namespace
@@ -187,20 +192,27 @@ QString MediaView::bytesText(qint64 bytes)
     return number + u' ' + QString::fromLatin1(units[unit]);
 }
 
-void MediaView::open(core::ServerClient* client, const QString& machine, const QString& name, const QString& key,
+void MediaView::open(core::MediaPlace* place, const QString& machine, const QString& name, const QString& key,
                      UnderWay* underWay, const QString& underWayKey)
 {
     close();
     ++m_turn;
-    m_client = client;
-    m_identity = identityOf(client);
+    m_place = place;
+    // (A server's client, or this PC's own wall: a QObject either way, which may go first.)
+    m_alive = dynamic_cast<QObject*>(place);
+    m_identity = identityOf(m_place, m_alive);
     m_machine = machine;
     m_name = name;
     m_key = key;
     m_underWay = underWay;
     m_underWayKey = underWayKey;
-    m_opened = client != nullptr;
+    m_opened = m_place != nullptr && m_alive != nullptr;
     m_shown.reset();
+    m_bound.reset();
+    m_moved = false;
+    m_mark.clear();
+    // (What was done in an earlier opening is not said in this one.)
+    m_keep.reset();
     m_picked.clear();
     m_drive = u"cd"_s;
     m_boot = u"none"_s;
@@ -240,10 +252,22 @@ void MediaView::close()
     m_opening.stop();
     m_openingName.clear();
     // Closing the box stops an upload: what came of it is taken off (the server sees to that).
+    m_stopOf = 0;
     if (m_stopUpload) {
         std::exchange(m_stopUpload, {})();
     }
     emit changed();
+}
+
+void MediaView::movedElsewhere()
+{
+    if (!m_opened) {
+        return;
+    }
+    emit told(
+        words("%1: its media box was closed: it is at another address now. Open it again from its menu.").arg(m_name),
+        false);
+    close();
 }
 
 void MediaView::letGo()
@@ -258,7 +282,8 @@ void MediaView::letGo()
     m_carryUnderWay = nullptr;
     m_counting.stop();
     m_progress.stop();
-    m_client = nullptr;
+    m_place = nullptr;
+    m_alive = nullptr;
     m_underWay = nullptr;
 }
 
@@ -269,7 +294,23 @@ QString MediaView::title() const
 
 bool MediaView::isCurrent(quint64 turn) const
 {
-    return turn == m_turn && m_opened && m_client != nullptr && identityOf(m_client) == m_identity;
+    return turn == m_turn && m_opened && m_alive != nullptr && identityOf(m_place, m_alive) == m_identity;
+}
+
+bool MediaView::signedInOtherwise()
+{
+    // (Rather than stand open with nothing it asks ever answered, and send a yes asked under one sign-in with
+    // another: the outside review of `listed`, B-L1. Beyond the page, whose sign-in is the browser's.)
+    if (!m_opened || m_alive == nullptr || identityOf(m_place, m_alive) == m_identity) {
+        return false;
+    }
+    const QString why =
+        words("%1: its media box was closed: it was opened under another sign-in than this program's now. Open it "
+              "again from its menu.")
+            .arg(m_name);
+    emit told(why, false);
+    close();
+    return true;
 }
 
 void MediaView::tell(const QString& text, bool bad)
@@ -290,15 +331,17 @@ const core::MediaImage* MediaView::picked() const
 
 void MediaView::load(bool retried)
 {
-    if (!m_opened || m_client == nullptr) {
+    if (!m_opened || m_alive == nullptr) {
         return;
     }
     // (A newer look outdates an answer still on its way, and owns the one asked again.)
     const quint64 look = ++m_look;
     m_again.stop();
-    m_client->askMedia(m_machine, [guard = QPointer<MediaView>(this), turn = m_turn, look,
-                                   retried](const base::Result<core::MediaList>& answer) {
-        if (guard == nullptr || !guard->isCurrent(turn) || look != guard->m_look) {
+    m_place->askMedia(m_machine, [guard = QPointer<MediaView>(this), turn = m_turn, look,
+                                  retried](const base::Result<core::MediaList>& answer) {
+        // (Answered under another sign-in than the box was opened under: the box closes, and shows nothing of it.)
+        if (guard == nullptr || turn != guard->m_turn || look != guard->m_look || guard->signedInOtherwise() ||
+            !guard->isCurrent(turn)) {
             return;
         }
         guard->listed(answer, retried);
@@ -308,8 +351,28 @@ void MediaView::load(bool retried)
 void MediaView::listed(const base::Result<core::MediaList>& answer, bool retried)
 {
     if (answer) {
-        show(answer.value());
         const core::MediaList& list = answer.value();
+        // Bound to what the place said the machine is at the first listing of this opening, and to nothing that it
+        // says later (finding 7 of the wave-1 review): every change is held to that (answer). And held to the mark of
+        // that first list, as a server 0.3.2 marks the machine a list was made of: a later look (after a change, or
+        // asked again) that lists it by another mark, or by none, is of another machine than the one the box was
+        // opened for, its tile edited to another KVM since, or what the server knows of it changed. That list is not
+        // shown under this box's title, nothing is sent from the box with its mark, and the box closes and says why in
+        // the server's words; opened again, it lists the machine the tile is at now (the outside review of `listed`,
+        // B-M1; stricter than the page, which shows each list it is answered and takes its mark).
+        if (!m_bound) {
+            m_bound = list.boundTo;
+            m_mark = list.listed;
+        } else if (list.listed != m_mark) {
+            const QString why = words("%1 is not the machine its images were listed for any more: its address, or what "
+                                      "qKVM knows of the machine there, was changed since. Its media box was closed: "
+                                      "list its images again from its menu.")
+                                    .arg(m_name);
+            emit told(why, false);
+            close();
+            return;
+        }
+        show(list);
         QStringList said = list.notes;
         if (!list.unseen.isEmpty()) {
             said.append(words("Not listed: %1").arg(list.unseen.join(u"; "_s)));
@@ -378,7 +441,11 @@ void MediaView::show(const core::MediaList& list)
     if (picked() == nullptr) {
         m_picked.clear();
     }
-    m_nothing = noneSaid(list.offers.where);
+    // (Where its list was not read whole, or every entry of it was left out, none listed is not none there: review
+    // cx4-2 L1.)
+    m_nothing = list.readWhole && list.leftOut == 0
+                    ? noneSaid(list.offers.where)
+                    : words("No image could be read from its list: look at it on its own page.");
 }
 
 QVariantList MediaView::images() const
@@ -481,24 +548,24 @@ bool MediaView::restartEnabled() const
 bool MediaView::canMount() const
 {
     const core::MediaImage* image = picked();
-    return image != nullptr && !image->partial;
+    return !m_moved && image != nullptr && !image->partial;
 }
 
 bool MediaView::canDelete() const
 {
     const core::MediaImage* image = picked();
-    return m_shown && m_shown->offers.canDelete && image != nullptr &&
+    return !m_moved && m_shown && m_shown->offers.canDelete && image != nullptr &&
            !(m_shown->mounted && m_shown->mounted->image == image->id);
 }
 
 bool MediaView::canUpload() const
 {
-    return m_shown && m_shown->offers.upload;
+    return !m_moved && m_shown && m_shown->offers.upload;
 }
 
 bool MediaView::canUnmount() const
 {
-    return m_shown && m_shown->mounted.has_value();
+    return !m_moved && m_shown && m_shown->mounted.has_value();
 }
 
 QVariantMap MediaView::question() const
@@ -607,7 +674,8 @@ void MediaView::mount()
     asked.yes = again ? words("Mount and restart") : words("Mount");
     asked.danger = again || writable;
     asked.named = m_name;
-    asked.mount = core::MediaMount{image->id, m_name, drive, writable, m_boot, again};
+    // (With the mark of the list it was picked from, as shown now.)
+    asked.mount = core::MediaMount{image->id, m_name, drive, writable, m_boot, again, m_shown->listed};
     m_file.reset();
     m_asked = asked;
     emit changed();
@@ -630,6 +698,7 @@ void MediaView::unmount()
                  (m_shown->offers.dropsInput ? words(" Its keyboard and mouse may drop for a moment.") : QString());
     asked.yes = words("Unmount");
     asked.named = m_name;
+    asked.listed = m_shown->listed;
     asked.image = mounted.image;
     m_file.reset();
     m_asked = asked;
@@ -639,7 +708,7 @@ void MediaView::unmount()
 void MediaView::remove()
 {
     const core::MediaImage* image = picked();
-    if (!m_opened || busy() || !canDelete() || image == nullptr) {
+    if (!m_opened || busy() || !canDelete() || image == nullptr || !m_shown) {
         return;
     }
     Asked asked;
@@ -649,17 +718,16 @@ void MediaView::remove()
                      .arg(image->name, m_name);
     asked.yes = words("Delete");
     asked.named = m_name;
+    // (picked() is of the list shown.)
+    asked.listed = m_shown->listed;
     asked.image = image->id;
     m_file.reset();
     m_asked = asked;
     emit changed();
 }
 
-QString MediaView::refusedAtOnce(const QString& name, qint64 size) const
+QString MediaView::refusedAtOnce(const core::MediaList& list, const QString& name, qint64 size) const
 {
-    if (!m_shown) {
-        return {};
-    }
     if (size <= 0) {
         return words("An empty file is no image.");
     }
@@ -667,24 +735,23 @@ QString MediaView::refusedAtOnce(const QString& name, qint64 size) const
         return words("An image's name is of letters, digits, spaces and . _ + - ( ) [ ] ~ , (200 at the most), and "
                      "neither begins nor ends with a space or a dot. Rename the file and upload it again.");
     }
-    const auto there =
-        std::ranges::find_if(m_shown->images, [&](const core::MediaImage& one) { return one.name == name; });
-    if (there != m_shown->images.end() && there->partial) {
+    const auto there = std::ranges::find_if(list.images, [&](const core::MediaImage& one) { return one.name == name; });
+    if (there != list.images.end() && there->partial) {
         return words("A part of an earlier upload of %1 is on the KVM: delete it in the list first, or upload it "
                      "under another name.")
             .arg(name);
     }
-    if (there != m_shown->images.end()) {
+    if (there != list.images.end()) {
         return words("%1 is on the KVM's own storage already: delete it first, or upload it under another name.")
             .arg(name);
     }
-    if (m_shown->free && size > *m_shown->free) {
+    if (list.free && size > *list.free) {
         return words("The KVM's own storage has %1 free, and %2 is %3: delete an image there first.")
-            .arg(bytesText(*m_shown->free), name, bytesText(size));
+            .arg(bytesText(*list.free), name, bytesText(size));
     }
-    if (m_shown->uploading) {
+    if (list.uploading) {
         return words("%1 is being uploaded to %2 at this moment, by %3. Wait for it to finish.")
-            .arg(m_shown->uploading->name, m_name, m_shown->uploading->by);
+            .arg(list.uploading->name, m_name, list.uploading->by);
     }
     return {};
 }
@@ -713,9 +780,10 @@ void MediaView::upload()
     m_openingName = name;
     m_opening.start();
     core::ReadAhead::open(
-        m_source ? m_source(path) : core::ReadAhead::fileAt(path), this,
+        m_source ? m_source(path) : core::ReadAhead::unchangedFileAt(path), this,
         [this, opening, turn = m_turn, name](base::Result<std::unique_ptr<core::ReadAhead>> file) {
-            if (opening != m_openings || !isCurrent(turn) || busy()) {
+            // (Signed in otherwise meanwhile: the box closes, and nothing is asked of the file: B-L1.)
+            if (opening != m_openings || turn != m_turn || signedInOtherwise() || !isCurrent(turn) || busy()) {
                 return;
             }
             m_opening.stop();
@@ -743,7 +811,7 @@ void MediaView::askUpload(const QString& name, std::unique_ptr<core::ReadAhead> 
         emit changed();
         return;
     }
-    if (const QString refused = refusedAtOnce(name, size); !refused.isEmpty()) {
+    if (const QString refused = m_shown ? refusedAtOnce(*m_shown, name, size) : QString(); !refused.isEmpty()) {
         tell(refused, true);
         emit changed();
         return;
@@ -758,6 +826,8 @@ void MediaView::askUpload(const QString& name, std::unique_ptr<core::ReadAhead> 
     asked.yes = words("Upload");
     asked.danger = false;
     asked.named = m_name;
+    // (refusedAtOnce found a list shown: the one it is asked of.)
+    asked.listed = m_shown ? m_shown->listed : QString();
     asked.image = name;
     m_asked = asked;
     m_file = std::move(file);
@@ -773,34 +843,50 @@ void MediaView::answer(bool yes)
     // (The file of an upload goes with its answer: sent with a yes, let go of otherwise.)
     auto file = std::make_shared<std::unique_ptr<core::ReadAhead>>(std::move(m_file));
     emit changed();
-    if (!yes || !m_opened || busy() || m_client == nullptr) {
+    if (!yes || !m_opened || busy() || m_alive == nullptr) {
+        return;
+    }
+    // Asked under one sign-in, not sent under another: the box closes instead (B-L1).
+    if (signedInOtherwise()) {
         return;
     }
     const QString machine = m_machine;
-    const QPointer<core::ServerClient> client = m_client;
-    // Each says what came of it: what the server said with its yes, or why not.
-    const auto said = [](const base::Result<core::MediaDone>& done) -> base::Result<QString> {
-        return done ? base::Result<QString>(done.value().note) : base::Result<QString>(done.error());
+    core::MediaPlace* const place = m_place;
+    // Only to the machine the box listed: where the place says it is another since (its address edited, another
+    // certificate said yes to), nothing goes, and the box offers nothing more.
+    if (!m_bound) {
+        return;
+    }
+    if (const std::optional<base::Error> moved = place->movedSince(machine, *m_bound)) {
+        m_moved = true;
+        tell(QString::fromStdString(moved->message), true);
+        emit changed();
+        return;
+    }
+    // Each says what came of it: what the place said with its yes, or why not, marked where nothing came back.
+    const auto said = [place, alive = m_alive](const base::Result<core::MediaDone>& done) -> base::Result<QString> {
+        return done ? base::Result<QString>(done.value().note)
+                    : base::Result<QString>(markedBy(place, alive, done.error()));
     };
     switch (asked.what) {
     case Asked::What::Mount:
         carry(asked.title,
               asked.mount.restart ? words("Mounting and restarting: as long as it takes to stop and to start...")
                                   : words("Mounting..."),
-              [client, machine, mount = asked.mount, said](const Answer& answered) {
-                  client->mountMedia(machine, mount, [answered, said](const auto& done) { answered(said(done)); });
+              [place, machine, mount = asked.mount, said](const Answer& answered) {
+                  place->mountMedia(machine, mount, [answered, said](const auto& done) { answered(said(done)); });
               });
         break;
     case Asked::What::Unmount:
-        carry(asked.title, words("Unmounting..."), [client, machine, asked, said](const Answer& answered) {
-            client->unmountMedia(machine, asked.image, asked.named,
-                                 [answered, said](const auto& done) { answered(said(done)); });
+        carry(asked.title, words("Unmounting..."), [place, machine, asked, said](const Answer& answered) {
+            place->unmountMedia(machine, asked.image, asked.named, asked.listed,
+                                [answered, said](const auto& done) { answered(said(done)); });
         });
         break;
     case Asked::What::Delete:
-        carry(asked.title, words("Deleting..."), [client, machine, asked, said](const Answer& answered) {
-            client->deleteMedia(machine, asked.image, asked.named,
-                                [answered, said](const auto& done) { answered(said(done)); });
+        carry(asked.title, words("Deleting..."), [place, machine, asked, said](const Answer& answered) {
+            place->deleteMedia(machine, asked.image, asked.named, asked.listed,
+                               [answered, said](const auto& done) { answered(said(done)); });
         });
         break;
     case Asked::What::Upload:
@@ -864,16 +950,35 @@ void MediaView::carry(const QString& what, const QString& note, const std::funct
                                : words("%1: %2 done. %3").arg(name, what, answer.value()),
                            true);
             message = answer.value().isEmpty() ? words("%1: done.").arg(what) : answer.value();
-        } else if (answer.error().code != core::ServerClient::uploadStopped) {
-            // The server's own words where it answered; where nothing came back, that it may have been done.
-            message = unanswered(answer.error())
+        } else if (answer.error().code != core::MediaPlace::uploadStopped) {
+            // The place's own words where it answered; where nothing came back, that it may have been done.
+            message = answer.error().code == nothingCameBack
                           ? words("No answer to \"%1\": it may have been done. Look at %2 before trying again.")
                                 .arg(what, name)
                           : QString::fromStdString(answer.error().message);
             bad = true;
         }
+        // The tile's machine is not the one the box listed any more (its tile edited to another KVM since: the server's
+        // 409 moved, or the look before an upload): nothing was done, and the box, made for that one, closes, as the
+        // page's does, and says why in the corner in those words. Opened again, it lists the machine the tile is at
+        // now.
+        if (!answer && answer.error().code == core::MediaPlace::moved) {
+            emit self.done(key);
+            emit self.told(message, false);
+            // (This opening's, under whichever sign-in.)
+            if (turn == self.m_turn) {
+                self.close();
+            }
+            emit self.changed();
+            return;
+        }
         emit self.done(key);
         if (!self.isCurrent(turn)) {
+            // Signed in otherwise while it was out, the box still open: it closes and says why (B-L1), rather than
+            // stand saying that it is under way; what came back is told in the corner then.
+            if (turn == self.m_turn) {
+                self.signedInOtherwise();
+            }
             if (bad && !self.m_opened) {
                 // (The box was closed meanwhile: told in the corner, where somebody sees it.)
                 emit self.told(words("%1: %2").arg(name, message), false);
@@ -901,28 +1006,112 @@ void MediaView::sendUpload(const Asked& asked, std::unique_ptr<core::ReadAhead> 
         answered(base::Error{"unreadable", words("%1 could not be read.").arg(asked.image).toStdString()});
         return;
     }
+    // The machine the box listed, asked again before a byte goes (web 0.3.2's page, its independent review's L4): a
+    // server 0.3.2 refuses an upload listed for another machine before it reads a byte, and closes the line under what
+    // is still being sent, so that its answer is often lost, and the box would say that it may have been done where
+    // nothing was. Where the tile's machine is another by now (its list says another mark, or none), that is said in
+    // the server's words for the other three, and nothing is sent. Where the look gets no answer, the upload goes, and
+    // the server still holds to the mark where it comes; where the box's list said no mark (a server before 0.3.2,
+    // this PC's own wall), nothing is asked first.
+    if (asked.listed.isEmpty()) {
+        carryUpload(asked, std::move(file), answered);
+        return;
+    }
+    // Closing the box while the look is out stops the upload at once, as closing it stops one under way: the machine is
+    // nobody's from then on, however long the server takes over its list (it asks the KVM: up to a minute), the file is
+    // let go of, and the look's answer finds nothing to do. Told once, whichever comes first.
+    struct Look {
+        bool over = false;
+        std::unique_ptr<core::ReadAhead> file;
+    };
+    const auto look = std::make_shared<Look>();
+    look->file = std::move(file);
+    const auto stop = [look, answered] {
+        if (!std::exchange(look->over, true)) {
+            look->file.reset();
+            answered(base::Error{core::MediaPlace::uploadStopped, "The upload was stopped before it went."});
+        }
+    };
+    holdStop(m_carrying, stop);
+    m_place->askMedia(m_machine, [guard = QPointer<MediaView>(this), asked, look, stop, answered, turn = m_turn,
+                                  carrying = m_carrying](const base::Result<core::MediaList>& now) {
+        // (Closed, let go of, its place gone or signed in as somebody else meanwhile: nothing goes.)
+        if (guard == nullptr || !guard->isCurrent(turn)) {
+            stop();
+            return;
+        }
+        look->over = true;
+        guard->letGoOfStop(carrying);
+        // (A list with no mark is of no machine the box can hold to: the same. Stricter than the page, which lets the
+        // upload go there.)
+        if (now && now.value().listed != asked.listed) {
+            answered(base::Error{core::MediaPlace::moved,
+                                 words("%1 is not the machine its images were listed for any more: its address, or "
+                                       "what qKVM knows of the machine there, was changed since. Nothing was "
+                                       "uploaded: list its images again.")
+                                     .arg(guard->m_name)
+                                     .toStdString()});
+            return;
+        }
+        // And what that fresh list says stands against the upload, which the server would refuse at once as well,
+        // before it reads a byte, with its answer as often lost (the name there now, a part of it, no room, another
+        // upload under way): said in the box's words, and nothing sent (the outside review of `listed`, B-L2; beyond
+        // the page, which asks this of the list shown alone).
+        if (now) {
+            const qint64 size = look->file != nullptr ? look->file->size() : 0;
+            if (const QString refused = guard->refusedAtOnce(now.value(), asked.image, size); !refused.isEmpty()) {
+                look->file.reset();
+                answered(base::Error{refusedHere, refused.toStdString()});
+                return;
+            }
+        }
+        guard->carryUpload(asked, std::move(look->file), answered);
+    });
+}
+
+void MediaView::holdStop(quint64 carrying, std::function<void()> stop)
+{
+    m_stopUpload = std::move(stop);
+    m_stopOf = carrying;
+}
+
+void MediaView::letGoOfStop(quint64 carrying)
+{
+    if (m_stopOf == carrying) {
+        m_stopUpload = {};
+        m_stopOf = 0;
+    }
+}
+
+void MediaView::carryUpload(const Asked& asked, std::unique_ptr<core::ReadAhead> file, const Answer& answered)
+{
     const QString name = asked.image;
-    m_stopUpload = m_client->uploadMedia(
-        m_machine, name, asked.named, std::move(file),
-        [guard = QPointer<MediaView>(this), answered, name](const base::Result<core::MediaUploaded>& done) {
+    // (Its answer lets go of its own stop alone: one that comes after this box let go of it, and began another upload,
+    // leaves that one's to stop it. Outside review 4.5.)
+    const quint64 carrying = m_carrying;
+    std::function<void()> stop = m_place->uploadMedia(
+        m_machine, name, asked.named, asked.listed, std::move(file),
+        [guard = QPointer<MediaView>(this), answered, name, place = m_place, alive = m_alive,
+         carrying](const base::Result<core::MediaUploaded>& done) {
             if (guard != nullptr) {
-                guard->m_stopUpload = {};
+                guard->letGoOfStop(carrying);
             }
             answered(
                 done ? base::Result<QString>(done.value().sha256.isEmpty()
                                                  ? QString()
                                                  : words("%1 is on the KVM, SHA-256 %2").arg(name, done.value().sha256))
-                     : base::Result<QString>(done.error()));
+                     : base::Result<QString>(markedBy(place, alive, done.error())));
         });
-    // How far it has come, as the server counts it, every second.
+    holdStop(carrying, std::move(stop));
+    // How far it has come, as the place counts it, every second.
     disconnect(&m_progress, nullptr, this, nullptr);
-    connect(&m_progress, &QTimer::timeout, this, [this, name, carrying = m_carrying, turn = m_turn] {
-        if (m_client == nullptr || m_carrying != carrying) {
+    connect(&m_progress, &QTimer::timeout, this, [this, name, carrying, turn = m_turn] {
+        if (m_alive == nullptr || m_carrying != carrying) {
             m_progress.stop();
             return;
         }
-        m_client->askUpload(m_machine, [guard = QPointer<MediaView>(this), name, carrying,
-                                        turn](const base::Result<std::optional<core::MediaUploading>>& now) {
+        m_place->askUpload(m_machine, [guard = QPointer<MediaView>(this), name, carrying,
+                                       turn](const base::Result<std::optional<core::MediaUploading>>& now) {
             if (guard == nullptr || guard->m_carrying != carrying || !guard->isCurrent(turn) || !now || !now.value()) {
                 return; // (asked again in a second)
             }

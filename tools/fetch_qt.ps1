@@ -21,15 +21,25 @@ and the names of the archives in Updates.xml in the same folder.
 
 keeps the archives in D:\kept, where the next run takes them again after checking each one's size
 and SHA-256 (tools/build_release.ps1 does this). Without it they are deleted once unpacked.
+
+    tools\fetch_qt.ps1 -Into D:\Qt -Arch arm64
+
+puts the same modules of Qt 6.12.0 for Windows on ARM (Qt's ARM64 build for Microsoft's compiler, made by Qt on
+x64 for building on x64: it needs the x64 Qt beside it as its host, which CMakeLists.txt gives it) into
+D:\Qt\6.12.0\msvc2022_arm64, and writes that place into local.cmake as QKVM_QT_DIR_ARM64, keeping what it says of
+the x64 Qt (and the x64 run keeps what it says of the ARM64 one). Its list is made the same way, from the same
+server's own .sha256 files.
 #>
 param(
     [Parameter(Mandatory)] [string] $Into,
-    [string] $Downloads = ''
+    [string] $Downloads = '',
+    [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64'
 )
 
 . "$PSScriptRoot\common.ps1"
 
 $Version = '6.12.0'
+if ($Arch -eq 'x64') {
 $Kit = 'msvc2022_64'
 $Server = 'https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_6120/qt6_6120_msvc2022_64'
 $Build = '6.12.0-0-202609280346'
@@ -48,6 +58,24 @@ $Archives = @(
     @{ Package = 'qt.qt6.6120.addons.qtwebsockets.win64_msvc2022_64'; Module = 'qtwebsockets'; Bytes = 320590
        Sha256 = '836eb7eafa8cb1d85e0ca6faf062269acafae68579add29551450a7064a8ffcf' }
 )
+} else {
+# The same modules, of Qt's ARM64 build made on x64 ("cross compiled"), its sums read from the server's .sha256 files
+# on 2026-11-19.
+$Kit = 'msvc2022_arm64'
+$Server = 'https://download.qt.io/online/qtsdkrepository/windows_x86/desktop/qt6_6120/qt6_6120_msvc2022_arm64_cross_compiled'
+$Build = '6.12.0-0-202609280346'
+$Tail = '-Windows-Windows_11_24H2-MSVC2022-Windows-Windows_11_24H2-ARM64.7z'
+$Archives = @(
+    @{ Package = 'qt.qt6.6120.win64_msvc2022_arm64_cross_compiled'; Module = 'qtbase'; Bytes = 36350714
+       Sha256 = '892cf8d4f22ce1574c6b90e5ba21f6a49f06e2b96d35a75551ddbdb3cd6b4913' }
+    @{ Package = 'qt.qt6.6120.win64_msvc2022_arm64_cross_compiled'; Module = 'qtsvg'; Bytes = 618843
+       Sha256 = '6c0b67f1b0606c58fa3fa45ca9970facf8aefa5f68c3ee2bbd3ee79d3a05268d' }
+    @{ Package = 'qt.qt6.6120.win64_msvc2022_arm64_cross_compiled'; Module = 'qtdeclarative'; Bytes = 197327828
+       Sha256 = '8b1f968063743b667c742b4bf61ca5a453cca44c75f71e1bc9c155f6a7f1331e' }
+    @{ Package = 'qt.qt6.6120.addons.qtwebsockets.win64_msvc2022_arm64_cross_compiled'; Module = 'qtwebsockets'; Bytes = 252347
+       Sha256 = '9f67a45bf70f6e4266aa7d4db58b0cfe36f5d004ed5e3e0035b0330b15d50e9a' }
+)
+}
 
 $Root = Join-Path $Into "$Version\$Kit"
 $keep = [bool] $Downloads
@@ -63,15 +91,20 @@ foreach ($archive in $Archives) {
     Expand-Checked $file $Root
 }
 
-foreach ($needed in 'bin\Qt6Core.dll', 'bin\Qt6Quick.dll', 'bin\Qt6WebSockets.dll', 'bin\qmllint.exe', 'lib\cmake\Qt6\Qt6Config.cmake') {
+$expected = @('bin\Qt6Core.dll', 'bin\Qt6Quick.dll', 'bin\Qt6WebSockets.dll', 'lib\cmake\Qt6\Qt6Config.cmake') +
+    @(if ($Arch -eq 'x64') { 'bin\qmllint.exe' })
+foreach ($needed in $expected) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $needed))) { throw "After unpacking, $needed is not in $Root." }
 }
 if (-not $keep) { Remove-Item -LiteralPath $Downloads -Recurse -Force }
 
 $local = Join-Path $DesktopRoot 'local.cmake'
 $forCMake = (Resolve-Path -LiteralPath $Root).Path -replace '\\', '/'
-Set-Content -LiteralPath $local -Encoding ascii -Value @(
-    '# Written by tools/fetch_qt.ps1: where Qt is on this PC. Git does not keep this file.'
-    "set(QKVM_QT_DIR `"$forCMake`")"
-)
+$variable = if ($Arch -eq 'x64') { 'QKVM_QT_DIR' } else { 'QKVM_QT_DIR_ARM64' }
+# (What it says of anything else stays: the other kind's Qt, where the ARM64 libraries are.)
+$header = '# Written by tools/fetch_qt.ps1: where Qt is on this PC. Git does not keep this file.'
+$others = @(if (Test-Path -LiteralPath $local) {
+    Get-Content -LiteralPath $local | Where-Object { $_ -cne $header -and $_ -notmatch ('^set\(' + $variable + ' ') }
+})
+Set-Content -LiteralPath $local -Encoding ascii -Value (@($header, "set($variable `"$forCMake`")") + $others)
 Write-Host "Qt is in $Root, and local.cmake says so."

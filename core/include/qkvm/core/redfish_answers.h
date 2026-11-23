@@ -106,7 +106,8 @@ std::optional<Light> locator(const QJsonObject& system);
 // in small letters. A number that is none (not of a UUID's shape; fewer than four different digits in
 // it, as the all-zero and all-F numbers of boards whose maker set none) is no number.
 
-// The computer's own number (its UUID), as a mark: "server:" and the digest; empty: it gives none.
+// The computer's own number (its UUID), as a mark: "server:" and the digest; empty: it gives none, or one a board's
+// maker put on every board of its make (AMI's placeholder, outside review 2, 3.2), which tells no computer apart.
 QString serverNumber(const QJsonObject& system);
 // The number of the controller's Redfish service (its service root's UUID, which anybody may read):
 // the digest alone; empty: it gives none.
@@ -122,6 +123,14 @@ Marks marksOf(const QString& machine);
 // OpenBMC's does) and itself (UUID: a real AMI board names its service's number there); none that is none.
 // Read under a session, against the root's (controllerNumber), which anybody may read.
 QStringList managerNumbers(const QJsonObject& manager);
+// Whether a controller's own resource says it runs OpenBMC: bmcweb hard-codes its model as "OpenBmc", and calls its
+// OEM part the same (the web's is_openbmc).
+bool isOpenBmc(const QJsonObject& manager);
+// Where a controller running OpenBMC carries its console (the web's rfb_console): bmcweb's WebSocket "/kvm/0", carrying
+// RFB, where its manager announces a graphical console of the KVM-over-IP kind that is enabled; empty for any other.
+QString rfbConsole(const QJsonObject& manager);
+// Whether a controller's service root says it is AMI's (its Vendor; bmcweb's names no maker): the web's _ami_root.
+bool amiRoot(const QJsonObject& root);
 
 // --- what is done to it ----------------------------------------------------------------------------
 
@@ -157,6 +166,11 @@ QString errorSaid(const QByteArray& body);
 // The one-time boot targets the controller says it allows (Boot.BootSourceOverrideTarget@Redfish.AllowableValues);
 // none where it says none. "BiosSetup" among them: Start into BIOS setup can be offered (the web's `boot_targets`).
 QStringList bootTargets(const QJsonObject& system);
+// The kinds of boot override it says it allows (Boot.BootSourceOverrideEnabled@Redfish.AllowableValues: "Disabled",
+// "Once", "Continuous"), its texts in small letters; none where it does not say them as a list. Where it says them and
+// "Once" is not among them, a start into BIOS setup is refused with nothing sent: it would leave every later boot in
+// the setup too (the owner's decision of 2026-11-18, a).
+std::optional<QStringList> overrideKinds(const QJsonObject& system);
 // The boot override as it stands, in small letters: (enabled, target), each empty where not said (the web's
 // `boot_override`: a controller that writes "ONCE" or "biossetup" means what the standard's "Once" and "BiosSetup" do).
 std::pair<QString, QString> bootOverride(const QJsonObject& system);
@@ -167,6 +181,39 @@ std::optional<bool> overrideOff(const QJsonObject& system);
 // Another tool's boot override as the controller shows it ("Pxe, Once"); empty where there is none, or only the one
 // Start into BIOS setup sets (the web's `_another_override`).
 QString anotherOverride(const QJsonObject& system);
+// The BIOS setup boot override kept for every boot ("Continuous", "BiosSetup"), as a board that keeps "Once" as
+// "Continuous" shows what a start into BIOS setup set. Before a press it is another tool's (anotherOverride: the press
+// is refused); shown after the press's change, it is qKVM's own, and cleared like the one-time one (the owner's
+// decision of 2026-11-18, b); a look never takes it for an override off.
+bool setupForEveryBoot(const QJsonObject& system);
+
+// --- a change it only queued, as a task (D1) ------------------------------------------------------------------------
+// As the web follows a task of AMI's mounts (redfish.py `_task_done`), from the desktop's 0.2.0 on for the boot
+// override too.
+
+// Where the task of a change the controller only queued is followed: the Task its answer names in its body (its
+// "@odata.id"), else what its Location header names, by its path (a task monitor, as DMTF has it: 202 while the task
+// runs, and once it ended the action's own answer), each only where it is a place on the controller (link) below
+// /redfish/v1/TaskService/; a Task before a monitor. Empty: none to follow.
+QString taskPlace(const QByteArray& location, const QByteArray& body);
+// What a look at that place (`status`, `body`) says of the task of a change made to `of` (the computer's place):
+// - under way: a 202, or a Task in a state that is not an end ("New", "Running", "Pending", "Suspended", ...);
+// - a passing error (a 5xx, 408 or 429): the place could not answer just then, which says nothing of the task;
+// - done: a monitor's end, a 204 or a 200 with nothing; or a Task "Completed";
+// - failed: a Task ended in "Exception", "Killed" or "Cancelled", or "Completed" with its status "Critical";
+// - refused: a monitor's error answer (a 4xx; the change's own, as DMTF has a monitor's last answer, and as AMI's real
+//   board answered as its task failed), in the controller's words, which is no task's end for certain;
+// - not to be read: anything else, nothing can be told of it. A 404 or 410, a 401, a Task's own place answered with
+//   an error or with nothing, a status no look answers with, what is no record, a state no Task has or none at all
+//   (at a monitor, the change's own answer at its end, with no word of how it went), and a Task that is not surely
+//   this change's: one that names itself another than the place looked at, or whose Payload names a change of
+//   another place than `of`, or by another method than a PATCH (outside review of D1, H1).
+struct TaskSaid {
+    enum class State { UnderWay, Passing, Done, Failed, Refused, Unreadable };
+    State state = State::Unreadable;
+    QString words; // Failed, Refused: the controller's own, one short line, where it said any
+};
+TaskSaid taskOf(const QString& place, int status, const QByteArray& body, const QString& of);
 
 // --- how it is ------------------------------------------------------------------------------------
 

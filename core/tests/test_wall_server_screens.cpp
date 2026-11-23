@@ -23,6 +23,7 @@
 #include "aspeed_frames.h"
 #include "memory_secrets.h"
 #include "redfish_by_hand.h"
+#include "rfb_console_by_hand.h"
 #include "stand_in.h"
 #include "stillness.h"
 
@@ -319,6 +320,33 @@ private slots:
         QCOMPARE(server.bmc.authorizations, 0);
     }
 
+    void anOpenBmcServersCardShowsItsScreenAndOffersKeysAndControl()
+    {
+        // The web's tile of a server whose controller runs OpenBMC and announces its console: `screen`, `live`, and
+        // `keys`, `text` and `control` (its console takes them as RFB's events), the card's still from that console,
+        // under the driver's own Redfish session; AMI's web page never asked.
+        RedfishByHand bmc(RedfishByHand::Layout::OpenBmc, tls("first"));
+        bmc.announcesKvm = true;
+        core::testing::RfbConsoleByHand console;
+        console.servesAt(*bmc.stand, [&bmc](const QByteArray& token) { return bmc.sessions.contains(token); });
+        OwnWall own;
+        const QString id = own.add(bmc.address().toString());
+        QVERIFY(!id.isEmpty());
+        const core::Status known = cameTo(own.wall, id, [](const core::Status& s) { return can(s, u"control"_s); });
+        QVERIFY(known.hasScreen);
+        QVERIFY(can(known, u"screen"_s) && can(known, u"live"_s) && can(known, u"keys"_s) && can(known, u"text"_s));
+        const base::Result<core::Snapshot> still = stillOf(own.wall, id, 320);
+        QVERIFY2(still.ok(), still.ok() ? "" : still.error().message.c_str());
+        const std::optional<base::screen::Head> head = base::screen::headOf(std::as_bytes(
+            std::span(still.value().picture.constData(), static_cast<std::size_t>(still.value().picture.size()))));
+        QVERIFY(head.has_value());
+        QCOMPARE(head.value_or(base::screen::Head{}).width, 64);
+        QVERIFY(!console.tokens.isEmpty() && bmc.sessions.contains(console.tokens.front()));
+        QCOMPARE(bmc.webLogins, 0);
+        QCOMPARE(bmc.tokenAsks, 0);
+        QCOMPARE(bmc.authorizations, 0);
+    }
+
     void theCardsStillOfABusyScreenIsMadeOffTheInterfaceThread()
     {
         // Review 3's HIGH 1 (2026-11-06): a card that shows a busy server (a scrolling log, an installer) asks for its
@@ -533,6 +561,185 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(closed.size(), 1, 5000);
         QCOMPARE(closed.constFirst().constFirst().toString(), u"not_found"_s);
         QTRY_COMPARE_WITH_TIMEOUT(server.console.watching, 0, 5000);
+    }
+
+    void aConsoleOpenWhenItsCardBeginsToAskIsLetGoOfAndNothingGoesToIt()
+    {
+        // (The owner's decision of 2026-11-22; review cx2-2 of outside review 2, M1.) A card added while its server
+        // gave no number: known by its controller alone. Its console is open, its still shown and a live view of it
+        // held with keyboard and mouse. Then the computer there gives a number of its own, and the card asks whether it
+        // is its server: the console is let go of, the live view ends, and until that is answered no still, live view,
+        // key, text or Ctrl+Alt+Del goes to it, nor does the card offer any (before: the session went on, and took
+        // them).
+        Server server;
+        server.bmc.uuid = u"00000000-0000-0000-0000-000000000000"_s;
+        OwnWall own;
+        const QString id = own.add(server);
+        QVERIFY(!id.isEmpty());
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return s.state == "online"_L1; }).hasScreen);
+        QVERIFY(stillOf(own.wall, id).ok());
+        const base::Result<std::unique_ptr<core::Live>> opened = liveOf(own.wall, id);
+        QVERIFY2(opened.ok(), opened.ok() ? "" : opened.error().message.c_str());
+        core::Live& live = *opened.value();
+        QSignalSpy control(&live, &core::Live::controlChanged);
+        QSignalSpy closed(&live, &core::Live::closed);
+        live.askControl(true);
+        QTRY_VERIFY_WITH_TIMEOUT(!control.isEmpty() && control.constLast().at(0).toBool(), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(server.console.watching >= 1, 10000);
+        server.bmc.uuid = RedfishByHand::fresh();
+        const core::Status asking = cameTo(own.wall, id, [](const core::Status& s) { return s.asksItsServer; });
+        QVERIFY(asking.asksItsServer);
+        QTRY_COMPARE_WITH_TIMEOUT(closed.size(), 1, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(server.console.watching, 0, 10000);
+        const auto keysBefore = server.console.keyboards().size();
+        live.key(0x04, true);
+        live.key(0x04, false);
+        QCOMPARE(
+            codeOf(answerTo<core::Snapshot>([&](auto done) { own.wall.askSnapshot(id, 320, 0, std::move(done)); })),
+            std::string("another_machine"));
+        const base::Result<std::unique_ptr<core::Live>> again = liveOf(own.wall, id);
+        QVERIFY(!again.ok() || !again.value()->isOpen());
+        for (const core::Action& what : {core::Action::press(u"ControlLeft,KeyC"_s), core::Action::type(u"ls"_s, true),
+                                         core::Action::plain(u"ctrl_alt_del"_s)}) {
+            const base::Result<core::Done> refused =
+                answerTo<core::Done>([&](auto done) { own.wall.act(id, what, std::move(done)); });
+            QCOMPARE(codeOf(refused), std::string("another_machine"));
+        }
+        QTest::qWait(300);
+        QCOMPARE(server.console.keyboards().size(), keysBefore);
+        QCOMPARE(server.console.watching, 0);
+        // ...and the card offers none of them: its two answers alone.
+        const core::Status offered = statusOf(own.wall, id);
+        QVERIFY(!offered.hasScreen);
+        QCOMPARE(offered.capabilities, std::optional<QStringList>(QStringList{u"its_server"_s, u"not_its_server"_s}));
+    }
+
+    void aTypingUnderWayWhenItsCardBeginsToAskIsStoppedWithNoKeyAfterIt()
+    {
+        // (Review cx2-3, L-f; cx2-2, M1.) A card known by its controller alone types a long text over its console.
+        // While it types, the computer there gives a number of its own, and the card asks whether it is its server: the
+        // typing is stopped, its answer says it did not go through, and no key goes down after that (the keys it held
+        // are let go of), though most of the text was still to come.
+        Server server;
+        server.bmc.uuid = u"00000000-0000-0000-0000-000000000000"_s;
+        OwnWall own([](core::DriverPaces& paces) { paces.redfish.screen.keyPauseMs = 40; });
+        const QString id = own.add(server);
+        QVERIFY(!id.isEmpty());
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return s.state == "online"_L1; }).hasScreen);
+        const auto downs = [&server](std::size_t from) {
+            const std::vector<AmiConsoleByHand::Hid> all = server.console.keyboards();
+            int count = 0;
+            for (std::size_t at = from; at < all.size(); ++at) {
+                count += all.at(at).keys.empty() ? 0 : 1;
+            }
+            return count;
+        };
+        const QString text(300, u'a');
+        auto typed = std::make_shared<QList<base::Result<core::Done>>>();
+        own.wall.act(id, core::Action::type(text, false),
+                     [typed](const base::Result<core::Done>& answer) { typed->append(answer); });
+        QTRY_VERIFY_WITH_TIMEOUT(downs(0) >= 5, 20000);
+        QVERIFY(typed->isEmpty());
+        server.bmc.uuid = RedfishByHand::fresh();
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return s.asksItsServer; }).asksItsServer);
+        QTRY_VERIFY_WITH_TIMEOUT(!typed->isEmpty(), 10000);
+        QVERIFY(!typed->first().ok());
+        const std::size_t asked = server.console.keyboards().size();
+        QTest::qWait(600);
+        QCOMPARE(downs(asked), 0);
+        QVERIFY2(downs(0) < text.size(), qPrintable(QString::number(downs(0))));
+        QVERIFY(server.console.keyboards().empty() || server.console.keyboards().back().keys.empty());
+    }
+
+    void aNoTakenOnceItsCardAsksNoMoreLetsGoOfTheConsoleOpenedSince()
+    {
+        // (Review cx2-4, L1.) A card known by its controller alone asks about the computer at its place, which gives a
+        // number of its own now; then that computer gives none again (off, say) and passes for the card's at a look, so
+        // the card asks no more while its box may stand open. Its console is opened, its still shown and a live view
+        // of it held with keyboard and mouse. Then the No of the number its box was shown is taken: as where a card
+        // begins to ask, the live view ends, the console is let go of, and no still, key or live view goes to that
+        // computer after it (before: they went on, and the console's session stayed open to its controller). (A
+        // typing cannot be under way then: the wall refuses anything for a card while a typing goes on, and says so.)
+        Server server;
+        server.bmc.uuid = u"00000000-0000-0000-0000-000000000000"_s;
+        OwnWall own;
+        const QString id = own.add(server);
+        QVERIFY(!id.isEmpty());
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return s.state == "online"_L1; }).hasScreen);
+        server.bmc.uuid = RedfishByHand::fresh();
+        const core::Status asking = cameTo(own.wall, id, [](const core::Status& s) { return s.asksItsServer; });
+        QVERIFY(asking.asksItsServer);
+        QVERIFY(!asking.askedAbout.isEmpty());
+        server.bmc.uuid = u"00000000-0000-0000-0000-000000000000"_s;
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return !s.asksItsServer && s.hasScreen; }).hasScreen);
+        QVERIFY(stillOf(own.wall, id).ok());
+        const base::Result<std::unique_ptr<core::Live>> opened = liveOf(own.wall, id);
+        QVERIFY2(opened.ok(), opened.ok() ? "" : opened.error().message.c_str());
+        core::Live& live = *opened.value();
+        QSignalSpy control(&live, &core::Live::controlChanged);
+        QSignalSpy closed(&live, &core::Live::closed);
+        live.askControl(true);
+        QTRY_VERIFY_WITH_TIMEOUT(!control.isEmpty() && control.constLast().at(0).toBool(), 20000);
+        QTRY_VERIFY_WITH_TIMEOUT(server.console.watching >= 1, 10000);
+        core::Action no = core::Action::plain(u"not_its_server"_s);
+        no.text = asking.askedAbout;
+        const base::Result<core::Done> said =
+            answerTo<core::Done>([&](auto done) { own.wall.act(id, no, std::move(done)); });
+        QVERIFY2(said.ok(), said.ok() ? "" : said.error().message.c_str());
+        QTRY_COMPARE_WITH_TIMEOUT(closed.size(), 1, 10000);
+        QTRY_COMPARE_WITH_TIMEOUT(server.console.watching, 0, 10000);
+        const auto keysBefore = server.console.keyboards().size();
+        live.key(0x04, true);
+        live.key(0x04, false);
+        QCOMPARE(
+            codeOf(answerTo<core::Snapshot>([&](auto done) { own.wall.askSnapshot(id, 320, 0, std::move(done)); })),
+            std::string("another_machine"));
+        const base::Result<std::unique_ptr<core::Live>> again = liveOf(own.wall, id);
+        QVERIFY(!again.ok() || !again.value()->isOpen());
+        QTest::qWait(300);
+        QCOMPARE(server.console.keyboards().size(), keysBefore);
+        QCOMPARE(server.console.watching, 0);
+        QVERIFY(!statusOf(own.wall, id).hasScreen);
+    }
+
+    void aTypingUnderWayStopsOnceAnotherServerAnswersAtItsAddress()
+    {
+        // (Review cx2-4, L3.) A card known by its computer's number types a long text over its console. While it types,
+        // another server comes to answer at its address (another number for itself), and a look finds it: from then on
+        // nothing goes to it, and the typing stops at its next asking whether it may go on (its Still, held to whatever
+        // keeps the screen from the card: another server, a card that asks, or a No). Its answer says it did not go
+        // through, and no key goes down after it, though most of the text was still to come (before: only its start
+        // was held to that, and it went on to its end).
+        Server server;
+        OwnWall own([](core::DriverPaces& paces) { paces.redfish.screen.keyPauseMs = 40; });
+        const QString id = own.add(server);
+        QVERIFY(!id.isEmpty());
+        QVERIFY(cameTo(own.wall, id, [](const core::Status& s) { return s.state == "online"_L1; }).hasScreen);
+        const auto downs = [&server](std::size_t from) {
+            const std::vector<AmiConsoleByHand::Hid> all = server.console.keyboards();
+            int count = 0;
+            for (std::size_t at = from; at < all.size(); ++at) {
+                count += all.at(at).keys.empty() ? 0 : 1;
+            }
+            return count;
+        };
+        const QString text(300, u'a');
+        auto typed = std::make_shared<QList<base::Result<core::Done>>>();
+        own.wall.act(id, core::Action::type(text, false),
+                     [typed](const base::Result<core::Done>& answer) { typed->append(answer); });
+        QTRY_VERIFY_WITH_TIMEOUT(downs(0) >= 5, 20000);
+        QVERIFY(typed->isEmpty());
+        server.bmc.uuid = RedfishByHand::fresh();
+        QCOMPARE(
+            cameTo(own.wall, id, [](const core::Status& s) { return s.errorCode == "another_machine"_L1; }).errorCode,
+            u"another_machine"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(!typed->isEmpty(), 10000);
+        QVERIFY(!typed->first().ok());
+        const std::size_t after = server.console.keyboards().size();
+        QTest::qWait(600);
+        QCOMPARE(downs(after), 0);
+        QVERIFY2(downs(0) < text.size(), qPrintable(QString::number(downs(0))));
+        QVERIFY(server.console.keyboards().empty() || server.console.keyboards().back().keys.empty());
     }
 
     void keysAndATextFromTheMenuGoOverTheConsole()

@@ -8,6 +8,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QSet>
+#include <QUrl>
 
 #include <qkvm/core/kvmd_answers.h>
 
@@ -311,13 +312,45 @@ std::optional<Light> locator(const QJsonObject& system)
 
 QString serverNumber(const QJsonObject& system)
 {
-    const QString digest = digestOf(system.value("UUID"_L1));
+    // (Nor a number its board's maker put on every board of the make: AMI's, as its firmware gives it, and in the byte
+    // order of the SMBIOS table it is read from. Two nodes that give it cannot be told apart by it, and one alone may
+    // be either: such a computer is one that gives no number, held to where the card's computer was found. Outside
+    // review 2, 3.2: one of two that gave it passed for the card's where the other was out.)
+    static const QStringList everyBoards{u"03000200-0400-0500-0006-000700080009"_s,
+                                         u"00020003-0004-0005-0006-000700080009"_s};
+    const QJsonValue number = system.value("UUID"_L1);
+    if (number.isString() && everyBoards.contains(number.toString().toLower())) {
+        return {};
+    }
+    const QString digest = digestOf(number);
     return digest.isEmpty() ? QString() : u"server:"_s + digest;
 }
 
 QString controllerNumber(const QJsonValue& root)
 {
     return root.isObject() ? digestOf(root.toObject().value("UUID"_L1)) : QString();
+}
+
+bool isOpenBmc(const QJsonObject& manager)
+{
+    return manager.value("Model"_L1) == "OpenBmc"_L1 ||
+           manager.value("Oem"_L1).toObject().value("OpenBmc"_L1).isObject();
+}
+
+QString rfbConsole(const QJsonObject& manager)
+{
+    const QJsonObject console = manager.value("GraphicalConsole"_L1).toObject();
+    const QJsonValue kinds = console.value("ConnectTypesSupported"_L1);
+    const bool kvm = kinds.isArray() && kinds.toArray().contains(QJsonValue(u"KVMIP"_s));
+    if (isOpenBmc(manager) && console.value("ServiceEnabled"_L1) == QJsonValue(true) && kvm) {
+        return u"/kvm/0"_s;
+    }
+    return {};
+}
+
+bool amiRoot(const QJsonObject& root)
+{
+    return kvmd::plain(root.value("Vendor"_L1), 40).toUpper() == "AMI"_L1;
 }
 
 QStringList managerNumbers(const QJsonObject& manager)
@@ -333,10 +366,20 @@ QStringList managerNumbers(const QJsonObject& manager)
 
 Marks marksOf(const QString& machine)
 {
+    // A computer's mark kept of a maker's placeholder (0.1.x took AMI's for a number, as every published version before
+    // 0.2.0 did) is read as one that gave none: the card is then known by its controller alone, as a card added for
+    // such a board now is (review cx2-2 of outside review 2, M3: it refused everything, its words offering a way past
+    // that could not come). A rule of reading only: what is kept is not written anew for it.
+    static const QStringList placeholders{u"server:"_s + digestOf(u"03000200-0400-0500-0006-000700080009"_s),
+                                          u"server:"_s + digestOf(u"00020003-0004-0005-0006-000700080009"_s)};
+    Marks marks{machine, {}};
     if (machine.startsWith(u"server:"_s) && machine.size() == saidNone.size() + 32) {
-        return Marks{machine.first(saidNone.size()), machine.sliced(saidNone.size())};
+        marks = Marks{machine.first(saidNone.size()), machine.sliced(saidNone.size())};
     }
-    return Marks{machine, {}};
+    if (placeholders.contains(marks.server)) {
+        marks.server = QString(saidNone);
+    }
+    return marks;
 }
 
 // --- what is done to it -----------------------------------------------------------------------------
@@ -452,6 +495,21 @@ QStringList bootTargets(const QJsonObject& system)
     return targets;
 }
 
+std::optional<QStringList> overrideKinds(const QJsonObject& system)
+{
+    const QJsonValue said = at(system, {"Boot"_L1, "BootSourceOverrideEnabled@Redfish.AllowableValues"_L1});
+    if (!said.isArray()) {
+        return std::nullopt;
+    }
+    QStringList kinds;
+    for (const QJsonValue kind : listed(said)) {
+        if (kind.isString()) {
+            kinds.append(kvmd::plain(kind, 30).toLower());
+        }
+    }
+    return kinds;
+}
+
 std::pair<QString, QString> bootOverride(const QJsonObject& system)
 {
     return {kvmd::plain(at(system, {"Boot"_L1, "BootSourceOverrideEnabled"_L1}), 30).toLower(),
@@ -478,7 +536,174 @@ QString anotherOverride(const QJsonObject& system)
            kvmd::plain(at(system, {"Boot"_L1, "BootSourceOverrideEnabled"_L1}), 30);
 }
 
+bool setupForEveryBoot(const QJsonObject& system)
+{
+    return bootOverride(system) == std::pair<QString, QString>(u"continuous"_s, u"biossetup"_s);
+}
+
 // --- how it is --------------------------------------------------------------------------------------
+
+namespace {
+
+// A place of a Task's own, not its monitor's (the web's: "/Tasks/" in it, and not ending in "/Monitor").
+bool aTaskItself(QString place)
+{
+    while (place.endsWith(u'/')) {
+        place.chop(1);
+    }
+    return place.contains(u"/Tasks/"_s) && !place.endsWith(u"/Monitor"_s);
+}
+
+// A place as a link names it, without the slashes it may end in.
+QString plainPlace(QString place)
+{
+    while (place.endsWith(u'/')) {
+        place.chop(1);
+    }
+    return place;
+}
+
+// Whether the place a Task names itself by (`itself`; the Task as read, or as a change's answer, `task`) and the place
+// `other` name the one task: the same place, a monitor below the Task's own (".../Monitor"), the Task's own above a
+// monitor, or the monitor the Task names (TaskMonitor) (outside review of D1, round 2, L4: nothing tied a Task in an
+// answer to the monitor beside it).
+bool oneTask(const QString& itself, const QJsonObject& task, const QString& other)
+{
+    const QString own = plainPlace(itself);
+    const QString there = plainPlace(other);
+    if (own == there || own + u"/Monitor"_s == there || there + u"/Monitor"_s == own) {
+        return true;
+    }
+    const QString monitor = plainPlace(link(task.value("TaskMonitor"_L1)));
+    return !monitor.isEmpty() && monitor == there;
+}
+
+} // namespace
+
+QString taskPlace(const QByteArray& location, const QByteArray& body)
+{
+    const auto inTheService = [](const QString& place) { return place.startsWith(u"/redfish/v1/TaskService/"_s); };
+    const QJsonObject said = QJsonDocument::fromJson(body).object();
+    QString named = link(said.value("@odata.id"_L1));
+    if (!inTheService(named)) {
+        named.clear();
+    }
+    QString located;
+    if (!location.isEmpty()) {
+        // (Its path alone, as the web's urlsplit takes it: asked of this controller, under this session, wherever else
+        // it says.)
+        const QUrl place(QString::fromLatin1(location), QUrl::StrictMode);
+        if (place.isValid()) {
+            located = link(place.path(QUrl::FullyEncoded));
+        }
+        if (!inTheService(located)) {
+            located.clear();
+        }
+    }
+    if (!named.isEmpty() && !located.isEmpty() && !oneTask(named, said, located)) {
+        // (A Task in the answer, and a Location of another task's: neither is surely this change's.)
+        return {};
+    }
+    QStringList places;
+    for (const QString& place : {named, located}) {
+        if (!place.isEmpty()) {
+            places.append(place);
+        }
+    }
+    std::ranges::stable_sort(places, {}, [](const QString& place) { return !aTaskItself(place); });
+    return places.isEmpty() ? QString() : places.constFirst();
+}
+
+namespace {
+
+// Whether a Task, read at `place`, is surely of the change made to `of` (outside review of D1, H1): it names itself
+// nothing else than that place, where it names itself; and its Payload, where it has one, names a change of that very
+// place (by its path, as a Location is read: an address of the controller's own is the same place), by a PATCH. A
+// Task that names either amiss is another's, or one a controller hands out for an old change.
+bool ofTheChange(const QString& place, const QJsonObject& task, const QString& of)
+{
+    if (aTaskItself(place) && task.contains("@odata.id"_L1) &&
+        plainPlace(link(task.value("@odata.id"_L1))) != plainPlace(place)) {
+        return false; // (a link that is none names no place, and so not this one)
+    }
+    // (At a monitor, a Task that names itself is the monitor's own: its place above it, or one that names it as its
+    // TaskMonitor; outside review of D1, round 2, L4.)
+    if (!aTaskItself(place) && task.contains("@odata.id"_L1) &&
+        !oneTask(link(task.value("@odata.id"_L1)), task, place)) {
+        return false;
+    }
+    const QJsonValue payload = task.value("Payload"_L1);
+    if (payload.isUndefined() || payload.isNull()) {
+        return true;
+    }
+    if (!payload.isObject()) {
+        return false;
+    }
+    const QJsonObject change = payload.toObject();
+    if (change.contains("TargetUri"_L1)) {
+        const QJsonValue target = change.value("TargetUri"_L1);
+        const QUrl said(target.toString(), QUrl::StrictMode);
+        const QString named = target.isString() && said.isValid() ? link(said.path(QUrl::FullyEncoded)) : QString();
+        if (named.isEmpty() || plainPlace(named) != plainPlace(of)) {
+            return false;
+        }
+    }
+    if (change.contains("HttpOperation"_L1) &&
+        kvmd::plain(change.value("HttpOperation"_L1), 20).compare("PATCH"_L1, Qt::CaseInsensitive) != 0) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+TaskSaid taskOf(const QString& place, int status, const QByteArray& body, const QString& of)
+{
+    using State = TaskSaid::State;
+    const bool itself = aTaskItself(place);
+    if (status == 202) {
+        return {State::UnderWay, {}}; // (a monitor: still under way)
+    }
+    if (status == 408 || status == 429 || (status >= 500 && status < 600)) {
+        return {State::Passing, {}}; // (the place could not answer just then: nothing said of the task)
+    }
+    if (status == 204 || (status == 200 && body.isEmpty())) {
+        // (A monitor's end: the action's own answer, and it did it. A Task's own place answers with the Task.)
+        return {itself ? State::Unreadable : State::Done, {}};
+    }
+    if (status >= 400) {
+        if (itself || status == 401 || status == 404 || status == 410) {
+            return {State::Unreadable, {}}; // (a task gone, or not to be read)
+        }
+        return {State::Refused, saidIn(body)}; // (the change's own answer, as the monitor gives it: no end for certain)
+    }
+    if (status != 200) {
+        return {State::Unreadable, {}};
+    }
+    const QJsonDocument read = QJsonDocument::fromJson(body);
+    if (!read.isObject()) {
+        return {State::Unreadable, {}};
+    }
+    const QJsonObject task = read.object();
+    const QString state = kvmd::plain(task.value("TaskState"_L1), 20).toLower();
+    if (!ofTheChange(place, task, of)) {
+        return {State::Unreadable, {}};
+    }
+    const bool failed =
+        state == "exception"_L1 || state == "killed"_L1 || state == "cancelled"_L1 ||
+        (state == "completed"_L1 && kvmd::plain(task.value("TaskStatus"_L1), 20).toLower() == "critical"_L1);
+    if (failed) {
+        const QJsonArray messages = listed(task.value("Messages"_L1));
+        return {State::Failed, messages.isEmpty() ? QString() : kvmd::plain(at(messages.first(), {"Message"_L1}), 200)};
+    }
+    if (state == "completed"_L1) {
+        return {State::Done, {}};
+    }
+    // (Redfish's TaskState, those that are no end: a word it does not have, or none, says nothing.)
+    static const QStringList underWay{u"new"_s,     u"starting"_s, u"running"_s, u"suspended"_s, u"interrupted"_s,
+                                      u"pending"_s, u"stopping"_s, u"service"_s, u"cancelling"_s};
+    return {underWay.contains(state) ? State::UnderWay : State::Unreadable, {}};
+}
 
 Seen statusFrom(const Looked& looked)
 {

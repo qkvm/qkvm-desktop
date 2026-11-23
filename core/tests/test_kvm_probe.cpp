@@ -21,6 +21,7 @@
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/kvmd_device.h>
 
+#include "signer_far_away.h"
 #include "stand_in.h"
 
 using namespace Qt::StringLiterals;
@@ -240,6 +241,38 @@ private slots:
         QTest::failOnWarning();
     }
 
+    void aProbeThatEndsWhileWindowsFetchesASignerDoesNotHoldTheInterfaceThread()
+    {
+        // (The LOW of beta 2's review.) Every manager of Qt's for HTTP speaks on a thread of its own, and its end
+        // waits up to five seconds for that thread. Each asking of a probe has one (that is what the word on the
+        // certificate rests on), and ends with what it found or with the probe. Where a line's certificate is being
+        // judged then, and Windows fetches its signer from an address that does not answer (an AIA fetch on a PC
+        // without internet), that thread is held: the interface thread was held with it, as the asking ended. It is
+        // not (network_end.h).
+        // (This program's own certificate and ports: signer_far_away.h.)
+        const auto& stalls = core::testing::stallsOfTheProbe;
+        const core::testing::SignerFarAway far(stalls);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const core::testing::TlsDoorElsewhere door(tls(stalls.name));
+        QVERIFY(door.speaksWindowsOwnTls());
+        auto probe = std::make_unique<KvmProbe>(overTls());
+        probe->ask(QUrl(door.address()), [](const KvmProbe::Found& /*found*/) {});
+        // Its line's certificate judged: Windows fetches the signer from where the certificate says, for this program
+        // here, and waits on it as the probe ends.
+        QVERIFY2(QTest::qWaitFor([&far] { return far.asked() > 0; }, 60'000),
+                 qPrintable(u"Windows did not fetch the signer here for this program: "_s + far.said()));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        const core::testing::Stillness still;
+        probe.reset();
+        QTest::qWait(6000);
+        QVERIFY2(still.longestMs() < 1000,
+                 qPrintable(
+                     u"The interface thread was held still for %1 ms (%2)."_s.arg(still.longestMs()).arg(far.said())));
+        // (And Windows still waited on that fetch all through: what was measured is an end while its thread was held.)
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        qInfo("%s", qPrintable(far.said()));
+    }
+
     void anAddressIsWrittenTheOneWay_data()
     {
         // Each of these beside what the server makes of the same text (device_url, tried with the
@@ -418,6 +451,51 @@ private slots:
         QVERIFY2(!address.ok(), qPrintable(address.ok() ? address.value().toString() : QString()));
         QCOMPARE(address.error().code, std::string("invalid"));
         QCOMPARE(QString::fromStdString(address.error().message), u"Not a usable device address: "_s + shown);
+    }
+
+    void aVncSchemeWrittenAmissIsNoKvmsAddressEither()
+    {
+        // Outside review c9a-3, L1, with "KVMs and servers" chosen in the box that adds one: the server's reader, and
+        // this one before, took "vncs:/10.0.0.6:5901", "vncs//box" and "vnc:/box" for a KVM over HTTPS at a host called
+        // "vncs" or "vnc" (https://vncs), which anyone on the network may answer for. Refused here as a VNC server's
+        // address refuses them, in any case. (Not the server's words: it has none for these.) In a sentence that names
+        // a KVM's way too, which a KVM at a host called "vnc" ("vnc:8443") is written with: told only to write vnc://
+        // or vncs:// in full, it was added as a VNC server over TLS, and a VNC sign-in went to its web port (outside
+        // review c9a-4, L2).
+        const QString amiss = u"This begins as a VNC server's address does, with vnc or vncs, but not with vnc:// or "
+                              "vncs://. Write a VNC server's in full, with both slashes, or a KVM's at a host of that "
+                              "name with https:// before it."_s;
+        for (const QString& typed : {u"vncs:/10.0.0.6:5901"_s, u"vncs//box.lan"_s, u"vnc:/box.lan"_s,
+                                     u"VNCS:/10.0.0.6"_s, u"Vnc:/box.lan"_s, u"vNcS//box.lan"_s, u"vnc:8443"_s}) {
+            const base::Result<QUrl> address = core::kvm::addressFrom(typed);
+            QVERIFY2(!address.ok(),
+                     qPrintable(typed + u" -> "_s + (address.ok() ? address.value().toString() : QString())));
+            QCOMPARE(address.error().code, std::string("invalid"));
+            QCOMPARE(QString::fromStdString(address.error().message), amiss);
+        }
+        // Outside review c9a-4, L1: what Qt drops from a name or makes another letter of (a soft hyphen, a sign of no
+        // width, a mark of the byte order, letters of the full width, the long s) before such a text, or in it, does
+        // not take it past this either: no sign of it is one of a host's here, whatever Qt would make of it; nor does
+        // a VNC server's scheme typed twice, which is no KVM's.
+        const auto sign = [](char16_t number) { return QString(QChar(number)); };
+        const QString fullWidth = sign(0xFF56) + sign(0xFF4E) + sign(0xFF43) + sign(0xFF53); // "vncs" of the full width
+        for (const QString& typed : {sign(0x00AD) + u"vncs:/10.0.0.6:5901"_s, sign(0x200B) + u"vncs:/10.0.0.6:5901"_s,
+                                     sign(0x2060) + u"vncs:/10.0.0.6"_s, sign(0xFEFF) + u"vncs:/10.0.0.6"_s,
+                                     u"vn"_s + sign(0x00AD) + u"cs:/box"_s, fullWidth + u":/10.0.0.6"_s,
+                                     u"vnc"_s + sign(0x017F) + u":/10.0.0.6"_s, u"vnc://vncs:/10.0.0.6:5901"_s,
+                                     u"https://vncs"_s + sign(0x00AD) + u":/10.0.0.6"_s}) {
+            const base::Result<QUrl> address = core::kvm::addressFrom(typed);
+            QVERIFY2(!address.ok(),
+                     qPrintable(typed + u" -> "_s + (address.ok() ? address.value().toString() : QString())));
+            QCOMPARE(address.error().code, std::string("invalid"));
+        }
+        // A KVM whose name begins so is one all the same.
+        QCOMPARE(core::kvm::addressFrom(u"vnc.lan"_s).value().toString(), u"https://vnc.lan"_s);
+        QCOMPARE(core::kvm::addressFrom(u"vncbox:8443"_s).value().toString(), u"https://vncbox:8443"_s);
+        QCOMPARE(core::kvm::addressFrom(u"vnc"_s).value().toString(), u"https://vnc"_s);
+        // And a KVM at a host of that name and a port is one as the sentence has it written.
+        QCOMPARE(core::kvm::addressFrom(u"https://vnc:8443"_s).value().toString(), u"https://vnc:8443"_s);
+        QCOMPARE(core::kvm::addressFrom(u"HTTPS://VNCS:443/"_s).value().toString(), u"https://vncs"_s);
     }
 
     void qtReadsNumbersMoreLooselyThanTheServer()
@@ -725,6 +803,98 @@ private slots:
         QCOMPARE(found.kind, KvmProbe::Kind::SomethingElse);
         QVERIFY(found.shown.isEmpty());
         QVERIFY(!found.trustedByWindows);
+    }
+
+    void aPlainAddressThatSendsEverybodyOnToHttpsSaysWhereAndIsNotFollowed_data()
+    {
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QString>("location"); // "{host}": the address's own
+        QTest::addColumn<QString>("sentOnTo"); // the same; empty: none
+        // (A web server before kvmd once HTTPS is its only way in: a GL.iNet firmware's nginx, web 0.3.2.)
+        QTest::newRow("301 to HTTPS") << 301 << u"https://{host}/"_s << u"https://{host}"_s;
+        QTest::newRow("302 to another port") << 302 << u"https://{host}:8443/login"_s << u"https://{host}:8443"_s;
+        QTest::newRow("303") << 303 << u"https://{host}/api/auth/check"_s << u"https://{host}"_s;
+        QTest::newRow("307, its port 443 written") << 307 << u"https://{host}:443/"_s << u"https://{host}"_s;
+        QTest::newRow("308, in capitals") << 308 << u"HTTPS://{host}/"_s << u"https://{host}"_s;
+        QTest::newRow("with blanks around it") << 301 << u"  https://{host}/  "_s << u"https://{host}"_s;
+        // Only to HTTPS at the same host, from a redirect: anything else is somebody else's, and offered nowhere.
+        QTest::newRow("to another host") << 301 << u"https://localhost/"_s << QString();
+        QTest::newRow("to plain HTTP") << 301 << u"http://{host}:8080/"_s << QString();
+        QTest::newRow("to a path alone") << 302 << u"/login"_s << QString();
+        QTest::newRow("to a port that is no number") << 301 << u"https://{host}:x/"_s << QString();
+        QTest::newRow("to port 0") << 301 << u"https://{host}:0/"_s << QString();
+        QTest::newRow("to no host") << 301 << u"https:///"_s << QString();
+        QTest::newRow("not a redirect") << 200 << u"https://{host}/"_s << QString();
+        QTest::newRow("300") << 300 << u"https://{host}/"_s << QString();
+        QTest::newRow("304") << 304 << u"https://{host}/"_s << QString();
+    }
+
+    void aPlainAddressThatSendsEverybodyOnToHttpsSaysWhereAndIsNotFollowed()
+    {
+        QFETCH(int, status);
+        QFETCH(QString, location);
+        QFETCH(QString, sentOnTo);
+        location.replace(u"{host}"_s, u"127.0.0.1"_s);
+        sentOnTo.replace(u"{host}"_s, u"127.0.0.1"_s);
+        MadeUp front;
+        front.otherwise = Answered(status, "<html><body>Moved</body></html>"_ba, "text/html"_ba,
+                                   {"Location: "_ba + location.toUtf8()});
+        const KvmProbe::Found found = foundAt(front.address());
+        QCOMPARE(found.kind, KvmProbe::Kind::SomethingElse);
+        QCOMPARE(found.sentOnTo.value_or(QUrl()).toString(QUrl::FullyEncoded), sentOnTo);
+        // Followed nowhere: its three questions, each once, and nothing else.
+        QCOMPARE(front.stand->asked.size(), 3);
+        // The rule itself, as the driver reads every answer by it: nothing of an address that is not plain HTTP.
+        QCOMPARE(core::kvm::httpsInstead(front.address(), status, location.toUtf8())
+                     .value_or(QUrl())
+                     .toString(QUrl::FullyEncoded),
+                 sentOnTo);
+        QUrl overHttps = front.address();
+        overHttps.setScheme(u"https"_s);
+        QVERIFY(!core::kvm::httpsInstead(overHttps, status, location.toUtf8()));
+    }
+
+    void whereOnlyItsApiIsSentOnToHttpsThatIsSaidAllTheSame()
+    {
+        // (A web server that sends kvmd's API alone on to HTTPS, and answers its other paths itself: the outside
+        // review of web 0.3.2, L4.) kvmd's question's is what counts first.
+        MadeUp front;
+        front.says.insert(kvmdsQuestion,
+                          Answered{301, {}, "text/html"_ba, {"Location: https://127.0.0.1:8443/api"_ba}});
+        front.says.insert(redfishsQuestion,
+                          Answered{301, {}, "text/html"_ba, {"Location: https://127.0.0.1:9443/"_ba}});
+        const KvmProbe::Found found = foundAt(front.address());
+        QCOMPARE(found.kind, KvmProbe::Kind::SomethingElse);
+        QCOMPARE(found.sentOnTo.value_or(QUrl()).toString(QUrl::FullyEncoded), u"https://127.0.0.1:8443"_s);
+        // And where a family answers there, that family is what was found, and nothing is said of HTTPS.
+        front.says.insert(jetKvmsQuestion, asJetKvm());
+        const KvmProbe::Found jet = foundAt(front.address());
+        QCOMPARE(jet.kind, KvmProbe::Kind::JetKvm);
+        QVERIFY(!jet.sentOnTo);
+    }
+
+    void whatIsSaidOfAKvmThatAnswersOnHttpsNamesTheAddressOnceForTheBoxes()
+    {
+        // The web's sentence and code, and the address read back from it for the boxes that offer it (and from
+        // nothing else).
+        const QUrl to(u"https://192.168.1.20:8443"_s);
+        const base::Error said = core::kvm::httpsOnly(to);
+        QCOMPARE(said.code, std::string("https_only"));
+        QCOMPARE(QString::fromStdString(said.message),
+                 u"This KVM answers on HTTPS: its plain address sends everybody to https://192.168.1.20:8443. To use "
+                 "it there, type https://192.168.1.20:8443"_s);
+        QCOMPARE(core::kvm::httpsOffered(said).value_or(QUrl()).toString(QUrl::FullyEncoded), to.toString());
+        const QUrl inBrackets(u"https://[fd00::1]"_s);
+        QCOMPARE(
+            core::kvm::httpsOffered(core::kvm::httpsOnly(inBrackets)).value_or(QUrl()).toString(QUrl::FullyEncoded),
+            u"https://[fd00::1]"_s);
+        // Of anything else nothing.
+        QVERIFY(!core::kvm::httpsOffered(base::Error{"no_sign_in", said.message}));
+        base::Error other = said;
+        other.message += "9";
+        QVERIFY(!core::kvm::httpsOffered(other));
+        QVERIFY(!core::kvm::httpsOffered(core::kvm::httpsOnly(QUrl(u"http://192.168.1.20"_s))));
+        QVERIFY(!core::kvm::httpsOffered(base::Error{"https_only", "This KVM answers on HTTPS"}));
     }
 
     void nobodyThereIsNothing()

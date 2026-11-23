@@ -7,6 +7,7 @@
 #include <utility>
 
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QJsonValue>
 #include <QRegularExpression>
 #include <QSignalSpy>
@@ -14,7 +15,9 @@
 #include <QTest>
 #include <QTimer>
 
+#include <qkvm/core/redfish_answers.h>
 #include <qkvm/core/redfish_device.h>
+#include <qkvm/core/setup_overrides.h>
 #include <qkvm/core/sign_in_pacing.h>
 
 #include "redfish_by_hand.h"
@@ -29,18 +32,21 @@ using qkvm::core::SignInPacing;
 
 namespace {
 
-// Asks the driver for a way into its console, and waits for the answer.
+// Asks the driver for a way into its console, and waits for the answer. (The answers held apart from this call: a way
+// asked for that it gave up on is told what became of it after this has returned, by its driver's end at the latest, on
+// the program's loop; as test_redfish_setup's presses.)
 base::Result<RedfishDevice::ConsoleWay> wayOf(RedfishDevice& device)
 {
-    QList<base::Result<RedfishDevice::ConsoleWay>> answers;
-    device.consoleWay([&](base::Result<RedfishDevice::ConsoleWay> answer) { answers.append(std::move(answer)); });
-    if (!answers.isEmpty()) {
+    const auto answers = std::make_shared<QList<base::Result<RedfishDevice::ConsoleWay>>>();
+    device.consoleWay(
+        [answers](base::Result<RedfishDevice::ConsoleWay> answer) { answers->append(std::move(answer)); });
+    if (!answers->isEmpty()) {
         return base::Error{"at_once", "The answer came before the call came back."};
     }
-    if (!QTest::qWaitFor([&] { return !answers.isEmpty(); }, 30000)) {
+    if (!QTest::qWaitFor([&answers] { return !answers->isEmpty(); }, 30000)) {
         return base::Error{"never", "The call was never answered."};
     }
-    return answers.takeFirst();
+    return answers->takeFirst();
 }
 
 std::string codeOf(const base::Result<RedfishDevice::ConsoleWay>& what)
@@ -59,6 +65,17 @@ RedfishDevice::Pace brisk()
     RedfishDevice::Pace pace = quick();
     pace.questionAgainMs = 100;
     return pace;
+}
+
+// Has the driver do something, and waits for what came of it (held apart from this call, as wayOf's answers are).
+base::Result<qkvm::core::Done> actedOn(RedfishDevice& device, const qkvm::core::Action& what)
+{
+    const auto answers = std::make_shared<QList<base::Result<qkvm::core::Done>>>();
+    device.act(what, [answers](const base::Result<qkvm::core::Done>& answer) { answers->append(answer); });
+    if (!QTest::qWaitFor([&answers] { return !answers->isEmpty(); }, 30000)) {
+        return base::Error{"never", "The call was never answered."};
+    }
+    return answers->takeFirst();
 }
 
 } // namespace
@@ -283,26 +300,59 @@ private slots:
         const QString unsaid =
             u"The controller does not say whether it switches the server's own monitor off while its "
             "console is open, so qKVM leaves the console alone"_s;
+        // (Web 0.3.2, its independent review's L2: one of the two a plain no and the other not. That the controller "is
+        // set to switch" the monitor off may be untrue then, so the card says no more than what is so.)
+        const QString oneOff = u"Of the controller's two settings that switch the server's own monitor off while its "
+                               "console is open, only one is off, so qKVM leaves the console alone"_s;
         const QJsonValue none(QJsonValue::Undefined);
-        // Both said, and both a plain no: opened.
+        const QJsonValue unreadable(QJsonArray{u"unreadable"_s});
+        const QJsonValue anObject(QJsonObject{{u"a"_s, 1}});
+        // (Blanks are what the web's strip() takes off: Unicode's spaces, and the four separators below 0x20 too.)
+        const QString separator(QChar(0x1C));
+        const QString unitSeparator(QChar(0x1F));
+        // Both said, and both a plain no: opened (test_what_a_controller_sent_of_another_kind.py's last four).
         QTest::newRow("both a plain no, as a real board says it") << QJsonValue(0) << QJsonValue(0) << QString();
-        QTest::newRow("both a plain no in other words") << QJsonValue(u" Off"_s) << QJsonValue(false) << QString();
+        QTest::newRow("both a plain no as texts") << QJsonValue(u"0"_s) << QJsonValue(u"false"_s) << QString();
+        QTest::newRow("both a plain no in other words") << QJsonValue(false) << QJsonValue(u"off"_s) << QString();
+        QTest::newRow("both a plain no among blanks") << QJsonValue(0.0) << QJsonValue(u" no "_s) << QString();
         QTest::newRow("both a plain no, in more words")
-            << QJsonValue(u"disabled"_s) << QJsonValue(u"no"_s) << QString();
-        // Anything else: left alone, and the card says why.
+            << QJsonValue(u" Off"_s) << QJsonValue(u"Disabled"_s) << QString();
+        QTest::newRow("a plain no among the web's blanks")
+            << QJsonValue(u" 0"_s + unitSeparator) << QJsonValue(separator + u"off"_s) << QString();
+        // Both not a plain no: left alone, and the card says that it is set to switch it off.
         QTest::newRow("both a yes") << QJsonValue(1) << QJsonValue(1) << darkens;
-        QTest::newRow("the first a yes") << QJsonValue(1) << QJsonValue(0) << darkens;
-        QTest::newRow("the second a yes") << QJsonValue(0) << QJsonValue(1) << darkens;
-        QTest::newRow("a yes said as a word") << QJsonValue(u"on"_s) << QJsonValue(0) << darkens;
-        QTest::newRow("a yes said as true") << QJsonValue(false) << QJsonValue(true) << darkens;
-        QTest::newRow("a number that is not nought") << QJsonValue(0) << QJsonValue(0.5) << darkens;
-        QTest::newRow("a word that cannot be read") << QJsonValue(QJsonArray{}) << QJsonValue(0) << darkens;
-        // The owner's decision of 2026-11-05: a word that is not said at all is not a no.
+        QTest::newRow("both a yes as texts") << QJsonValue(u"1"_s) << QJsonValue(u"1"_s) << darkens;
+        QTest::newRow("both a yes as true") << QJsonValue(true) << QJsonValue(true) << darkens;
+        QTest::newRow("both a yes in words") << QJsonValue(u"true"_s) << QJsonValue(u"on"_s) << darkens;
+        QTest::newRow("a yes beside a word that cannot be read") << QJsonValue(1) << unreadable << darkens;
+        QTest::newRow("a word of another kind beside a yes") << anObject << QJsonValue(1) << darkens;
+        // One a plain no, the other not: left alone, and the card says only that.
+        QTest::newRow("the first a yes") << QJsonValue(1) << QJsonValue(0) << oneOff;
+        QTest::newRow("the second a yes") << QJsonValue(0) << QJsonValue(1) << oneOff;
+        QTest::newRow("a yes said as true") << QJsonValue(false) << QJsonValue(1) << oneOff;
+        QTest::newRow("a yes said as a word") << QJsonValue(u"off"_s) << QJsonValue(u"on"_s) << oneOff;
+        QTest::newRow("a number that is not nought") << QJsonValue(0) << QJsonValue(0.5) << oneOff;
+        QTest::newRow("a word that cannot be read") << QJsonValue(0) << unreadable << oneOff;
+        QTest::newRow("a word of another kind") << anObject << QJsonValue(u"0"_s) << oneOff;
+        // (A no only in letters a text would show as one: the web lowers by Unicode's full mapping, and a capital I
+        // with a dot is two letters to it, an I and a dot above. Qt's lowering is the same.)
+        QTest::newRow("a no that is not one")
+            << QJsonValue(u"D"_s + QChar(0x130) + u"SABLED"_s) << QJsonValue(0) << oneOff;
+        // The owner's decision of 2026-11-05: a word that is not said at all is not a no; nor (web 0.3.2, its review's
+        // LOW) one said as nothing, an empty text or blanks; whatever the other says.
         QTest::newRow("automatic_off not said") << none << QJsonValue(0) << unsaid;
         QTest::newRow("local_monitor_off not said") << QJsonValue(0) << none << unsaid;
         QTest::newRow("neither said") << none << none << unsaid;
-        QTest::newRow("said as nothing") << QJsonValue(QJsonValue::Null) << QJsonValue(0) << unsaid;
-        QTest::newRow("one not said, the other a yes") << none << QJsonValue(1) << darkens;
+        QTest::newRow("one not said, the other a yes") << QJsonValue(1) << none << unsaid;
+        QTest::newRow("said as null") << QJsonValue(QJsonValue::Null) << QJsonValue(0) << unsaid;
+        QTest::newRow("the other said as null") << QJsonValue(0) << QJsonValue(QJsonValue::Null) << unsaid;
+        QTest::newRow("both said as null") << QJsonValue(QJsonValue::Null) << QJsonValue(QJsonValue::Null) << unsaid;
+        QTest::newRow("an empty text beside a yes") << QJsonValue(1) << QJsonValue(u""_s) << unsaid;
+        QTest::newRow("an empty text beside a no") << QJsonValue(u""_s) << QJsonValue(0) << unsaid;
+        QTest::newRow("blanks beside a no") << QJsonValue(0) << QJsonValue(u"  "_s) << unsaid;
+        QTest::newRow("a tab beside a no") << QJsonValue(u"\t"_s) << QJsonValue(0) << unsaid;
+        QTest::newRow("both empty texts") << QJsonValue(u""_s) << QJsonValue(u""_s) << unsaid;
+        QTest::newRow("a separator, a blank to the web") << QJsonValue(separator) << QJsonValue(0) << unsaid;
     }
 
     void c9AConsoleThatMayDarkenTheServersMonitorIsLeftAlone()
@@ -642,6 +692,223 @@ private slots:
         QCOMPARE(codeOf(wayOf(device)), std::string("another_machine"));
         QCOMPARE(bmc.webLogins, 0);
         bmc.whenAsked = nullptr;
+    }
+
+    void c24WithNoControllersNumberKeptItsWebPageIsNotOfferedThePasswordAfterARootThatIsNoneOfRedfishs_data()
+    {
+        QTest::addColumn<int>("status");
+        QTest::newRow("401, a camera's sign-in") << 401;
+        QTest::newRow("404") << 404;
+        QTest::newRow("200, no RedfishVersion") << 200;
+    }
+
+    void c24WithNoControllersNumberKeptItsWebPageIsNotOfferedThePasswordAfterARootThatIsNoneOfRedfishs()
+    {
+        // (Outside review of 0.2.0, area 5, HIGH 5.1.) Its controller gives no number of its own, so none is kept to
+        // compare its root with. What answers on the line of its web page is no Redfish service at all (another device
+        // that took the address): the password is not posted there (before: "nothing to compare", and it went).
+        QFETCH(int, status);
+        RedfishByHand bmc;
+        bmc.beServer(aSystem, QJsonValue());
+        RedfishDevice device(keptAs(bmc, markOf(aSystem)), u"secret"_s, brisk());
+        QCOMPARE(lookedAt(device).state, u"online"_s);
+        QCOMPARE(device.machine(), markOf(aSystem)); // (nothing of its controller kept)
+        bmc.rootIsNone = 1;
+        bmc.rootIsNoneWith = status;
+        const auto way = wayOf(device);
+        QCOMPARE(codeOf(way), std::string("bad_response"));
+        QVERIFY(QString::fromStdString(way.error().message).contains(u"which is read before its password goes"_s));
+        QCOMPARE(bmc.rootIsNone, 0); // (its root was asked on that line)
+        QCOMPARE(bmc.webLogins, 0);
+        // Its root a service root's again: its web page is offered it.
+        QVERIFY(wayOf(device));
+        QCOMPARE(bmc.webLogins, 1);
+    }
+
+    void c25ItsWebPageIsOfferedThePasswordOnlyOnTheConnectionItsRootWasReadOn_data()
+    {
+        QTest::addColumn<bool>("encrypted");
+        QTest::newRow("over TLS, the line closed without a word") << true;
+        QTest::newRow("in the clear, the line said to be closed") << false;
+    }
+
+    void c25ItsWebPageIsOfferedThePasswordOnlyOnTheConnectionItsRootWasReadOn()
+    {
+        // (Outside review of 0.2.0, area 5, MEDIUM 5.4.) As the controller's own road: the password goes to its web
+        // page only on the connection on which its root was read and its number compared. Where the controller closes
+        // that connection after every answer, nothing is offered there, and the card is told why.
+        QFETCH(bool, encrypted);
+        RedfishByHand bmc(RedfishByHand::Layout::Ami, encrypted ? std::optional<Tls>(tls("first")) : std::nullopt);
+        bmc.beServer(aSystem, aRoot);
+        RedfishDevice::Pace pace = brisk();
+        pace.connectWithinMs = 5000; // (a TLS handshake under the address sanitizer on a busy PC)
+        RedfishDevice::Where where = keptAs(bmc, markOf(aSystem) + digestOf(aRoot));
+        where.knownByCertificate = encrypted;
+        where.certificate = encrypted ? sha256Of("first") : QByteArray();
+        RedfishDevice device(where, u"secret"_s, pace);
+        bmc.stand->keepsLines = true;
+        QCOMPARE(lookedAt(device).state, u"online"_s);
+        if (encrypted) {
+            bmc.stand->closesSilently = true;
+        } else {
+            bmc.stand->keepsLines = false;
+        }
+        const auto way = wayOf(device);
+        QCOMPARE(codeOf(way), std::string("no_picture"));
+        QVERIFY2(QString::fromStdString(way.error().message).contains(u"closes the connection after every answer"_s),
+                 way.error().message.c_str());
+        QCOMPARE(bmc.webLogins, 0);
+        QVERIFY(bmc.webLoginBodies.isEmpty());
+    }
+
+    void c26ItsConsolesPassIsAskedForOnlyOnTheConnectionItsRootWasReadOn()
+    {
+        // (5.4, the pass.) Its web page signs this program in on the connection its root was read on, and from then on
+        // the controller closes the connection after every answer without a word. The pass, asked for with that page's
+        // session, goes only on the connection its root was read and compared on just before: none is asked for on a
+        // connection made anew, none is handed out, and the web page's session is given back.
+        RedfishByHand bmc(RedfishByHand::Layout::Ami, tls("first"));
+        bmc.beServer(aSystem, aRoot);
+        RedfishDevice::Pace pace = brisk();
+        pace.connectWithinMs = 5000; // (a TLS handshake under the address sanitizer on a busy PC)
+        RedfishDevice::Where where = keptAs(bmc, markOf(aSystem) + digestOf(aRoot));
+        where.knownByCertificate = true;
+        where.certificate = sha256Of("first");
+        RedfishDevice device(where, u"secret"_s, pace);
+        QCOMPARE(lookedAt(device).state, u"online"_s);
+        bmc.whenAsked = [&bmc](const Asked& asked) {
+            if (asked.method == "POST" && asked.path == "/api/session") {
+                bmc.stand->closesSilently = true;
+            }
+        };
+        const auto way = wayOf(device);
+        QCOMPARE(codeOf(way), std::string("no_picture"));
+        QVERIFY2(QString::fromStdString(way.error().message).contains(u"closes the connection after every answer"_s),
+                 way.error().message.c_str());
+        QCOMPARE(bmc.webLogins, 1);
+        QVERIFY(bmc.consolePasses.isEmpty());
+        bmc.stand->closesSilently = false;
+        QTRY_COMPARE_WITH_TIMEOUT(bmc.webSignedOut, 1, 10000);
+        bmc.whenAsked = nullptr;
+    }
+
+    void c25ACardThatKeepsNoPlaceSaysWhyAndTheWayPastOnEveryRoad_data()
+    {
+        QTest::addColumn<bool>("controllerAlone");
+        QTest::addColumn<QString>("road");
+        for (const bool alone : {false, true}) {
+            for (const char* road : {"card", "power", "keys", "ctrl_alt_del", "text", "console", "bios_setup"}) {
+                QTest::newRow(
+                    qPrintable((alone ? u"known by its controller alone, "_s : u"known by its computer, off, "_s) +
+                               QLatin1StringView(road)))
+                    << alone << QString::fromLatin1(road);
+            }
+        }
+    }
+
+    void c25ACardThatKeepsNoPlaceSaysWhyAndTheWayPastOnEveryRoad()
+    {
+        // (The owner's decision of 2026-11-19 on the merged review of 0.2.0, E-H1: old server cards that keep no place
+        // stay strict.) A card of qKVM 0.1, or one taken from a file of a wall, keeps no place of its computer. Known
+        // by its computer's number, with its computer off and giving none; or known by its controller alone (its
+        // computer gave none when it was added). Whatever road comes first to a driver of it, the card itself, a press,
+        // keys, a text or its console, the refusal is the card's own, word for word: why, and the ways past it. Nothing
+        // is pressed, typed or opened, and its web page hears no password.
+        QFETCH(bool, controllerAlone);
+        QFETCH(QString, road);
+        RedfishByHand bmc;
+        bmc.beServer(controllerAlone ? QJsonValue(zero) : QJsonValue(aSystem), aRoot);
+        const QString kept = controllerAlone ? QString(qkvm::core::redfish::saidNone) + digestOf(aRoot)
+                                             : markOf(aSystem) + digestOf(aRoot);
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        const base::Error why = controllerAlone ? RedfishDevice::whereItWasTakenIsNotKnown()
+                                                : RedfishDevice::whereItsComputerIsNotKnownYet();
+        RedfishDevice::Pace pace = brisk();
+        pace.overrides = std::make_shared<qkvm::core::SetupOverrides>();
+        RedfishDevice device(keptAs(bmc, kept), u"secret"_s, pace);
+        std::string code;
+        std::string said;
+        if (road == u"card"_s) {
+            const qkvm::core::Status status = lookedAt(device);
+            code = status.errorCode.toStdString();
+            said = status.errorMessage.toStdString();
+        } else if (road == u"console"_s) {
+            const auto way = wayOf(device);
+            QVERIFY(!way);
+            code = way.error().code;
+            said = way.error().message;
+        } else {
+            const qkvm::core::Action what = road == u"power"_s  ? qkvm::core::Action::plain(u"power_on"_s)
+                                            : road == u"keys"_s ? qkvm::core::Action::press(u"ControlLeft,KeyC"_s)
+                                            : road == u"text"_s ? qkvm::core::Action::type(u"ls"_s, true)
+                                                                : qkvm::core::Action::plain(road);
+            const base::Result<qkvm::core::Done> done = actedOn(device, what);
+            QVERIFY(!done);
+            code = done.error().code;
+            said = done.error().message;
+        }
+        QCOMPARE(code, std::string("another_machine"));
+        QCOMPARE(said, why.message);
+        QVERIFY2(bmc.actions.isEmpty(), qPrintable(bmc.actions.join(u", "_s)));
+        QVERIFY(bmc.changes.isEmpty());
+        QCOMPARE(bmc.webLogins, 0);
+        QVERIFY(bmc.consolePasses.isEmpty());
+        // The words: why (no number of its own, and the card keeps no place of it), and the ways past it.
+        const QString words = QString::fromStdString(why.message);
+        QVERIFY2(words.contains(u"Nothing is done to it: no power command, no key, no console."_s), qPrintable(words));
+        QVERIFY2(words.contains(u"change the card and type its password"_s), qPrintable(words));
+        QVERIFY2(controllerAlone || words.contains(u"switch the server on once another way"_s), qPrintable(words));
+    }
+
+    void c26ACardThatAsksWhetherItIsItsServerSendsNothingButLooks_data()
+    {
+        QTest::addColumn<QString>("road");
+        for (const char* road : {"power", "keys", "ctrl_alt_del", "text", "console", "bios_setup"}) {
+            QTest::newRow(road) << QString::fromLatin1(road);
+        }
+    }
+
+    void c26ACardThatAsksWhetherItIsItsServerSendsNothingButLooks()
+    {
+        // (The owner's decision of 2026-11-22.) Added while its server gave no number, known by its controller alone
+        // and by where its computer was taken; the computer there gives a number of its own now, and its card asks
+        // whether that is its server. Until that is answered nothing but looks goes to it: whatever road comes first,
+        // nothing is pressed, typed, changed or opened, its web page hears no password, and the words say to answer the
+        // card.
+        QFETCH(QString, road);
+        RedfishByHand bmc;
+        bmc.beServer(aSystem, aRoot);
+        bmc.bootTargets = QJsonArray{u"None"_s, u"Pxe"_s, u"BiosSetup"_s};
+        const QString kept = QString(qkvm::core::redfish::saidNone) + digestOf(aRoot);
+        RedfishDevice::Pace pace = brisk();
+        pace.overrides = std::make_shared<qkvm::core::SetupOverrides>();
+        RedfishDevice device(keptAs(bmc, kept, qkvm::core::ServerPlace{bmc.system(), false}), u"secret"_s, pace);
+        QVERIFY(lookedAt(device).asksItsServer);
+        std::string code;
+        std::string said;
+        if (road == u"console"_s) {
+            const auto way = wayOf(device);
+            QVERIFY(!way);
+            code = way.error().code;
+            said = way.error().message;
+        } else {
+            const qkvm::core::Action what = road == u"power"_s  ? qkvm::core::Action::plain(u"power_off"_s)
+                                            : road == u"keys"_s ? qkvm::core::Action::press(u"ControlLeft,KeyC"_s)
+                                            : road == u"text"_s ? qkvm::core::Action::type(u"ls"_s, true)
+                                                                : qkvm::core::Action::plain(road);
+            const base::Result<qkvm::core::Done> done = actedOn(device, what);
+            QVERIFY(!done);
+            code = done.error().code;
+            said = done.error().message;
+        }
+        QCOMPARE(code, std::string("another_machine"));
+        QVERIFY2(QString::fromStdString(said).contains(u"its card asks first whether it is the server"_s),
+                 said.c_str());
+        QVERIFY2(bmc.actions.isEmpty(), qPrintable(bmc.actions.join(u", "_s)));
+        QVERIFY(bmc.changes.isEmpty());
+        QCOMPARE(bmc.webLogins, 0);
+        QVERIFY(bmc.consolePasses.isEmpty());
     }
 
     void c11NoPasswordNothingAsked()

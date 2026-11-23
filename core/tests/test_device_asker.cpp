@@ -1,6 +1,8 @@
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <QByteArray>
@@ -12,11 +14,19 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QProcess>
+#include <QSemaphore>
 #include <QSignalSpy>
+#include <QStringList>
+#include <QTcpSocket>
 #include <QTest>
+#include <QThread>
 
 #include <qkvm/core/device_asker.h>
+#include <qkvm/core/network_end.h>
 
+#include "heard_of_threads.h"
+#include "signer_far_away.h"
 #include "stand_in.h"
 
 using namespace Qt::StringLiterals;
@@ -123,6 +133,138 @@ private slots:
         const DeviceAsker first(DeviceAsker::Where{}, quick(), "auth_token"_ba);
     }
 
+    void aManagerEndedOffThisThreadEndsItsQuestionsHereAndTheRestElsewhere()
+    {
+        // (network_end.h.) Its questions are this thread's, and go here and now, as its own end has them go; the rest
+        // of it ends on a thread kept for that.
+        StandIn silent([](const Asked&) { return silence(); });
+        auto* network = new QNetworkAccessManager; // NOLINT(cppcoreguidelines-owning-memory): ended below
+        QNetworkReply* question = network->get(QNetworkRequest(QUrl(silent.address() + u"/api/auth/check"_s)));
+        QTRY_COMPARE(silent.asked.size(), 1);
+        std::atomic<QThread*> questionOn{nullptr};
+        std::atomic<QThread*> managerOn{nullptr};
+        connect(question, &QObject::destroyed, [&questionOn] { questionOn = QThread::currentThread(); });
+        connect(network, &QObject::destroyed, [&managerOn] { managerOn = QThread::currentThread(); });
+        qkvm::core::endOffThisThread(network);
+        QCOMPARE(questionOn.load(), QThread::currentThread());
+        QTRY_VERIFY(managerOn.load() != nullptr);
+        QVERIFY(managerOn.load() != QThread::currentThread());
+    }
+
+    // (kept_with.h, as test_core_server_client has it of a call to a server.) The question, and whoever is to hear its
+    // answer, end on this thread wherever Qt lets go of what listens to its reply: played by another thread inside a
+    // signal of the reply, which holds its connections while the asker ends with the question out; Qt lets go of them
+    // there, as the signal ends.
+    void whatAQuestionKeepsEndsOnThisThreadWhereverQtLetsGoOfItsReply()
+    {
+        StandIn silent([](const Asked&) { return silence(); });
+        // (Times that do not end it meanwhile.)
+        auto asker = std::make_unique<DeviceAsker>(at(silent.address()), DeviceAsker::Times{60'000, 60'000, 60'000},
+                                                   "auth_token"_ba);
+        std::atomic<QThread*> hearerEndedOn{nullptr};
+        std::atomic<QThread*> questionEndedOn{nullptr};
+        QNetworkReply* reply = nullptr;
+        {
+            // (Whoever is to hear the answer holds the first, and the question the second; each says where it ended.)
+            const std::shared_ptr<void> hearer(nullptr,
+                                               [&hearerEndedOn](void*) { hearerEndedOn = QThread::currentThread(); });
+            const std::shared_ptr<void> ofTheQuestion(
+                nullptr, [&questionEndedOn](void*) { questionEndedOn = QThread::currentThread(); });
+            DeviceAsker::Ask question = asking("GET"_ba, u"/api/info"_s);
+            question.handed = [&reply, ofTheQuestion](QNetworkReply* handed) { reply = handed; };
+            asker->send(question, {}, [hearer](const base::Result<DeviceAsker::Reply>&) {});
+        }
+        QTRY_COMPARE(silent.asked.size(), 1);
+        QVERIFY(reply != nullptr);
+        const qkvm::core::testing::HeardOfThreads heard;
+        QSemaphore inside;
+        QSemaphore ended;
+        std::thread elsewhere([reply, &inside, &ended] {
+            const QObject here; // (of this thread)
+            QObject::connect(
+                reply, &QIODevice::channelBytesWritten, &here,
+                [&inside, &ended] {
+                    inside.release();
+                    ended.acquire();
+                },
+                Qt::DirectConnection);
+            emit reply->channelBytesWritten(0, 0);
+        });
+        if (!inside.tryAcquire(1, 10'000)) {
+            ended.release();
+            elsewhere.join();
+            QFAIL("The other thread never came inside the reply's signal.");
+        }
+        asker.reset();
+        ended.release();
+        elsewhere.join();
+        QVERIFY2(hearerEndedOn.load() == QThread::currentThread(),
+                 "Whoever was to hear the answer ended on another thread.");
+        QVERIFY2(questionEndedOn.load() == QThread::currentThread(), "The question ended on another thread.");
+        const QStringList said = qkvm::core::testing::HeardOfThreads::said();
+        QVERIFY2(said.isEmpty(), qPrintable(said.join(u" | "_s)));
+    }
+
+    void aFetchAtASignersPlaceIsThisProgramsOnlyWhereThisProgramMadeIt()
+    {
+        // (signer_far_away.h.) What a stall case waits for is a fetch of this program's, on the line it judges.
+        // Windows' LSASS fetches as well, on behalf of the test's server, and a second run of the same program at once
+        // may fetch at the same place: another program's is told at once that there is nothing there, and is not
+        // counted. Here Windows' own curl is the other program.
+        const qkvm::core::testing::SignerFarAway far(qkvm::core::testing::stallsOfTheAsker);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const QString curl = qEnvironmentVariable("SystemRoot") + u"/System32/curl.exe"_s;
+        QVERIFY2(QFile::exists(curl), qPrintable(curl));
+        QProcess other;
+        other.start(curl, {u"--silent"_s, u"--max-time"_s, u"20"_s, u"--output"_s, u"NUL"_s, u"--write-out"_s,
+                           u"%{http_code}"_s, u"http://127.0.0.1:%1/signer.crt"_s.arg(far.port())});
+        QTRY_VERIFY_WITH_TIMEOUT(other.state() == QProcess::NotRunning, 30'000);
+        QCOMPARE(other.readAllStandardOutput(), "404"_ba);
+        QCOMPARE(far.asked(), 0);
+        QTcpSocket mine;
+        mine.connectToHost(QHostAddress::LocalHost, far.port());
+        QTRY_COMPARE(far.asked(), 1);
+        QCOMPARE(far.waitedOn(), 1);
+        qInfo("%s", qPrintable(far.said()));
+    }
+
+    void anAskerThatEndsWhileWindowsFetchesASignerDoesNotHoldTheInterfaceThread()
+    {
+        // (The LOW of beta 2's review.) Every manager of Qt's for HTTP speaks on a thread of its own, and its end
+        // waits up to five seconds for that thread. An asker has one (a driver's, and one for each sign-in of a
+        // kvmd's or a JetKVM's), and ends with its driver or its sign-in. Where a line's certificate is being judged
+        // then, and Windows fetches its signer from an address that does not answer (an AIA fetch on a PC without
+        // internet), that thread is held: the interface thread was held with it, as the asker ended. It is not
+        // (network_end.h).
+        // (This program's own certificate and ports: signer_far_away.h.)
+        const auto& stalls = qkvm::core::testing::stallsOfTheAsker;
+        const qkvm::core::testing::SignerFarAway far(stalls);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const qkvm::core::testing::TlsDoorElsewhere door(tls(stalls.name));
+        QVERIFY(door.speaksWindowsOwnTls());
+        DeviceAsker::Where where;
+        where.address = QUrl(door.address());
+        auto asker = std::make_unique<DeviceAsker>(where, DeviceAsker::Times{30'000, 30'000, 30'000}, "auth_token"_ba);
+        DeviceAsker::Ask look;
+        look.path = u"/api/auth/check"_s;
+        look.largest = 4096;
+        QVERIFY(asker->sendOut(look, {}).ok());
+        // Its line's certificate judged: Windows fetches the signer from where the certificate says, for this program
+        // here, and waits on it as the asker ends.
+        QVERIFY2(QTest::qWaitFor([&far] { return far.asked() > 0; }, 60'000),
+                 qPrintable(u"Windows did not fetch the signer here for this program: "_s + far.said()));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        const qkvm::core::testing::Stillness still;
+        asker.reset();
+        QTest::qWait(6000);
+        QVERIFY2(still.longestMs() < 1000,
+                 qPrintable(
+                     u"The interface thread was held still for %1 ms (%2)."_s.arg(still.longestMs()).arg(far.said())));
+        // (And Windows still waited on that fetch all through: what was measured is an end while its thread was held.)
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        qInfo("%s", qPrintable(far.said()));
+    }
+
     void qtSaysWhenADeleteOrAPatchHasGoneOut()
     {
         // What the asker leans on, as for a GET and a POST (the kvmd's tests try those): whether a question
@@ -198,8 +340,9 @@ private slots:
     void aWayOfAskingThisProgramDoesNotUseIsRefusedBeforeAnythingGoes_data()
     {
         QTest::addColumn<QByteArray>("method");
-        QTest::newRow("PUT") << "PUT"_ba;
+        // (A PUT is one since wave 2: a Proxmox guest's settings are changed with it.)
         QTest::newRow("HEAD") << "HEAD"_ba;
+        QTest::newRow("put in small letters") << "put"_ba;
         QTest::newRow("OPTIONS") << "OPTIONS"_ba;
         QTest::newRow("in small letters") << "delete"_ba;
         QTest::newRow("none") << QByteArray();
@@ -352,6 +495,36 @@ private slots:
         QVERIFY(!reply.value().headers.contains("x-auth-token"));
     }
 
+    // The words of an answer's status line come with it, as they came and cut to their bound: where a Proxmox says why
+    // it refused (review c9b-2, H1), and nowhere else.
+    void theWordsOfTheStatusLineComeWithTheAnswer()
+    {
+        QByteArray words = "Permission check failed (/vms/100, VM.Config.CDROM)";
+        StandIn device([&words](const Asked&) {
+            Answered no(403, R"({"data":null})");
+            no.reason = words;
+            return no;
+        });
+        DeviceAsker asker(at(device.address()), quick(), inAHeader());
+        auto reply = answerTo(asker, asking("GET"_ba, u"/api2/json/nodes/pve1/qemu/100/config"_s));
+        QVERIFY(reply);
+        QCOMPARE(reply.value().status, 403);
+        QCOMPARE(reply.value().reason, words);
+        QCOMPARE(reply.value().body, R"({"data":null})"_ba);
+        // As long as Qt reads them (its own bound, the same as this one: a longer status line is no answer to it, and
+        // nothing of it is said).
+        words = QByteArray(DeviceAsker::mostReasonBytes, 'x');
+        reply = answerTo(asker, asking("GET"_ba, u"/api2/json/version"_s));
+        QVERIFY(reply);
+        QCOMPARE(reply.value().reason, words);
+        words = QByteArray(DeviceAsker::mostReasonBytes + 1, 'x');
+        QCOMPARE(codeOf(answerTo(asker, asking("GET"_ba, u"/api2/json/version"_s))), std::string("dropped"));
+        words = "";
+        reply = answerTo(asker, asking("GET"_ba, u"/api2/json/version"_s));
+        QVERIFY(reply);
+        QVERIFY(reply.value().reason.isEmpty());
+    }
+
     void aQuestionThatIsNeverAnsweredMayHaveBeenDone_data()
     {
         QTest::addColumn<QByteArray>("method");
@@ -361,6 +534,7 @@ private slots:
         // (Qt does not say when this one went: it is not given up on as one that was never let in.)
         QTest::newRow("PATCH with nothing to send") << "PATCH"_ba << QByteArray();
         QTest::newRow("POST") << "POST"_ba << R"({"ResetType":"On"})"_ba;
+        QTest::newRow("PUT") << "PUT"_ba << "ide2=none%2Cmedia%3Dcdrom"_ba;
     }
 
     void aQuestionThatIsNeverAnsweredMayHaveBeenDone()
@@ -389,7 +563,9 @@ private slots:
         // The device takes the question and hangs up without a word, on a new line or on one kept from a
         // question before (a controller closes one that sat unused). Qt asks a GET once more by itself, and
         // nothing else (tried): a DELETE, a POST and a PATCH (which goes as a way of Qt's own) go once. A
-        // power button is not pressed twice, nor a light switched.
+        // power button is not pressed twice, nor a light switched. A PUT is asked once more, as a GET is (HTTP
+        // holds it to be idempotent, and Qt takes it so: seen): only what a second one cannot do twice goes as a PUT
+        // (a Proxmox guest's settings, by the digest of what was read for the change: proxmox_media.cpp).
         // (The same over HTTPS: a power button of a server's controller goes over it.)
         for (const bool overTls : {false, true}) {
             for (const bool kept : {false, true}) {
@@ -401,6 +577,8 @@ private slots:
                     << "POST"_ba << R"({"ResetType":"On"})"_ba << kept << overTls << 1;
                 QTest::addRow("PATCH %s", line.constData())
                     << "PATCH"_ba << R"({"IndicatorLED":"Lit"})"_ba << kept << overTls << 1;
+                QTest::addRow("PUT %s", line.constData())
+                    << "PUT"_ba << "ide2=none%2Cmedia%3Dcdrom"_ba << kept << overTls << 2;
             }
         }
     }
@@ -443,6 +621,59 @@ private slots:
         QCOMPARE(device->count("/redfish/v1/Systems/Self"), times);
     }
 
+    void aQuestionThatGoesOnlyOnItsLineIsStoppedWhereANewOneIsMadeForIt_data()
+    {
+        QTest::addColumn<bool>("silently");
+        QTest::newRow("the line closed without a word") << true;
+        QTest::newRow("the line said to be closed") << false;
+    }
+
+    void aQuestionThatGoesOnlyOnItsLineIsStoppedWhereANewOneIsMadeForIt()
+    {
+        // (Outside review of 0.2.0, area 5, MEDIUM 5.4.) Over TLS a question that goes only on the line the one before
+        // it was answered on (Ask::onItsLine, a sign-in's password) is stopped as the two agree how to speak on a line
+        // Qt made anew for it, before a byte of it goes; on the line kept, it goes. An answer that says its line ends
+        // with it says so (Reply::lineEnds), one that keeps it does not.
+        QFETCH(bool, silently);
+        const auto answer = [](const Asked& asked) { return Answered{asked.method == "POST" ? 201 : 200, "{}"}; };
+        StandIn device(answer, tls("first"));
+        DeviceAsker::Where where = at(device.address());
+        where.knownByCertificate = true;
+        where.certificate = StandIn::certificateIn(tls("first").certificateFile).digest(QCryptographicHash::Sha256);
+        DeviceAsker::Times times{20000, 20000, 20000}; // (TLS handshakes on a busy PC)
+        DeviceAsker::Ask post = asking("POST"_ba, u"/redfish/v1/SessionService/Sessions"_s);
+        post.body = "{\"Password\": \"the-password\"}"; // (a plain literal: a raw one hides the class from AutoMoc)
+        post.bodyIs = "application/json"_ba;
+        post.doesSomething = true;
+        post.onItsLine = true;
+        {
+            // Kept: it goes on the line the root was read on.
+            device.keepsLines = true;
+            DeviceAsker asker(where, times, inAHeader());
+            const auto root = answerTo(asker, asking("GET"_ba, u"/redfish/v1/"_s), {}, 90000);
+            QVERIFY(root);
+            QVERIFY(!root.value().lineEnds);
+            QVERIFY(answerTo(asker, post, {}, 90000));
+            QCOMPARE(device.lines, 1);
+            QCOMPARE(device.count("/redfish/v1/SessionService"), 1);
+        }
+        device.keepsLines = false;
+        device.closesSilently = silently;
+        DeviceAsker asker(where, times, inAHeader());
+        const auto root = answerTo(asker, asking("GET"_ba, u"/redfish/v1/"_s), {}, 90000);
+        QVERIFY(root);
+        QCOMPARE(root.value().lineEnds, !silently);
+        const int before = device.lines;
+        const auto sent = answerTo(asker, post, {}, 90000);
+        QCOMPARE(codeOf(sent), std::string(DeviceAsker::lineMadeAnewCode));
+        QTest::qWait(300);
+        QVERIFY(device.lines <= before + 1); // (a new line made for it, and nothing came on it)
+        QCOMPARE(device.count("/redfish/v1/SessionService"), 1);
+        for (const Asked& one : std::as_const(device.asked)) {
+            QVERIFY(!one.body.contains("the-password") || one.line == 1);
+        }
+    }
+
     void aPatchOrADeleteIsNeverToldAsNotThereOnAGuess_data()
     {
         QTest::addColumn<QByteArray>("method");
@@ -453,6 +684,7 @@ private slots:
         // waited for, whatever its caller said of it, and is not told as not there while it may have gone.
         QTest::newRow("GET") << "GET"_ba << QByteArray() << "unreachable"_ba;
         QTest::newRow("PATCH") << "PATCH"_ba << R"({"IndicatorLED":"Lit"})"_ba << "ok"_ba;
+        QTest::newRow("PUT") << "PUT"_ba << "ide2=none%2Cmedia%3Dcdrom"_ba << "ok"_ba;
         QTest::newRow("DELETE") << "DELETE"_ba << QByteArray() << "ok"_ba;
     }
 
@@ -522,6 +754,7 @@ private slots:
         // question is waited for. It is told as one that may have been done, as a POST with nothing is.)
         QTest::newRow("DELETE") << "DELETE"_ba << QByteArray();
         QTest::newRow("PATCH") << "PATCH"_ba << R"({"IndicatorLED":"Lit"})"_ba;
+        QTest::newRow("PUT") << "PUT"_ba << "ide2=none%2Cmedia%3Dcdrom"_ba;
     }
 
     void aQuestionToNobodyIsUnreachable()
@@ -534,6 +767,52 @@ private slots:
         question.body = body;
         question.bodyIs = "application/json"_ba;
         QCOMPARE(codeOf(answerTo(asker, question, "the-pass"_ba)), std::string("unreachable"));
+    }
+
+    // Held to one address (onlyTo: one its name was found at), every question goes there, whatever Windows finds the
+    // name at, with the name and port of its address in its Host header; over HTTPS held to the certificate it is
+    // known by as ever. An address no address of the web is written with is refused, and nothing changes.
+    void aQuestionHeldToOneAddressGoesThereByItsName_data()
+    {
+        QTest::addColumn<bool>("https");
+        QTest::newRow("plain HTTP") << false;
+        QTest::newRow("HTTPS, known by its certificate") << true;
+    }
+    void aQuestionHeldToOneAddressGoesThereByItsName()
+    {
+        QFETCH(bool, https);
+        const QHostAddress there(u"127.0.0.3"_s);
+        const auto answer = [](const Asked&) { return Answered(200, "{}"); };
+        const std::unique_ptr<StandIn> device =
+            https ? std::make_unique<StandIn>(answer, tls("first")) : std::make_unique<StandIn>(answer);
+        QVERIFY(device->alsoAt(there));
+        const quint16 port = device->serverPort();
+        DeviceAsker::Where where =
+            at(QStringLiteral("%1://localhost:%2").arg(https ? u"https"_s : u"http"_s).arg(port));
+        if (https) {
+            where.knownByCertificate = true;
+            where.certificate = StandIn::certificateIn(tls("first").certificateFile).digest(QCryptographicHash::Sha256);
+        }
+        DeviceAsker asker(where, DeviceAsker::Times{5000, 5000, 1500}, "authToken"_ba);
+        QVERIFY(!asker.onlyTo(QHostAddress(u"fe80::1%1"_s)));
+        QVERIFY(!asker.onlyTo(QHostAddress()));
+        QVERIFY(asker.onlyTo(there));
+        for (int twice = 0; twice < 2; ++twice) {
+            const base::Result<DeviceAsker::Reply> reply =
+                answerTo(asker, asking("GET"_ba, u"/device"_s), "the-session"_ba);
+            QVERIFY2(reply, reply ? "" : reply.error().message.c_str());
+        }
+        QCOMPARE(device->asked.size(), qsizetype{2});
+        for (const Asked& one : std::as_const(device->asked)) {
+            QCOMPARE(one.at, there);
+            QCOMPARE(one.headers.value("host"), "localhost:" + QByteArray::number(port));
+            QCOMPARE(one.headers.value("cookie"), "authToken=the-session"_ba);
+        }
+        // Not held, it goes by its name, as Windows finds it.
+        DeviceAsker byName(where, DeviceAsker::Times{5000, 5000, 1500}, "authToken"_ba);
+        QVERIFY(answerTo(byName, asking("GET"_ba, u"/device"_s)));
+        QCOMPARE(device->asked.constLast().at, QHostAddress(QHostAddress::LocalHost));
+        QCOMPARE(device->asked.constLast().headers.value("host"), "localhost:" + QByteArray::number(port));
     }
 };
 

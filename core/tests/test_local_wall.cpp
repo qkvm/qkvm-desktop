@@ -37,6 +37,7 @@ using core::LocalWall;
 using core::OwnKvm;
 using core::testing::Answered;
 using core::testing::Asked;
+using core::testing::askedAgainUntil;
 using core::testing::good;
 using core::testing::JetKvmByHand;
 using core::testing::JetKvmViewerByHand;
@@ -44,7 +45,10 @@ using core::testing::MadeUpKvm;
 using core::testing::MemorySecrets;
 using core::testing::refusal;
 using core::testing::savedFor;
+using core::testing::saysItWakes;
 using core::testing::StandIn;
+using core::testing::Waited;
+using core::testing::Woke;
 
 namespace {
 
@@ -278,6 +282,56 @@ private:
             },
             20000));
         return status;
+    }
+    // Whether every one of these KVMs is online once each has been looked at: asked until each is (a wall of many
+    // settles in a few askings, where asking for each in turn took one asking for each).
+    static bool allOnline(LocalWall& wall, const QStringList& ids)
+    {
+        return QTest::qWaitFor(
+            [&] {
+                const QHash<QString, core::Status> all = statusOf(wall);
+                return std::ranges::all_of(ids,
+                                           [&all](const QString& id) { return all.value(id).state == u"online"_s; });
+            },
+            60000);
+    }
+    // ...and asked until an asking is answered before its patience, with every one online: it was answered as the last
+    // of the looks it began or waited for was over, which its patience cannot be, and so none is left. (One answered by
+    // its patience may leave looks under way, or waiting in the wall's line, which the next asking waits for instead of
+    // beginning its own; and no look begins without an asking.)
+    static bool allOnlineAndNoLookLeft(LocalWall& wall, const QStringList& ids, int patienceMs)
+    {
+        return QTest::qWaitFor(
+            [&] {
+                QElapsedTimer took;
+                took.start();
+                const QHash<QString, core::Status> all = statusOf(wall);
+                return took.elapsed() < patienceMs - 100 &&
+                       std::ranges::all_of(
+                           ids, [&all](const QString& id) { return all.value(id).state == u"online"_s; });
+            },
+            60000);
+    }
+    // ...or asked until every one is online, and then left alone until every look begun by then is over by its own
+    // times: no look begins without an asking, and a look of a kvmd ends by its questions' own limits however late the
+    // thread is (it asks twice, the streamer and then its details at once; each question its time to be let in, its
+    // quiet and its transfer). For a wall of many at the program's patience: on the loaded build box 64 looks, their
+    // 64 stand-ins answering on this thread, took longer than the patience as often as not (Debug, 1.5 to 3.1 s an
+    // asking; 7 walls of 8 in one process never came to one asking answered before it in 60 s, asked again at once or
+    // after a rest of 2 s), and the setup of the case of 64 failed so.
+    static bool allOnlineAndEveryLookOver(LocalWall& wall, const QStringList& ids, const core::KvmdDevice::Pace& pace)
+    {
+        if (!allOnline(wall, ids)) {
+            return false;
+        }
+        const int lookWithinMs = 2 * (pace.connectWithinMs + pace.quietMs + pace.transferMs);
+        QElapsedTimer sinceALookBegan;
+        sinceALookBegan.start();
+        const auto begun =
+            connect(&wall, &LocalWall::looking, &wall, [&sinceALookBegan](const QString&) { sinceALookBegan.start(); });
+        const bool over = QTest::qWaitFor([&] { return sinceALookBegan.elapsed() > lookWithinMs + 1000; }, 60'000);
+        disconnect(begun);
+        return over;
     }
     static base::Result<core::Done> doneBy(LocalWall& wall, const QString& id, const core::Action& what)
     {
@@ -628,6 +682,76 @@ private slots:
         QVERIFY2(!paces.redfish.overrides->standing(QUrl(one.address), QString()).has_value(),
                  "a server taken off the wall left its BIOS setup record standing");
         QVERIFY(paces.redfish.overrides->standing(QUrl(other.address), QString()).has_value());
+    }
+
+    // And what stood for a server on no card of the wall (taken off by a version before, or by a file that replaced the
+    // list), its doubt over, goes as the wall's list changes; one whose doubt lasts stays, as does a server's on a
+    // card.
+    void aRecordOfAServerOnNoCardGoesAsTheListChanges()
+    {
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        core::DriverPaces paces = quickDrivers();
+        paces.redfish.overrides = std::make_shared<core::SetupOverrides>();
+        LocalWall wall(settings, secrets, paces);
+        OwnKvm one;
+        one.kind = u"redfish"_s;
+        one.address = u"https://127.0.0.1:1"_s;
+        one.name = u"One"_s;
+        QVERIFY(wall.add(one, u"secret"_s).ok());
+        const QDateTime over = QDateTime::currentDateTimeUtc().addSecs(-60);
+        const QUrl gone(u"https://127.0.0.1:3"_s);
+        const QUrl lasting(u"https://127.0.0.1:4"_s);
+        static_cast<void>(paces.redfish.overrides->mayBeSet(QUrl(one.address), QString(), over));
+        static_cast<void>(paces.redfish.overrides->mayBeSet(gone, QString(), over));
+        static_cast<void>(paces.redfish.overrides->mayBeSet(lasting, QString(), over.addSecs(600)));
+        OwnKvm other = one;
+        other.address = u"https://127.0.0.1:2"_s;
+        other.name = u"Other"_s;
+        QVERIFY(wall.add(other, u"secret"_s).ok());
+        QVERIFY2(!paces.redfish.overrides->standing(gone, QString()).has_value(),
+                 "a record of a server on no card, its doubt over, stayed as the list changed");
+        QVERIFY(paces.redfish.overrides->standing(lasting, QString()).has_value());
+        QVERIFY(paces.redfish.overrides->standing(QUrl(one.address), QString()).has_value());
+    }
+
+    // But not while the wall's list is one that could not be read: settings that were there and unreadable at the start
+    // (held by another program for longer than it is tried, damaged) begin as a wall of no cards, and a card added then
+    // is no proof that a server is on no card any more. Every record stays, those marked queued above all, and comes
+    // back with its card once the file is read again (outside review of the prune, M2).
+    void noRecordGoesAsTheListChangesWhileItsListCouldNotBeRead()
+    {
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        {
+            QFile damaged(file);
+            QVERIFY(damaged.open(QIODevice::WriteOnly));
+            damaged.write("{\"kvms\": [{\"id\": ");
+        }
+        core::Settings settings(file);
+        QVERIFY(settings.wasUnreadable());
+        QVERIFY(settings.putAsideWhatCouldNotBeRead().ok());
+        MemorySecrets secrets;
+        core::DriverPaces paces = quickDrivers();
+        paces.redfish.overrides = std::make_shared<core::SetupOverrides>();
+        const QDateTime over = QDateTime::currentDateTimeUtc().addSecs(-60);
+        const QUrl queued(u"https://127.0.0.1:3"_s);
+        const QUrl doubted(u"https://127.0.0.1:4"_s);
+        static_cast<void>(paces.redfish.overrides->mayBeSet(queued, QString(), over));
+        static_cast<void>(paces.redfish.overrides->markQueued(queued, QString()));
+        static_cast<void>(paces.redfish.overrides->mayBeSet(doubted, QString(), over));
+        LocalWall wall(settings, secrets, paces);
+        OwnKvm one;
+        one.kind = u"redfish"_s;
+        one.address = u"https://127.0.0.1:1"_s;
+        one.name = u"One"_s;
+        QVERIFY(wall.add(one, u"secret"_s).ok());
+        QVERIFY2(paces.redfish.overrides->standing(queued, QString()).value_or(core::SetupOverrides::Left{}).queued,
+                 "a queued record went as a list that could not be read changed");
+        QVERIFY2(paces.redfish.overrides->standing(doubted, QString()).has_value(),
+                 "a record went as a list that could not be read changed");
+        QCOMPARE(paces.redfish.overrides->all().size(), 2);
     }
 
     void eachKvmFailsByItself()
@@ -1423,6 +1547,152 @@ private slots:
         QCOMPARE(wall.secretWrites(id), before + 2);
     }
 
+    void aReadTheStoreRefusesIsNeverTakenForNoPasswordByAChange()
+    {
+        // The outside review of the wave 2 desktop, 6.1: a card moved, a password typed for it, Windows did not hand
+        // over the one kept this once, and the list could not be written (a full disk). What was read was taken for
+        // none, the new password was kept, and the rollback forgot it, since what was kept before "was nothing": the
+        // card's password was gone. A read that is refused is no answer: nothing is changed, the store is as it was.
+        // (Nobody is at these addresses, and nothing looks at this wall.)
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        core::Settings settings(file);
+        MemorySecrets secrets;
+        LocalWall wall(settings, secrets, quick());
+        const core::testing::NobodyThere here;
+        const core::testing::NobodyThere there;
+        OwnKvm plain;
+        plain.address = here.address();
+        const QString id = wall.add(plain, u"secret"_s).value();
+        const QString name = LocalWall::secretOf(id);
+        const QByteArray keptBefore = secrets.all.value(name);
+        const OwnKvm before = wall.kvms().constFirst();
+        OwnKvm moved = before;
+        moved.address = there.address();
+        const auto nothingChanged = [&] {
+            return wall.kvms().constFirst() == before && secrets.all.value(name) == keptBefore &&
+                   core::Settings(file).remembered().kvms.value(0) == before;
+        };
+        {
+            QFile held(file);
+            QVERIFY(held.open(QIODevice::ReadOnly));
+            secrets.refusesReads = true;
+            const base::Result<void> refused = wall.change(id, moved, u"another one"_s);
+            secrets.refusesReads = false;
+            QCOMPARE(refused.ok() ? std::string() : refused.error().code, std::string("not_saved"));
+            QVERIFY(nothingChanged());
+        }
+        // So too where the list could be written: nothing is guessed of what the store holds.
+        secrets.refusesReads = true;
+        QVERIFY(!wall.change(id, moved, u"another one"_s).ok());
+        // (Nor a user name, for which the driver is made anew with the password that is kept.)
+        OwnKvm asRoot = before;
+        asRoot.user = u"root"_s;
+        QVERIFY(!wall.change(id, asRoot, std::nullopt).ok());
+        secrets.refusesReads = false;
+        QVERIFY(nothingChanged());
+        // A new name reads nothing, and is taken.
+        OwnKvm renamed = before;
+        renamed.name = u"Renamed"_s;
+        secrets.refusesReads = true;
+        QVERIFY(wall.change(id, renamed, std::nullopt).ok());
+        secrets.refusesReads = false;
+        QCOMPARE(secrets.all.value(name), keptBefore);
+        // And read back, the move is made.
+        moved.name = renamed.name;
+        QVERIFY(wall.change(id, moved, u"another one"_s).ok());
+        QCOMPARE(secrets.all.value(name), savedFor("another one", there.address()));
+    }
+
+    void aChangeCutOffAnywhereLeavesTheCardItsPassword_data()
+    {
+        QTest::addColumn<QString>("how");
+        // Another address and a password typed for it; the kept one taken along to another address of the same
+        // certificate; the same, and the list cannot be written, and what was kept before not put back.
+        QTest::newRow("typed") << u"typed"_s;
+        QTest::newRow("taken along") << u"taken along"_s;
+        QTest::newRow("not written, not put back") << u"not put back"_s;
+    }
+
+    void aChangeCutOffAnywhereLeavesTheCardItsPassword()
+    {
+        // 6.1 again: a cut between the two writings (the program ended, or killed) left the store's record saved for
+        // the new address while the file kept the card at the old one, and the card had no password. At every point
+        // the store is written (just before, and just after), what stands on disk then is opened as the next start
+        // would open it: the card has its password, whichever address the file gives it. (Nobody is at these
+        // addresses, and nothing looks at these walls.)
+        QFETCH(QString, how);
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        core::Settings settings(file);
+        MemorySecrets secrets;
+        LocalWall wall(settings, secrets, quick());
+        const core::testing::NobodyThere here;
+        const core::testing::NobodyThere there;
+        const bool typed = how == u"typed"_s;
+        const QByteArray certificate(32, 'c');
+        const QString from = typed ? here.address() : u"https://127.0.0.1:%1"_s.arg(here.port());
+        const QString to = typed ? there.address() : u"https://127.0.0.1:%1"_s.arg(there.port());
+        OwnKvm kvm;
+        kvm.address = from;
+        if (!typed) {
+            kvm = knownAt(from, certificate);
+        }
+        const QString id = wall.add(kvm, u"secret"_s).value();
+        const QString name = LocalWall::secretOf(id);
+        const QString given = typed ? u"another one"_s : u"secret"_s;
+        // What the next start would find, at each point.
+        struct Found {
+            QString address;
+            QString password;
+            QByteArray record; // what the store holds for it once that start began
+        };
+        QList<Found> found;
+        const auto openedAsTheNextStart = [&] {
+            const QTemporaryDir next;
+            QFile::copy(file, next.filePath(u"settings.json"_s));
+            core::Settings again(next.filePath(u"settings.json"_s));
+            MemorySecrets store;
+            store.all = secrets.all;
+            LocalWall opened(again, store, quick());
+            const LocalWall::AsAFile asFile = opened.asAFile(true);
+            const core::exchange::Device device =
+                asFile.content.devices.value_or(QList<core::exchange::Device>()).value(0);
+            found.append(Found{device.address, device.password, store.all.value(name)});
+        };
+        secrets.aroundKeep = openedAsTheNextStart;
+        OwnKvm moved = wall.kvms().constFirst();
+        moved.address = to;
+        if (how == u"not put back"_s) {
+            QFile held(file);
+            QVERIFY(held.open(QIODevice::ReadOnly));
+            // (The first keeping takes the new one; the second, which would put back the one before, is refused.)
+            secrets.refusesTheKeep = secrets.keeps + 2;
+            QVERIFY(!wall.change(id, moved, std::nullopt).ok());
+        } else {
+            QVERIFY(wall.change(id, moved, typed ? std::optional(given) : std::nullopt).ok());
+        }
+        secrets.aroundKeep = nullptr;
+        openedAsTheNextStart();
+        QVERIFY(found.size() >= 3);
+        for (const Found& one : std::as_const(found)) {
+            const QString expected = one.address == from ? u"secret"_s : given;
+            QVERIFY2(one.address == from || one.address == to, qPrintable(one.address));
+            QVERIFY2(
+                one.password == expected,
+                qPrintable(u"at %1: \"%2\" (%3 points looked at)"_s.arg(one.address, one.password).arg(found.size())));
+            // And that start left one record, the card's as the list has it: a record of two the cut left is made one
+            // before anything reads it (review cx6-1, M2).
+            QCOMPARE(one.record, savedFor(expected.toUtf8(), one.address, typed ? QByteArray() : certificate));
+        }
+        // And at its end the store holds one record for the card as it is.
+        const OwnKvm now = wall.kvms().constFirst();
+        QCOMPARE(now.address, how == u"not put back"_s ? from : to);
+        if (how != u"not put back"_s) {
+            QCOMPARE(secrets.all.value(name), savedFor(given.toUtf8(), to, typed ? QByteArray() : certificate));
+        }
+    }
+
     void whereNoPasswordIsKeptNoneGoesAlongToAnotherAddress()
     {
         // The kept password goes with a KVM to its other address. Where none is kept for the KVM
@@ -1498,6 +1768,19 @@ private slots:
         QTest::newRow("saved for its certificate in capitals") << true << "capitals"_ba;
         QTest::newRow("with its lines ended another way") << false << "other line ends"_ba;
         QTest::newRow("cut off before the password") << false << "cut off"_ba;
+        // A secret of two records, as a change keeps it on its way (6.1): of neither for it; of one for it, but said
+        // to be longer than it is, or with nothing after it, or its length written otherwise; or of two inside two.
+        QTest::newRow("two, neither saved for it") << false << "two of others"_ba;
+        QTest::newRow("two, the first said to be longer than all") << false << "two too long"_ba;
+        QTest::newRow("two, nothing after the first") << false << "two with one"_ba;
+        // (Its own first, said a byte short or a byte long: its password cut, or the other's lines added to it. Review
+        // cx6-1, L4.)
+        QTest::newRow("two, its own first said a byte short") << false << "two, its own short"_ba;
+        QTest::newRow("two, its own first said a byte long") << false << "two, its own long"_ba;
+        QTest::newRow("two, its length with a nought before it") << false << "two by a nought"_ba;
+        QTest::newRow("two, its length in other signs") << false << "two by a sign"_ba;
+        QTest::newRow("two, inside two") << false << "two in two"_ba;
+        QTest::newRow("two, said by the form before") << false << "two before"_ba;
         QTest::newRow("with no password in it") << false << "no password"_ba;
         QTest::newRow("empty") << false << "empty"_ba;
         QTest::newRow("none at all") << false << "none"_ba;
@@ -1524,6 +1807,24 @@ private slots:
 
         // What the store holds for it when the program starts the next time.
         const QByteArray written = address.toUtf8();
+        // (Two records together, the first one's length said as `length` where one is given.)
+        const auto two = [](const QByteArray& first, const QByteArray& second, const QByteArray& length = {}) {
+            return "QKVM-KVM-2+\n" + (length.isEmpty() ? QByteArray::number(first.size()) : length) + '\n' + first +
+                   second;
+        };
+        const QByteArray itsOwn = savedFor("secret", address, certificate);
+        const QByteArray another = savedFor("secret", u"http://127.0.0.1:9"_s);
+        const QHash<QByteArray, QByteArray> moreHeld{
+            {"two of others"_ba, two(another, savedFor("secret", u"http://127.0.0.1:10"_s))},
+            {"two too long"_ba, two(another, itsOwn, QByteArray::number(another.size() + itsOwn.size()))},
+            {"two with one"_ba, two(itsOwn, QByteArray())},
+            {"two, its own short"_ba, two(itsOwn, another, QByteArray::number(itsOwn.size() - 1))},
+            {"two, its own long"_ba, two(itsOwn, another, QByteArray::number(itsOwn.size() + 1))},
+            {"two by a nought"_ba, two(another, itsOwn, "0" + QByteArray::number(another.size()))},
+            {"two by a sign"_ba, two(another, itsOwn, "+" + QByteArray::number(another.size()))},
+            {"two in two"_ba, two(two(another, itsOwn), another)},
+            {"two before"_ba, "QKVM-KVM-1+\n" + QByteArray::number(another.size()) + '\n' + another + itsOwn},
+        };
         const QHash<QByteArray, QByteArray> held{
             {"another address"_ba, savedFor("secret", u"http://127.0.0.1:9"_s)},
             {"the other way"_ba, savedFor("secret", u"https://127.0.0.1:%1"_s.arg(kvm.stand->serverPort()))},
@@ -1547,8 +1848,8 @@ private slots:
         if (what == "none") {
             secrets.all.remove(name);
         } else {
-            QVERIFY(held.contains(what));
-            secrets.all.insert(name, held.value(what));
+            QVERIFY(held.contains(what) || moreHeld.contains(what));
+            secrets.all.insert(name, held.contains(what) ? held.value(what) : moreHeld.value(what));
         }
         const QByteArray left = secrets.all.value(name);
 
@@ -1912,8 +2213,9 @@ private slots:
     void whereThePasswordBeforeCannotBePutBackTheOneThatStaysGoesNowhereElse()
     {
         // The list cannot be written, and putting the password before back fails too. The store
-        // then holds a password that was given for another address than the list names: at the
-        // next start it is not sent to the address the list still has. (This had "the next start"
+        // then holds the password before and the one given for another address together (6.1):
+        // at the next start the KVM at the address the list still has has its own password back,
+        // and the one given for elsewhere is sent nowhere. (This had "the next start"
         // made with the settings that were in memory, whose file was gone by then. Now it is what
         // the program does: other settings, read from the file, and another wall.)
         const QTemporaryDir folder;
@@ -1945,27 +2247,28 @@ private slots:
             QCOMPARE(wall.kvms(), before);
         }
         const QString name = LocalWall::secretOf(id);
-        const QByteArray stays = savedFor("given for elsewhere", elsewhere.stand->address());
-        QCOMPARE(secrets.all.value(name), stays);
+        const QByteArray before = savedFor("secret", kvm.stand->address());
+        const QByteArray given = savedFor("given for elsewhere", elsewhere.stand->address());
+        const QByteArray both = "QKVM-KVM-2+\n" + QByteArray::number(before.size()) + '\n' + before + given;
+        QCOMPARE(secrets.all.value(name), both);
+        // At the next start, with the list as the file still has it: that KVM has its own password,
+        // and is signed in to with it. The one the password was given for hears nothing.
+        NextStart next = atTheNextStart(file, secrets, id);
+        QVERIFY(next.read);
+        QCOMPARE(next.address, kvm.stand->address());
+        QCOMPARE(next.status.state, u"online"_s);
+        QCOMPARE(kvm.signIns, 2);
+        QVERIFY(elsewhere.stand->asked.isEmpty());
+        QCOMPARE(elsewhere.stand->lines, 0);
+        // ...and that start made the two one: the record for the KVM as the list has it, alone (review cx6-1, M2).
+        QCOMPARE(secrets.all.value(name), before);
         // What the KVM at the address the list has was asked up to here, and on how many lines.
         // (Counted once the made-up KVM has seen all of it: a line the wall before had made in
         // its last moment is noted there when the loop next turns.)
         QTest::qWait(300);
         const qsizetype asked = kvm.stand->asked.size();
         const int lines = kvm.stand->lines;
-        // At the next start, with the list as the file still has it: that KVM has no password, and
-        // hears nothing of one: only what a KVM over plain HTTP is asked at every start, what it
-        // is, on three lines. Nor does the one the password was given for hear anything.
-        NextStart next = atTheNextStart(file, secrets, id);
-        QVERIFY(next.read);
-        QCOMPARE(next.address, kvm.stand->address());
-        QCOMPARE(next.status.errorCode, u"no_password"_s);
-        QVERIFY(heardOnlyTheQuestionsSince(*kvm.stand, asked));
-        QCOMPARE(kvm.stand->lines, lines + 3);
-        QCOMPARE(kvm.signIns, 1);
-        QVERIFY(elsewhere.stand->asked.isEmpty());
-        QCOMPARE(elsewhere.stand->lines, 0);
-        QCOMPARE(secrets.all.value(name), stays);
+        const QByteArray& stays = given;
 
         // The same where the KVM had no password kept, and the new one cannot be taken out of the
         // store again.
@@ -1985,15 +2288,93 @@ private slots:
         QCOMPARE(next.address, kvm.stand->address());
         QCOMPARE(next.status.errorCode, u"no_password"_s);
         // (Asked what it is once more at this start, and nothing else.)
-        QVERIFY(heardOnlyTheQuestionsSince(*kvm.stand, asked + 3));
-        QCOMPARE(kvm.stand->lines, lines + 6);
-        QCOMPARE(kvm.signIns, 1);
+        QVERIFY(heardOnlyTheQuestionsSince(*kvm.stand, asked));
+        QCOMPARE(kvm.stand->lines, lines + 3);
+        QCOMPARE(kvm.signIns, 2);
         QVERIFY(elsewhere.stand->asked.isEmpty());
         QCOMPARE(elsewhere.stand->lines, 0);
         QCOMPARE(secrets.all.value(name), stays);
     }
 
-    void whereTheProgramEndsBetweenTheKeepingOfAPasswordAndTheWritingOfTheListThePasswordIsLost_data()
+    void aRecordOfTwoACutLeftIsMadeOneAtTheNextStart_data()
+    {
+        QTest::addColumn<QString>("named");  // which of the two the list names: "first", "second" or "neither"
+        QTest::addColumn<bool>("encrypted"); // a KVM over HTTPS, asked what it is at a start; else one that is not
+        QTest::addColumn<bool>("refused");   // Windows does not take that start's keeping
+        QTest::newRow("the list names the one it went to") << u"second"_s << false << false;
+        QTest::newRow("the list names the one it came from") << u"first"_s << false << false;
+        QTest::newRow("over HTTPS, asked at the start") << u"second"_s << true << false;
+        QTest::newRow("the list names neither") << u"neither"_s << false << false;
+        QTest::newRow("Windows does not take it") << u"second"_s << false << true;
+    }
+
+    void aRecordOfTwoACutLeftIsMadeOneAtTheNextStart()
+    {
+        // Review cx6-1, M2: a record of two (6.1) that a cut left, the program ended between the settings' writing and
+        // the last keeping, or Windows not taking that keeping, stayed in the store until that card's next change, and
+        // a version before 0.2.0 read it as none. A start makes it one before anything reads it: the record for the KVM
+        // as the list has it, alone; whichever of the two that is, and whether or not the KVM is asked what it is at
+        // that start. Where the list names neither, it stays as it is, used for nothing; where Windows does not take
+        // the one, the two stay, which hold the password, and the next start makes it one. (Nobody is at these
+        // addresses, and nothing looks at these walls.)
+        QFETCH(QString, named);
+        QFETCH(bool, encrypted);
+        QFETCH(bool, refused);
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        MemorySecrets secrets;
+        const core::testing::NobodyThere one;
+        const core::testing::NobodyThere two;
+        const core::testing::NobodyThere three;
+        const QByteArray certificate = encrypted ? QByteArray(32, 'c') : QByteArray();
+        const auto addressOf = [encrypted](const core::testing::NobodyThere& nobody) {
+            return encrypted ? u"https://127.0.0.1:%1"_s.arg(nobody.port()) : nobody.address();
+        };
+        const QString first = addressOf(one);
+        const QString second = addressOf(two);
+        QString id;
+        {
+            core::Settings settings(file);
+            LocalWall wall(settings, secrets, quick());
+            OwnKvm kvm;
+            kvm.address = named == u"first"_s ? first : named == u"second"_s ? second : addressOf(three);
+            kvm.knownByCertificate = encrypted;
+            kvm.certificate = certificate;
+            id = wall.add(kvm, u"typed when it was added"_s).value();
+        }
+        const QString name = LocalWall::secretOf(id);
+        const QByteArray before = savedFor("secret", first, certificate);
+        const QByteArray after = savedFor("another one", second, certificate);
+        const QByteArray both = "QKVM-KVM-2+\n" + QByteArray::number(before.size()) + '\n' + before + after;
+        secrets.all.insert(name, both);
+        // (Whether the KVM was asked what it is at that start, and its password as the file of the wall takes it.)
+        struct Started {
+            bool asked = false;
+            QString password;
+        };
+        const auto started = [&] {
+            core::Settings settings(file);
+            LocalWall wall(settings, secrets, quick());
+            const LocalWall::AsAFile asFile = wall.asAFile(true);
+            return Started{wall.wasAskedWhatItIs(id),
+                           asFile.content.devices.value_or(QList<core::exchange::Device>()).value(0).password};
+        };
+        const QString itsOwn = named == u"first"_s ? u"secret"_s : named == u"second"_s ? u"another one"_s : QString();
+        const QByteArray madeOne = named == u"neither"_s ? both : named == u"first"_s ? before : after;
+        secrets.refuses = refused;
+        const Started once = started();
+        QCOMPARE(once.asked, encrypted);
+        QCOMPARE(once.password, itsOwn);
+        QCOMPARE(secrets.all.value(name), refused ? both : madeOne);
+        // The next start keeps nothing more where it was made one, and makes it one where Windows did not take it.
+        secrets.refuses = false;
+        const int keeps = secrets.keeps;
+        QCOMPARE(started().password, itsOwn);
+        QCOMPARE(secrets.keeps, keeps + (refused ? 1 : 0));
+        QCOMPARE(secrets.all.value(name), madeOne);
+    }
+
+    void aRecordInTheStoreForAnotherPlaceThanTheListNamesIsUsedForNothing_data()
     {
         QTest::addColumn<bool>("encrypted");
         QTest::addColumn<QByteArray>("what"); // what the password in the store was saved for
@@ -2002,13 +2383,14 @@ private slots:
         QTest::newRow("on its way under another certificate") << true << "another certificate"_ba;
     }
 
-    void whereTheProgramEndsBetweenTheKeepingOfAPasswordAndTheWritingOfTheListThePasswordIsLost()
+    void aRecordInTheStoreForAnotherPlaceThanTheListNamesIsUsedForNothing()
     {
-        // A change keeps the password first and writes the list after it. A program that ends
-        // between the two (the PC loses its power) leaves the new secret in the store and the old
-        // list in the file. At the next start the password is lost: it was given for something
-        // else than the list names, and what the list names never hears it. (The store is put
-        // into that state by hand: nothing in a wall ends the program half way through.)
+        // The store holds a record saved for another address or certificate than the list names: as a change of an
+        // earlier build left it where the program ended between the keeping of the new password and the writing of
+        // the list (the PC lost its power). It was given for something else than the list names, and what the list
+        // names never hears it. (A change of this build keeps both records until the list is written, and the card has
+        // its password wherever it is cut off: aChangeCutOffAnywhereLeavesTheCardItsPassword, 6.1. The store is put
+        // into this state by hand.)
         QFETCH(bool, encrypted);
         QFETCH(QByteArray, what);
         const QTemporaryDir folder;
@@ -2304,9 +2686,19 @@ private slots:
         QCOMPARE(status.state, u"online"_s);
         QVERIFY(!status.signal.has_value());
         QCOMPARE(status.width, 0);
-        // Its card asks for a picture: the video is woken, and the picture comes.
+        // Its card asks for a picture: the video is woken, and the picture comes. (Asked again as the card asks where
+        // the line's first try was not let in: askedAgainUntil. The driver is the wall's: no more is asked of it than a
+        // card asks, and whether it keeps its line is not seen from here, so the wait is not heldAwake's; the driver's
+        // own first waking is test_core_kvmd_device's.)
         QCOMPARE(pictureOf().error().code, std::string("no_stream"));
-        QTRY_VERIFY(kvm.stand->live.isConnected());
+        const Waited woken =
+            askedAgainUntil([&kvm] { return kvm.stand->live.isConnected(); }, [] { return false; },
+                            [&wall, &id](const std::function<void(Woke)>& answered) {
+                                wall.askSnapshot(id, 400, 1, [answered](const base::Result<core::Snapshot>& answer) {
+                                    answered(saysItWakes(answer) ? Woke::maybe : Woke::nothing);
+                                });
+                            });
+        QVERIFY2(woken, qPrintable(woken.why()));
         QTest::qWait(pace.holdMs / 2 + 50);
         QVERIFY(pictureOf().ok());
         // That the computer sends one is known from there on, to whoever asks.
@@ -2405,6 +2797,15 @@ private slots:
         QCOMPARE(LocalWall::hostOf(kvm), u"kvm.example.net:8080"_s);
     }
 
+    void everyAskingAtTheWallsOwnPaceBeginsALook_data()
+    {
+        QTest::addColumn<int>("slowAsking");
+        // Every look over within its asking's patience; and the second asking's look longer than that (its KVM's state
+        // answered after 500 ms, the patience here 375): as one was, once, 6 minutes into a whole run on a quiet PC.
+        QTest::newRow("every look in time") << -1;
+        QTest::newRow("one look longer than its patience") << 1;
+    }
+
     void everyAskingAtTheWallsOwnPaceBeginsALook()
     {
         // A wall asks how its machines are every four seconds (WallFeed, where nobody names
@@ -2412,6 +2813,15 @@ private slots:
         // fresh for those same four seconds, every second asking found it fresh and began no
         // look, and a KVM was looked at every eight. The driver's own times, as they are where
         // nobody chose others, and the wall's pace: each a quarter here.
+        //
+        // What is known counts from the look's answer, and the rule leaves room for a look that takes as long as an
+        // asking waits for one (freshMs + lookPatienceMs = the wall's pace): an asking that follows one whose look was
+        // over within its patience begins a look. One whose look took longer may find it fresh, and begins none; so
+        // each KVM says another width for each look, by which every answer shows whether its look was over by then,
+        // and only the askings after such a one are counted on. (Counted on for all four, a look that took longer than
+        // the 375 ms of this quarter scale, once on a quiet PC, made the test say 4 looks against 5: the review of
+        // 2026-11-16's whole run, test_core_local_wall case 171.)
+        QFETCH(int, slowAsking);
         const int wallsPaceMs = 4000;
         const core::KvmdDevice::Pace usual;
         core::KvmdDevice::Pace pace = quick();
@@ -2421,23 +2831,354 @@ private slots:
         core::Settings settings(folder.filePath(u"settings.json"_s));
         MemorySecrets secrets;
         LocalWall wall(settings, secrets, pace);
-        const MadeUpKvm kvm;
+        MadeUpKvm kvm;
         const QString id = wall.add(at(kvm, u"Build server"_s), u"secret"_s).value();
         // Known first, and old by the first asking: its first look signs in, which took longer than an asking waits for
-        // a look on the loaded slow cores (the fix round's item); what is counted is the looks the askings begin.
+        // a look on the loaded slow cores (the fix round's item); what is counted is the looks the askings begin. And
+        // no look left under way from that, which the first asking would wait for instead of beginning its own.
         QCOMPARE(settled(wall, id).state, u"online"_s);
+        QVERIFY(allOnlineAndNoLookLeft(wall, {id}, pace.lookPatienceMs));
         QTest::qWait(pace.freshMs + 50);
         const int before = kvm.asked("/api/streamer");
         QElapsedTimer watch;
         watch.start();
         const int askings = 4;
+        int countedOn = 1; // the first: old by then
         for (int asking = 0; asking < askings; ++asking) {
             QTest::qWait(static_cast<int>(std::max<qint64>(0, qint64{asking} * wallsPaceMs / 4 - watch.elapsed())));
-            QCOMPARE(statusOf(wall).value(id).state, u"online"_s);
+            kvm.width = 1000 + asking;
+            kvm.stateAfterMs = asking == slowAsking ? 500 : 0;
+            const core::Status told = statusOf(wall).value(id);
+            QCOMPARE(told.state, u"online"_s);
+            // Its look over by the answer: the next asking at the wall's pace finds the KVM old, and looks.
+            countedOn += asking + 1 < askings && told.width == 1000 + asking ? 1 : 0;
         }
-        QTRY_COMPARE(kvm.asked("/api/streamer"), before + askings);
+        kvm.stateAfterMs = 0;
+        QTRY_VERIFY2(
+            kvm.asked("/api/streamer") >= before + countedOn,
+            qPrintable(
+                u"%1 looks for %2 askings counted on"_s.arg(kvm.asked("/api/streamer") - before).arg(countedOn)));
+        QTest::qWait(pace.lookPatienceMs);
+        QVERIFY2(kvm.asked("/api/streamer") <= before + askings,
+                 qPrintable(u"%1 looks for %2 askings"_s.arg(kvm.asked("/api/streamer") - before).arg(askings)));
+        // (The slow look's asking was answered by its patience, before the KVM said its state: not counted on after
+        // it.)
+        if (slowAsking >= 0) {
+            QVERIFY(countedOn < askings);
+        }
+        qInfo() << countedOn << "of" << askings << "askings counted on to begin a look";
         // (With room for a look that takes as long as an asking waits for one.)
         QVERIFY(usual.freshMs + usual.lookPatienceMs <= wallsPaceMs);
+    }
+
+    void aWallOfSixtyFourBeginsItsLooksAFewInATurnOfTheLoopAndWaitsForAllOfThem()
+    {
+        // PERF-1 (SPEC.md section 9, the interface thread's answer): an asking begins a look at every KVM whose state
+        // is no longer fresh. On a wall of 64 JetKVMs all 64 began in one turn of the loop, 0.7 ms each, and the
+        // window answered 49 to 62 ms late every four seconds. They begin a few in a turn (Own::looksInATurn, four),
+        // the next few a frame later (Own::looksEveryMs, 16 ms), in the wall's order, so that their answers come as
+        // spread; and the asking waits for every one of them, as it did.
+        constexpr int many = 64;
+        constexpr int few = 4;
+        constexpr int apartMs = 16;
+        QCOMPARE(LocalWall::Own{}.looksInATurn, few);
+        QCOMPARE(LocalWall::Own{}.looksEveryMs, apartMs);
+        // When each look begins. (Which turn of the loop it began in is not told by a call posted at the first of a
+        // few: the next few's timer may be taken before it, where the thread was busy for longer than a frame.)
+        QStringList looked;
+        QElapsedTimer clock;
+        QList<qint64> begunAt;
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        // (Patient for longer than sixteen turns take on loaded cores: once, with others' builds on them, the answer
+        // came at the usual patience of 1.5 s with 48 looks begun.)
+        core::KvmdDevice::Pace pace = quick();
+        pace.lookPatienceMs = 8000;
+        LocalWall wall(settings, secrets, pace);
+        std::vector<std::unique_ptr<MadeUpKvm>> kvms;
+        QStringList ids;
+        for (int number = 0; number < many; ++number) {
+            kvms.push_back(std::make_unique<MadeUpKvm>());
+            ids.append(wall.add(at(*kvms.back(), u"KVM %1"_s.arg(number)), u"secret"_s).value());
+        }
+        // Each known first (its first look signs in), and old by the asking.
+        QVERIFY(allOnline(wall, ids));
+        QTest::qWait(quick().freshMs + 100);
+        QList<int> before;
+        for (const auto& kvm : kvms) {
+            before.append(kvm->asked("/api/streamer"));
+        }
+        connect(&wall, &LocalWall::looking, &wall, [&](const QString& machine) {
+            begunAt.append(clock.elapsed());
+            looked.append(machine);
+        });
+        clock.start();
+        const QHash<QString, core::Status> all = statusOf(wall);
+        // Every one looked at once, in the wall's order, and never more than a few within 10 ms (all 64 at once, they
+        // began within a few milliseconds in all).
+        QCOMPARE(looked, ids);
+        int most = 0;
+        for (qsizetype at = 0; at < begunAt.size(); ++at) {
+            const auto within = std::ranges::count_if(
+                begunAt, [from = begunAt.at(at)](qint64 when) { return when >= from && when < from + 10; });
+            most = std::max(most, static_cast<int>(within));
+        }
+        QVERIFY2(most <= few, qPrintable(u"%1 looks began within 10 ms"_s.arg(most)));
+        // Each few a frame after the few before them (the clock counts whole milliseconds; a timer of Windows' alone
+        // came 3 to 6 ms early at times, which the wall's own clock makes up for; begun one after the other at once
+        // they are 0 to 2 ms apart).
+        for (qsizetype at = few; at < begunAt.size(); at += few) {
+            QVERIFY2(begunAt.at(at) - begunAt.at(at - few) >= apartMs - 1,
+                     qPrintable(u"the looks %1 and %2 began %3 ms apart"_s.arg(at - few).arg(at).arg(
+                         begunAt.at(at) - begunAt.at(at - few))));
+        }
+        // And the answer waited for all of them: each KVM was asked by its look before it came, and is told as that
+        // look found it.
+        for (std::size_t number = 0; number < kvms.size(); ++number) {
+            QCOMPARE(kvms[number]->asked("/api/streamer"), before.at(static_cast<qsizetype>(number)) + 1);
+            QCOMPARE(all.value(ids.at(static_cast<qsizetype>(number))).state, u"online"_s);
+        }
+    }
+
+    void aWallOfSixtyFourAtTheProgramsPatienceIsAnsweredWithinItAndLooksAtEveryOneOnce_data()
+    {
+        QTest::addColumn<int>("lateMs");
+        // The interface thread as quiet as this test's is; and one late by 60 ms at every look it begins (125 ms a turn
+        // of four was seen in the 8 s test above on loaded cores, its thread serving the 64 KVMs as well): 64 looks
+        // then take 3.8 s of the thread's own time, more than twice the asking's patience, however fast the PC.
+        QTest::newRow("as quiet as it is") << 0;
+        QTest::newRow("60 ms late at each look") << 60;
+    }
+
+    void aWallOfSixtyFourAtTheProgramsPatienceIsAnsweredWithinItAndLooksAtEveryOneOnce()
+    {
+        // The review of abb20deb, L3: the program's own patience, 1.5 s, with 64 KVMs that are no longer fresh. The
+        // asking's patience is counted from the asking ("for a moment and no longer"), and how many looks the line has
+        // begun by then is the interface thread's speed: a loaded PC answered at 1.5 s with 48 of the 64 begun. So what
+        // is held here is what the program says whatever the load: each KVM is told either as its look found it or as
+        // it was last known, and nothing else; every one of the 64 looks is begun all the same, once, in the wall's
+        // order, four in a turn and each four a frame after the four before, also after the asking was answered; and
+        // where the thread is too late for all of them, the asking is answered before its last looks begin. (Each KVM
+        // says another width for this look, by which the answer shows what it was told of each. Counted from its last
+        // look's beginning instead, the asking would wait for looks whose answers the next asking at the wall's pace
+        // finds still fresh: everyAskingAtTheWallsOwnPaceBeginsALook.)
+        QFETCH(int, lateMs);
+        constexpr int many = 64;
+        constexpr int few = 4;
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        const core::KvmdDevice::Pace pace = quick();
+        QCOMPARE(pace.lookPatienceMs, core::KvmdDevice::Pace{}.lookPatienceMs);
+        QCOMPARE(LocalWall::Own{}.looksInATurn, few);
+        LocalWall wall(settings, secrets, pace);
+        std::vector<std::unique_ptr<MadeUpKvm>> kvms;
+        QStringList ids;
+        for (int number = 0; number < many; ++number) {
+            kvms.push_back(std::make_unique<MadeUpKvm>());
+            ids.append(wall.add(at(*kvms.back(), u"KVM %1"_s.arg(number)), u"secret"_s).value());
+        }
+        QVERIFY(allOnlineAndEveryLookOver(wall, ids, pace));
+        QTest::qWait(pace.freshMs + 100);
+        QList<int> before;
+        for (std::size_t number = 0; number < kvms.size(); ++number) {
+            before.append(kvms[number]->asked("/api/streamer"));
+            kvms[number]->width = 1000 + static_cast<int>(number);
+        }
+        QStringList looked;
+        QElapsedTimer clock;
+        QList<qint64> begunAt;
+        connect(&wall, &LocalWall::looking, &wall, [&](const QString& machine) {
+            begunAt.append(clock.elapsed());
+            looked.append(machine);
+            // (The thread's own work at each look begun, which no load makes shorter.)
+            const qint64 until = clock.elapsed() + lateMs;
+            while (clock.elapsed() < until) {
+            }
+        });
+        clock.start();
+        const QHash<QString, core::Status> all = statusOf(wall);
+        const qsizetype begunByTheAnswer = looked.size();
+        int asFound = 0;
+        for (std::size_t number = 0; number < kvms.size(); ++number) {
+            const core::Status told = all.value(ids.at(static_cast<qsizetype>(number)));
+            QVERIFY2(
+                told.state == u"online"_s,
+                qPrintable(u"KVM %1 told '%2', its look begun %3"_s.arg(number)
+                               .arg(tileOf(told))
+                               .arg(looked.contains(ids.at(static_cast<qsizetype>(number))) ? u"by the answer"_s
+                                                                                            : u"after the answer"_s)));
+            QVERIFY2(told.width == 1000 + static_cast<int>(number) || told.width == 1920,
+                     qPrintable(u"KVM %1 told %2 wide"_s.arg(number).arg(told.width)));
+            asFound += told.width == 1000 + static_cast<int>(number) ? 1 : 0;
+        }
+        if (static_cast<qint64>(many) * lateMs > qint64{2} * pace.lookPatienceMs) {
+            QVERIFY2(begunByTheAnswer < many, qPrintable(u"%1 looks begun by the answer"_s.arg(begunByTheAnswer)));
+        }
+        // Every one of them looked at, once, in the wall's order, a few at a time.
+        for (std::size_t number = 0; number < kvms.size(); ++number) {
+            QTRY_COMPARE_WITH_TIMEOUT(kvms[number]->asked("/api/streamer"),
+                                      before.at(static_cast<qsizetype>(number)) + 1, 20000);
+        }
+        QTest::qWait(pace.lookPatienceMs);
+        for (std::size_t number = 0; number < kvms.size(); ++number) {
+            QCOMPARE(kvms[number]->asked("/api/streamer"), before.at(static_cast<qsizetype>(number)) + 1);
+        }
+        QCOMPARE(looked, ids);
+        // A few in a turn, and each few a frame after the few before them began (all 64 are in the line at once, so
+        // each turn takes four: the 0th to 3rd, the 4th to 7th, and so on). By this case's clock, as the wall says
+        // each look begins (`looking`, said before the look itself, so that the first of a turn is timed at the turn's
+        // beginning, which the wall's own clock holds a frame after the one before: timed after each look's first
+        // steps, a slow first look of one turn against a quick one of the next made the frame look shorter by the
+        // difference); both clocks count whole milliseconds. Held as "never more than four within 10 ms" before, which
+        // the program does not say: its timer for the next turn runs from the end of a turn and may come early (3 to
+        // 6 ms), and the turn begins once a frame has passed since the turn before began; where a turn's four took
+        // over 6 ms on the loaded build box in Debug, five began within 10 ms (1 run in 20). Begun all at once, or
+        // eight in a turn, they are 0 to 2 ms apart, which this tells as before.
+        constexpr int apartMs = 16;
+        QCOMPARE(LocalWall::Own{}.looksEveryMs, apartMs);
+        for (qsizetype at = few; at < begunAt.size(); at += few) {
+            QVERIFY2(begunAt.at(at) - begunAt.at(at - few) >= apartMs - 1,
+                     qPrintable(u"the looks %1 and %2 began %3 ms apart"_s.arg(at - few).arg(at).arg(
+                         begunAt.at(at) - begunAt.at(at - few))));
+        }
+        qInfo() << begunByTheAnswer << "of" << many << "looks begun by the answer," << asFound
+                << "KVMs told as their look found them";
+    }
+
+    void twoAskingsAtOnceLookAtEachKvmOnceAndAFewAtATime()
+    {
+        // The looks the askings begin wait in one line for the whole wall: an asking that comes while the looks of
+        // the one before are still being begun puts nothing in the line twice and begins no line of its own, so that
+        // still no more than a few begin within a frame; and both askings are answered, each once its looks are over,
+        // and not only when its patience is. (Two lines side by side began eight within 10 ms.)
+        constexpr int many = 24;
+        constexpr int few = 4;
+        QStringList looked;
+        QElapsedTimer clock;
+        QList<qint64> begunAt;
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        core::KvmdDevice::Pace pace = quick();
+        pace.lookPatienceMs = 6000;
+        LocalWall wall(settings, secrets, pace);
+        std::vector<std::unique_ptr<MadeUpKvm>> kvms;
+        QStringList ids;
+        for (int number = 0; number < many; ++number) {
+            kvms.push_back(std::make_unique<MadeUpKvm>());
+            ids.append(wall.add(at(*kvms.back(), u"KVM %1"_s.arg(number)), u"secret"_s).value());
+        }
+        QVERIFY(allOnline(wall, ids));
+        QTest::qWait(pace.freshMs + 100);
+        connect(&wall, &LocalWall::looking, &wall, [&](const QString& machine) {
+            begunAt.append(clock.elapsed());
+            looked.append(machine);
+        });
+        QList<QHash<QString, core::Status>> told;
+        const auto note = [&told](const base::Result<QHash<QString, core::Status>>& answer) {
+            told.append(answer.ok() ? answer.value() : QHash<QString, core::Status>{});
+        };
+        clock.start();
+        wall.askStatus(note);
+        QTest::qWait(LocalWall::Own{}.looksEveryMs * 2);
+        wall.askStatus(note);
+        // (Six frames of four, and their answers: a second at the most here, on loaded cores; the patience is six.)
+        QTRY_COMPARE_WITH_TIMEOUT(told.size(), 2, pace.lookPatienceMs / 2);
+        QCOMPARE(looked, ids);
+        for (qsizetype at = 0; at < begunAt.size(); ++at) {
+            const auto within = std::ranges::count_if(
+                begunAt, [from = begunAt.at(at)](qint64 when) { return when >= from && when < from + 10; });
+            QVERIFY2(within <= few, qPrintable(u"%1 looks began within 10 ms"_s.arg(within)));
+        }
+        for (const QHash<QString, core::Status>& one : std::as_const(told)) {
+            QCOMPARE(one.size(), qsizetype{many});
+            QVERIFY(std::ranges::all_of(one, [](const core::Status& status) { return status.state == u"online"_s; }));
+        }
+    }
+
+    void aKvmWhoseDriverIsReplacedWhileItsLookIsUnderWayIsLookedAtAnewByTheNextAsking()
+    {
+        // (The review of fdbfe378, L1.) A KVM's password is changed while the look the line began at it is under way:
+        // its driver goes with that look, and the KVM is not in the line any more. Whoever waited for that look is told
+        // a turn of the loop later; and the next asking looks at its new driver at once, and is answered by that look,
+        // and not only when the old one's patience is over (the card said "Connecting" some 3 s longer).
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        core::KvmdDevice::Pace pace = quick();
+        pace.lookPatienceMs = 4000;
+        LocalWall wall(settings, secrets, pace);
+        MadeUpKvm kvm;
+        const QString id = wall.add(at(kvm, u"Build server"_s), u"secret"_s).value();
+        QCOMPARE(settled(wall, id).state, u"online"_s);
+        QTest::qWait(pace.freshMs + 100);
+        // Its next look's first question is answered late: the look is under way for seconds.
+        Answered late = good();
+        late.afterMs = 3000;
+        kvm.first["/api/streamer"].append(late);
+        QStringList looked;
+        connect(&wall, &LocalWall::looking, &wall, [&looked](const QString& machine) { looked.append(machine); });
+        QList<QHash<QString, core::Status>> told;
+        const auto note = [&told](const base::Result<QHash<QString, core::Status>>& answer) {
+            told.append(answer.ok() ? answer.value() : QHash<QString, core::Status>{});
+        };
+        wall.askStatus(note);
+        QCOMPARE(looked, QStringList{id});
+        QTest::qWait(100);
+        // Another password: another driver.
+        kvm.password = u"another one"_s;
+        QVERIFY(wall.change(id, at(kvm, u"Build server"_s), u"another one"_s).ok());
+        QElapsedTimer watch;
+        watch.start();
+        wall.askStatus(note);
+        QCOMPARE(looked, (QStringList{id, id}));
+        QTRY_COMPARE_WITH_TIMEOUT(told.size(), 2, 10000);
+        QVERIFY2(watch.elapsed() < 2500, qPrintable(QString::number(watch.elapsed())));
+        QCOMPARE(told.constLast().value(id).state, u"online"_s);
+    }
+
+    void aKvmTakenOffBeforeItsLooksTurnIsNotWaitedFor()
+    {
+        // Of the looks an asking begins a few in a turn of the loop (Own::looksInATurn), one whose KVM is taken off the
+        // wall before its turn has come begins nowhere: and the asking is answered without it, as soon as the others'
+        // looks are over, and not only when its patience is.
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        core::KvmdDevice::Pace pace = quick();
+        pace.lookPatienceMs = 3000;
+        LocalWall::Own own;
+        own.looksInATurn = 1;
+        LocalWall wall(settings, secrets, pace, own);
+        std::vector<std::unique_ptr<MadeUpKvm>> kvms;
+        QStringList ids;
+        for (int number = 0; number < 3; ++number) {
+            kvms.push_back(std::make_unique<MadeUpKvm>());
+            ids.append(wall.add(at(*kvms.back(), u"KVM %1"_s.arg(number)), u"secret"_s).value());
+        }
+        for (const QString& id : std::as_const(ids)) {
+            QCOMPARE(settled(wall, id).state, u"online"_s);
+        }
+        QTest::qWait(pace.freshMs + 100);
+        QStringList looked;
+        connect(&wall, &LocalWall::looking, &wall, [&looked](const QString& machine) { looked.append(machine); });
+        QList<QHash<QString, core::Status>> told;
+        QElapsedTimer watch;
+        watch.start();
+        wall.askStatus([&told](const base::Result<QHash<QString, core::Status>>& answer) {
+            told.append(answer.ok() ? answer.value() : QHash<QString, core::Status>{});
+        });
+        // The first began in the asking's own turn, the last waits for its own.
+        QCOMPARE(looked, QStringList{ids.first()});
+        QVERIFY(wall.remove(ids.last()).ok());
+        QTRY_COMPARE_WITH_TIMEOUT(told.size(), 1, pace.lookPatienceMs + 1000);
+        QVERIFY2(watch.elapsed() < pace.lookPatienceMs - 500, qPrintable(QString::number(watch.elapsed())));
+        QCOMPARE(looked, ids.first(2));
+        QCOMPARE(told.constFirst().keys().size(), 2);
+        QVERIFY(!told.constFirst().contains(ids.last()));
+        QCOMPARE(told.constFirst().value(ids.at(1)).state, u"online"_s);
     }
 
     // --- a KVM of the wall, live (what a live does is tried in test_kvmd_live.cpp) ---
@@ -3568,6 +4309,45 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!core::Settings(file).remembered().kvmsHeldForATwin.contains(id), 30000);
     }
 
+    void aNewHoldIsOnDiskBeforeAnythingCouldGoThePlainWay()
+    {
+        // The outside review of the wave 2 desktop, 6.3: a JetKVM over plain HTTP, held back for the KVM of the wall
+        // its HTTPS showed the certificate of, had its hold written down soon (2 s, 30 s at the most), as what the wall
+        // notes by itself. Killed within that while, the next start knew of no hold, its HTTPS showed nothing that
+        // time, and the password went the plain way. The hold is in the file as soon as it holds. (Nothing else would
+        // write the file for ten minutes here.)
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        core::Settings settings(file);
+        MemorySecrets secrets;
+        JetKvmByHand plain;
+        const StandIn secure(
+            [](const Asked&) { return Answered(404, R"({"error":"Not Found"})"_ba, "application/json"_ba); },
+            tls("first"));
+        const core::testing::NobodyThere nobody;
+        core::DriverPaces paces = quickDrivers();
+        paces.jetkvm.otherWay = [from = plain.address(), to = QUrl(secure.address())](const QUrl& address) {
+            return address == from ? std::optional<QUrl>(to) : std::nullopt;
+        };
+        LocalWall::Own own;
+        own.writtenAfterMs = 600'000;
+        own.writtenAtTheLatestMs = 600'000;
+        LocalWall wall(settings, secrets, paces, own);
+        OwnKvm other = knownAt(u"https://127.0.0.1:%1"_s.arg(nobody.port()), sha256Of("first"));
+        other.kind = u"jetkvm"_s;
+        const QString otherId = wall.add(other, u"its own"_s).value();
+        LocalWall::FromAFile one;
+        one.kvm.address = plain.address().toString();
+        one.kvm.kind = u"jetkvm"_s;
+        one.password = u"secret"_s;
+        const QString id = wall.takeFromAFile({one}).constFirst().value();
+        // (Asked as the wall's cards ask it, until its card says it is held back.)
+        QVERIFY(QTest::qWaitFor([&] { return statusOf(wall).value(id).errorCode == u"same_device"_s; }, 15000));
+        QCOMPARE(settings.remembered().kvmsHeldForATwin.value(id), otherId);
+        QCOMPARE(core::Settings(file).remembered().kvmsHeldForATwin.value(id), otherId);
+        QCOMPARE(plain.signIns, 0);
+    }
+
     void aHoldGoesWithTheKvmItIsHeldFor()
     {
         // From the third reading of the twins (the coordinator's word on a choice of mine): the KVM a hold is for is
@@ -3603,6 +4383,99 @@ private slots:
         QVERIFY2(QTest::qWaitFor([&] { return statusOf(wall).value(id).state == u"online"_s; }, 15000),
                  qPrintable(tileOf(statusOf(wall).value(id))));
         QVERIFY(wall.wasAskedWhatItIs(id));
+    }
+
+    void aHoldStaysForAsLongAsAKvmOfTheWallIsKnownByThatCertificate()
+    {
+        // Outside review 2, 4.3: two KVMs of the wall known by one certificate (a PiKVM and its own VNC server, kept
+        // both). A JetKVM over plain HTTP is held back for the first, as its HTTPS showed that certificate. The first
+        // is taken off: the other is still known by it, and the hold goes over to that one, at once and on disk. Where
+        // the JetKVM's HTTPS is in doubt from then on (something listens there and shows nothing), it stays held, its
+        // password not so much as read, and so from the next start. Once no KVM of the wall is known by that
+        // certificate any more, the hold goes.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        MemorySecrets secrets;
+        JetKvmByHand plain;
+        const StandIn secure(
+            [](const Asked&) { return Answered(404, R"({"error":"Not Found"})"_ba, "application/json"_ba); },
+            tls("first"));
+        const NeverSpeaks silent;
+        const core::testing::NobodyThere nobody;
+        const core::testing::NobodyThere nobodyToo;
+        const core::testing::NobodyThere nobodyThree;
+        bool inDoubt = false;
+        core::DriverPaces paces = quickDrivers();
+        paces.jetkvm.otherWay = [from = plain.address(), to = QUrl(secure.address()),
+                                 elsewhere = QUrl(silent.address(true)), &inDoubt](const QUrl& address) {
+            return address == from ? std::optional<QUrl>(inDoubt ? elsewhere : to) : std::nullopt;
+        };
+        QString id;
+        int readsOfIt = 0;
+        const auto counted = [&readsOfIt, &id](const QString& name) {
+            readsOfIt += name == LocalWall::secretOf(id) ? 1 : 0;
+        };
+        const auto heldThroughout = [&id](LocalWall& wall, int forMs) {
+            QElapsedTimer watch;
+            watch.start();
+            while (watch.elapsed() < forMs) {
+                if (statusOf(wall).value(id).errorCode != u"same_device"_s) {
+                    return false;
+                }
+                QTest::qWait(100);
+            }
+            return true;
+        };
+        QString itsVncId;
+        {
+            core::Settings settings(file);
+            LocalWall wall(settings, secrets, paces);
+            OwnKvm pikvm = knownAt(u"https://127.0.0.1:%1"_s.arg(nobody.port()), sha256Of("first"));
+            pikvm.kind = u"kvmd"_s;
+            const QString pikvmId = wall.add(pikvm, u"its own"_s).value();
+            OwnKvm itsVnc = knownAt(u"vncs://127.0.0.1:%1"_s.arg(nobodyToo.port()), sha256Of("first"));
+            itsVnc.kind = u"vnc"_s;
+            itsVnc.keptBesideItsTwin = true;
+            itsVncId = wall.add(itsVnc, u"its own"_s).value();
+            // (And a KVM known by another certificate, which the hold never goes over to.)
+            OwnKvm another = knownAt(u"https://127.0.0.1:%1"_s.arg(nobodyThree.port()), sha256Of("second"));
+            another.kind = u"kvmd"_s;
+            QVERIFY(wall.add(another, u"its own"_s).ok());
+            LocalWall::FromAFile one;
+            one.kvm.address = plain.address().toString();
+            one.kvm.kind = u"jetkvm"_s;
+            one.password = u"secret"_s;
+            id = wall.takeFromAFile({one}).constFirst().value();
+            QVERIFY(QTest::qWaitFor([&] { return statusOf(wall).value(id).errorCode == u"same_device"_s; }, 15000));
+            QCOMPARE(settings.remembered().kvmsHeldForATwin.value(id), pikvmId);
+            inDoubt = true;
+            secrets.onRead = counted;
+            QVERIFY(wall.remove(pikvmId).ok());
+            QCOMPARE(settings.remembered().kvmsHeldForATwin.value(id), itsVncId);
+            QCOMPARE(core::Settings(file).remembered().kvmsHeldForATwin.value(id), itsVncId);
+            const int linesBefore = silent.lines;
+            QVERIFY(heldThroughout(wall, 4000));
+            // (Asked meanwhile, in doubt: what holds it is no asking that was left out.)
+            QTRY_VERIFY_WITH_TIMEOUT(silent.lines > linesBefore, 20000);
+            QVERIFY(heldThroughout(wall, 500));
+            QCOMPARE(readsOfIt, 0);
+            QCOMPARE(plain.signIns, 0);
+        }
+        // The next start, its HTTPS still in doubt: held from the start, for the one still known by that certificate.
+        core::Settings settings(file);
+        LocalWall wall(settings, secrets, paces);
+        const int linesBefore = silent.lines;
+        QVERIFY(heldThroughout(wall, 3000));
+        QTRY_VERIFY_WITH_TIMEOUT(silent.lines > linesBefore, 20000);
+        QVERIFY(heldThroughout(wall, 500));
+        QCOMPARE(readsOfIt, 0);
+        QCOMPARE(plain.signIns, 0);
+        // That one taken off as well: no KVM of the wall is known by that certificate, and the hold goes.
+        secrets.onRead = nullptr;
+        QVERIFY(wall.remove(itsVncId).ok());
+        QVERIFY(!settings.remembered().kvmsHeldForATwin.contains(id));
+        QVERIFY2(QTest::qWaitFor([&] { return statusOf(wall).value(id).state == u"online"_s; }, 30000),
+                 qPrintable(tileOf(statusOf(wall).value(id))));
     }
 
     void aKvmTakenOffTheWallHasWhatWasKeptOfItsSignInsCleared()
@@ -4684,7 +5557,8 @@ private slots:
         const base::Result<void> refused = wall.change(id, *onto, std::nullopt, there);
         secrets.refusesReads = false;
         QVERIFY(!refused.ok());
-        QCOMPARE(refused.error().code, std::string("no_password"));
+        // (Said as what it is, the store's refusal, and never taken for none: 6.1.)
+        QCOMPARE(refused.error().code, std::string("not_saved"));
         QCOMPARE(wall.kvms().constFirst().address, u"http://192.0.2.5"_s);
         QVERIFY(wall.marksAPasswordFor(id));
         QCOMPARE(secrets.all.value(LocalWall::secretOf(id)), savedFor("secret", u"http://192.0.2.5"_s));

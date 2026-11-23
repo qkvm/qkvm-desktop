@@ -935,6 +935,57 @@ private slots:
         QCOMPARE(rig.viewer.keyboard(), JetKvmViewerByHand::Keyboard{});
     }
 
+    // Review cx6-1, M3 (6.18 of the outside review of the wave 2 desktop, for the JetKVM): a text typed key by key
+    // stops where it stands when its driver is told to (the program locked, or made a wall screen:
+    // LocalWall::stopEveryTyping), with nothing down, and the Enter after it is not pressed; a typing that waited
+    // behind it is answered "stopped" with none of its keys typed. One asked for after that types.
+    void aTypingStopsWhereItStandsAndItsEnterIsNotPressed()
+    {
+        JetKvmDevice::Pace pace = quick();
+        pace.typing.keyPauseMs = 60;
+        Rig rig(pace);
+        // (Each press of a key: the whole keyboard with it, `02` and the keys after the modifiers.)
+        const auto pressed = [&rig] {
+            QList<QByteArray> keys;
+            for (const QByteArray& said : bytesOf(rig.viewer.hidHeard())) {
+                if (said.at(0) == 0x02 && said.size() > 2) {
+                    keys.append(said.mid(2));
+                }
+            }
+            return keys;
+        };
+        const QString text = u"abcdefghijklmnopqrstuvwx"_s; // (a to x: no key of them is Enter, 0x28, or z, 0x1d)
+        std::optional<base::Result<qkvm::core::Done>> first;
+        std::optional<base::Result<qkvm::core::Done>> behind;
+        rig.device.act(qkvm::core::Action::type(text, true),
+                       [&first](const base::Result<qkvm::core::Done>& what) { first = what; });
+        rig.device.act(qkvm::core::Action::type(u"zz"_s, true),
+                       [&behind](const base::Result<qkvm::core::Done>& what) { behind = what; });
+        QTRY_VERIFY_WITH_TIMEOUT(pressed().size() >= 3, 20'000);
+        rig.device.stopTyping();
+        // (The one that waited, there and then: it is never begun.)
+        QVERIFY(behind.has_value());
+        QTRY_VERIFY_WITH_TIMEOUT(first.has_value(), 20'000);
+        const base::Result<qkvm::core::Done> firstWas = first.value_or(qkvm::core::Done{});
+        const base::Result<qkvm::core::Done> behindWas = behind.value_or(qkvm::core::Done{});
+        QVERIFY(!firstWas.ok());
+        QCOMPARE(firstWas.error().code, std::string("stopped"));
+        QVERIFY2(firstWas.error().message.find("of 25") != std::string::npos, firstWas.error().message.c_str());
+        QVERIFY(!behindWas.ok());
+        QCOMPARE(behindWas.error().code, std::string("stopped"));
+        QTest::qWait(500);
+        const QList<QByteArray> keys = pressed();
+        QVERIFY2(keys.size() < text.size(), QByteArray::number(keys.size()));
+        for (const QByteArray& one : keys) {
+            QVERIFY2(!one.contains(char(0x28)) && !one.contains(char(0x1d)), one.toHex().constData());
+        }
+        QCOMPARE(rig.viewer.keyboard(), JetKvmViewerByHand::Keyboard{});
+        // A typing asked for after the stop types.
+        const base::Result<qkvm::core::Done> after = typed(rig, qkvm::core::Action::type(u"z"_s, false));
+        QVERIFY2(after, after ? "" : after.error().message.c_str());
+        QVERIFY(pressed().contains(QByteArray(1, char(0x1d))));
+    }
+
     // 24e: typing stops with in_use where the JetKVM's own page takes it, and nothing more of it goes.
     void typingStopsWhereItsOwnPageTakesIt()
     {

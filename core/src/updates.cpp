@@ -613,7 +613,7 @@ void Updates::finished()
         m_state = State::Ready;
     } else {
         const auto now = QDateTime::currentDateTimeUtc();
-        const auto verified = verifiedUpdate(m_metadata, m_channel.publicKey, now, m_channel.kind);
+        const auto verified = verifiedUpdate(m_metadata, m_channel.publicKey, now, m_channel.kind, m_channel.machine);
         m_metadata.clear();
         if (!verified) {
             fail(tr("The update information is invalid, expired or not signed by qKVM."));
@@ -624,7 +624,12 @@ void Updates::finished()
         if (!m_settings.remember(remembered)) {
             m_problem = tr("The check succeeded, but its date could not be saved.");
         }
-        if (updateVersion(verified.value().version) > updateVersion(m_channel.currentVersion)) {
+        // A later version; or this very version where this copy is not of the PC's own kind (an x64 copy on Windows on
+        // Arm), whose release is then the same program of the PC's kind. Never an older one, and never the same to a
+        // copy of the PC's kind.
+        const QVersionNumber offered = updateVersion(verified.value().version);
+        const QVersionNumber current = updateVersion(m_channel.currentVersion);
+        if (offered > current || (offered == current && m_channel.machine != m_channel.program)) {
             m_release = verified.value();
             m_state = State::Available;
             if (m_notifiedVersion != m_release->version) {
@@ -907,7 +912,9 @@ bool Updates::noteHandOver(unsigned long process, quint64 created, const QString
                            {u"process"_s, static_cast<qint64>(process)},
                            {u"created"_s, QString::number(created)},
                            {u"temp"_s, temp},
-                           {u"at"_s, QDateTime::currentDateTimeUtc().toString(Qt::ISODate)}};
+                           {u"at"_s, QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+                           // (From 0.2.0: the kind of Windows the release is for, x64 or arm64.)
+                           {u"machine"_s, QString::fromLatin1(base::architectureName(m_channel.machine))}};
     QSaveFile note(file);
     return note.open(QIODevice::WriteOnly) && note.write(QJsonDocument(said).toJson(QJsonDocument::Compact)) > 0 &&
            note.commit();
@@ -927,14 +934,27 @@ void Updates::lookAtHandOver()
     const qint64 process = said.value(u"process"_s).toInteger(-1);
     bool numbered = false;
     const quint64 created = said.value(u"created"_s).toString().toULongLong(&numbered);
-    if (updateVersion(version).isNull() || process <= 0 || process > 0xFFFFFFFFLL || !numbered) {
+    // The kind of Windows its release is for (from 0.2.0): x64 or arm64, letter for letter. A note of 0.1.x says none,
+    // and is read by its version alone, as 0.1.x read it.
+    const QJsonValue machine = said.value(u"machine"_s);
+    const bool saysKind = !machine.isUndefined();
+    const QString kind = machine.toString();
+    const auto ownName = QString::fromLatin1(base::architectureName(m_channel.program));
+    const bool kindRead =
+        !saysKind ||
+        (machine.isString() && (kind == QString::fromLatin1(base::architectureName(base::Architecture::X64)) ||
+                                kind == QString::fromLatin1(base::architectureName(base::Architecture::Arm64))));
+    if (updateVersion(version).isNull() || process <= 0 || process > 0xFFFFFFFFLL || !numbered || !kindRead) {
         QFile::remove(file);
         return;
     }
     // Setup's own TEMP, let go of once Setup is over (only where it is that and empty: Setup takes away what it
     // unpacked).
     m_setupTemp = said.value(u"temp"_s).toString();
-    if (updateVersion(version) == updateVersion(m_channel.currentVersion)) {
+    // Installed: this very version starts, and of the kind the release was for. (An x64 copy on Windows on Arm that
+    // starts again at the version it handed over for the ARM64 release is one Setup did not replace: what Setup said
+    // is told, below.)
+    if (updateVersion(version) == updateVersion(m_channel.currentVersion) && (!saysKind || kind == ownName)) {
         QFile::remove(file);
         letGoOfSetupsTemp();
         tellAfterSetup(tr("Updated to qKVM %1.").arg(version), false, false);
@@ -998,6 +1018,14 @@ void Updates::tellWhatSetupSaid(const QString& version)
         tellAfterSetup(tr("The update to qKVM %1 was not installed: qKVM was still running when Setup needed it "
                           "closed, so Setup changed nothing. Choose Install and restart again.")
                            .arg(version),
+                       true, true);
+    } else if (is(unchanged) && !said.mid(unchanged.size()).trimmed().isEmpty() &&
+               !said.mid(unchanged.size()).trimmed().startsWith(u"nothing was changed"_s)) {
+        // Where Setup first put right what an update that did not finish had left, it says what, and that it changed
+        // nothing else ("first, Setup <what>, and changed nothing else: <reason>"): its words as they are, shown as
+        // text, never "nothing was changed" (review i020-2, L9).
+        tellAfterSetup(tr("The update to qKVM %1 was not installed: %2. Setup's log: %3")
+                           .arg(version, said.mid(unchanged.size()).trimmed(), log),
                        true, true);
     } else if (is(unchanged)) {
         // Setup's words after "nothing was changed:", where it says them (shown as text, nothing else).

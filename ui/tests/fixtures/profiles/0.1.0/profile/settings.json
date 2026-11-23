@@ -128,7 +128,7 @@
             "display": 2,
             "group": "Rack B",
             "id": "0f1e2d3c",
-            "kind": "vnc",
+            "kind": "a-later-family",
             "known_by_certificate": false,
             "machine": "",
             "name": "A family of later",

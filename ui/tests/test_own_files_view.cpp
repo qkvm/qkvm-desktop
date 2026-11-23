@@ -4,6 +4,7 @@
 #include <string>
 
 #include <QAbstractItemModelTester>
+#include <QByteArray>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -180,6 +181,8 @@ struct Row {
     bool canBeTaken = false;
     bool ticked = false;
     bool open = false;
+    // Of a VNC server: what is said beside its certificate is in its family's words.
+    bool ofAVncServer = false;
 };
 
 QList<Row> rowsOf(OwnFilesView& view)
@@ -201,6 +204,7 @@ QList<Row> rowsOf(OwnFilesView& view)
         row.canBeTaken = index.data(LaidOutList::CanBeTakenRole).toBool();
         row.ticked = index.data(LaidOutList::TickedRole).toBool();
         row.open = index.data(LaidOutList::OpenRole).toBool();
+        row.ofAVncServer = index.data(list->roleNames().key(QByteArray("ofAVncServer"), -1)).toBool();
         rows.append(row);
     }
     return rows;
@@ -1160,6 +1164,23 @@ private slots:
         QTest::newRow("in the clear, and at this PC")
             << kvmAt(u"http://127.0.0.1:20001"_s, u"Both"_s) << true << false
             << u"Plain HTTP: its password goes in the clear"_s + dot() + u"Its address is this PC itself"_s;
+        // A VNC server's vnc:// is no HTTP, and VNC sends no password: said in its family's words, as its row in the
+        // settings says "Unencrypted (vnc)" (outside review c9a-3, L3; c9a-4, L3).
+        const auto aVncServer = [](const QString& address, const QString& name) {
+            Device device = kvmAt(address, name);
+            device.kind = u"vnc"_s;
+            return device;
+        };
+        QTest::newRow("a VNC server in the clear")
+            << aVncServer(u"vnc://192.0.2.3:5901"_s, u"VNC in the clear"_s) << true << false
+            << u"Unencrypted (vnc): what is seen and typed goes in the clear"_s;
+        QTest::newRow("a VNC server in the clear, at this PC")
+            << aVncServer(u"vnc://127.0.0.1:20002"_s, u"VNC here"_s) << true << false
+            << u"Unencrypted (vnc): what is seen and typed goes in the clear"_s + dot() +
+                   u"Its address is this PC itself"_s;
+        QTest::newRow("a VNC server known by the certificate its file names")
+            << knownBy(aVncServer(u"vncs://192.0.2.7:5901"_s, u"VNC pinned"_s), "first") << true << true
+            << u"Known by its certificate "_s + inShortOf(pinned.certificate);
         QTest::newRow("one that cannot be taken")
             << notKeptHere(saying(kvmAt(elsewhere(4), u"A small one"_s), u"system"_s)) << false << false
             << u"Cannot be taken: this PC's wall does not keep it as the file has it"_s;
@@ -1183,6 +1204,8 @@ private slots:
         // whoever reads it; one that cannot be taken asks nothing.
         QCOMPARE(rows.at(0).inShort, inShort);
         QCOMPARE(rows.at(0).wantsALook, canBeTaken && !isTicked);
+        QCOMPARE(rows.at(0).ofAVncServer, device.kind == u"vnc"_s);
+        QVERIFY(!rows.at(1).ofAVncServer);
         QVERIFY(rows.at(1).ticked);
         QCOMPARE(rows.at(1).inShort, u"Known by Windows' word"_s);
         QCOMPARE(desk.view.tickedCount(), isTicked ? 2 : 1);

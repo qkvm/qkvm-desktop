@@ -248,6 +248,15 @@ Status statusOf(const QJsonObject& said)
     const QJsonObject atx = said["atx"_L1].toObject();
     status.powerIsKnown = atx["enabled"_L1].toBool();
     status.power = flag(atx["power"_L1]);
+    // (0.3.2: why the board is no witness of the power, only where there is something to say. Both, or neither.)
+    if (const QJsonObject note = atx["note"_L1].toObject(); status.powerIsKnown && !note.isEmpty()) {
+        const QString code = line(note["code"_L1], 64);
+        const QString message = line(note["message"_L1], 400);
+        if (!code.isEmpty() && !message.isEmpty()) {
+            status.powerNoteCode = code;
+            status.powerNote = message;
+        }
+    }
     status.keyboard = flag(said["usb"_L1].toObject()["keyboard"_L1]);
     status.temperature = number(said["health"_L1].toObject()["temp"_L1]);
     status.model = text(said["about"_L1].toObject()["model"_L1]);
@@ -954,6 +963,15 @@ base::Result<MediaList> mediaListFrom(const QByteArray& answer)
     list.offers.dropsInput = yes(offers["drops_input"_L1]);
     list.uploading = uploadingOf(is["uploading"_L1]);
     list.servedFrom = line(is["served_from"_L1], 300);
+    // (0.3.2) The mark of the machine the list was made of, which goes back with a change picked from it: in the one
+    // shape the server makes it, or the list is not understood (nothing picked from it can be held to its machine). A
+    // server before 0.3.2 says none.
+    if (const QJsonValue mark = is["listed"_L1]; !mark.isUndefined() && !mark.isNull()) {
+        if (!mark.isString() || !isListedMark(mark.toString())) {
+            return notUnderstood();
+        }
+        list.listed = mark.toString();
+    }
     return list;
 }
 
@@ -995,15 +1013,29 @@ base::Result<MediaUploaded> uploadedFrom(const QByteArray& answer)
 
 QByteArray mountBody(const MediaMount& mount)
 {
-    const QJsonObject body{{u"image"_s, mount.image}, {u"machine"_s, mount.machine},
-                           {u"drive"_s, mount.drive}, {u"writable"_s, mount.writable},
-                           {u"boot"_s, mount.boot},   {u"restart"_s, mount.restart}};
+    QJsonObject body{{u"image"_s, mount.image},       {u"machine"_s, mount.machine}, {u"drive"_s, mount.drive},
+                     {u"writable"_s, mount.writable}, {u"boot"_s, mount.boot},       {u"restart"_s, mount.restart}};
+    // (Only where the list said one: a server before 0.3.2 is sent what it was sent before.)
+    if (!mount.listed.isEmpty()) {
+        body[u"listed"_s] = mount.listed;
+    }
     return QJsonDocument(body).toJson(QJsonDocument::Compact);
 }
 
-QByteArray imageBody(const QString& image, const QString& machine)
+QByteArray imageBody(const QString& image, const QString& machine, const QString& listed)
 {
-    return QJsonDocument(QJsonObject{{u"image"_s, image}, {u"machine"_s, machine}}).toJson(QJsonDocument::Compact);
+    QJsonObject body{{u"image"_s, image}, {u"machine"_s, machine}};
+    if (!listed.isEmpty()) {
+        body[u"listed"_s] = listed;
+    }
+    return QJsonDocument(body).toJson(QJsonDocument::Compact);
+}
+
+bool isListedMark(const QString& said)
+{
+    return said.size() == 32 && std::ranges::all_of(said, [](QChar letter) {
+               return (letter >= u'0' && letter <= u'9') || (letter >= u'a' && letter <= u'f');
+           });
 }
 
 bool isImageName(const QString& name)

@@ -16,10 +16,14 @@ public:
     base::Result<void> keep(const QString& name, const QByteArray& secret) override
     {
         ++keeps;
+        if (aroundKeep)
+            aroundKeep();
         if (refuses || keeps == refusesTheKeep) {
             return base::Error{"secrets", "Windows did not keep it."};
         }
         all.insert(name, secret);
+        if (aroundKeep)
+            aroundKeep();
         return {};
     }
     // (A read Windows refuses comes back empty from kept(), as from Windows' own store.)
@@ -83,9 +87,11 @@ public:
     bool refusesReads = false;
     std::function<void(const QString&)> onRead;
     // How often something was to be kept, and the one of those times that fails, counted from 1;
-    // 0: none of them does.
+    // 0: none of them does. And what happens just before each keeping, and just after one that kept
+    // (where a test takes what stands then as what the next start would find: the program cut off).
     int keeps = 0;
     int refusesTheKeep = 0;
+    std::function<void()> aroundKeep;
     // What is to be forgotten stays where it is: Windows did not take it out.
     bool forgetsNothing = false;
 };

@@ -25,14 +25,16 @@
 #include <qkvm/core/kvm_times.h>
 #include <qkvm/core/own_device.h>
 #include <qkvm/core/redfish_answers.h>
+#include <qkvm/core/rfb_screen.h>
+#include <qkvm/core/server_console.h>
 #include <qkvm/core/server_live.h>
 #include <qkvm/core/server_screen.h>
+#include <qkvm/core/settings.h>
+#include <qkvm/core/setup_overrides.h>
 #include <qkvm/core/sign_in_pacing.h>
 #include <qkvm/core/wiped.h>
 
 namespace qkvm::core {
-
-class SetupOverrides;
 
 // Where the sessions of the controllers whose drivers were let go of are given back: a controller
 // has only so many (four or so), and one left behind uses one up until it runs out by itself, half
@@ -135,10 +137,11 @@ private:
     bool finished() const;
     // leaveWebPage, from the door or from here, without a word.
     void leave(const DeviceAsker::Where& where, int connectWithinMs, const QByteArray& session, int withinMs);
-    // A clearing in steps: the computer read and judged (`meant`: the change goes as meant whatever the state); the
-    // change; read back; its end, the session given back after it. The computer as an answer shows it, where it is
-    // the server the clearing is for.
-    void readBeforeClearing(const std::shared_ptr<Clearing>& state, bool meant);
+    // A clearing in steps: the computer read and judged; the change, shown the mark read (after a refusal for a mark
+    // that moved on, the fresh one; "*", meant whatever the state, only for the very mark refused, none, or a second
+    // refusal: outside review of 0.2.0's Redfish fixes, L9); read back; its end, the session given back after it. The
+    // computer as an answer shows it, where it is the server the clearing is for.
+    void readBeforeClearing(const std::shared_ptr<Clearing>& state);
     void sendClearing(const std::shared_ptr<Clearing>& state, const QByteArray& mark, bool meant);
     void readClearingBack(const std::shared_ptr<Clearing>& state);
     void clearingOver(const std::shared_ptr<Clearing>& state, bool off);
@@ -195,7 +198,13 @@ private:
 //   to it; the password not either, where the controller's number tells it. Where nothing is kept, the
 //   numbers seen are taken (trust on first use, as a certificate is), and said (knownAs); so is the
 //   controller's number where only the computer's was kept, learnt under the session the computer was
-//   found to be this one under.
+//   found to be this one under. Of several computers one controller lists (the nodes of a chassis), the
+//   card's is the one that gives its number, wherever it is listed; one that gives none passes for it only
+//   where it is listed alone, at the place this one's was last found at, and by a controller never seen to
+//   list several (outside review of 0.2.0, 5.2): both kept with the card (Where::serverPlace, said by
+//   foundAt), so that a driver made anew holds to them too (outside review of its Redfish fixes, M1). A
+//   card that keeps no place passes none that gives no number until its computer has given its number at
+//   a read, which keeps where it is (round 2, L1).
 // * What it is (identify, for a person who adds it): the model of its computer, the version of the
 //   controller's firmware, the name the computer goes by, and the mark it is known by after the asking
 //   (what was kept, or what was taken then), to know it by at any address.
@@ -243,6 +252,9 @@ public:
         // The mark the server is kept by: the numbers its computer and its controller gave for
         // themselves (redfish::marksOf); empty where none is kept.
         QString machine;
+        // ...and where its controller keeps that server's computer, as a driver of it found it (ServerPlace, foundAt;
+        // OwnKvm::serverPlace): none kept, as from a card of before 0.2.0.
+        ServerPlace serverPlace;
     };
 
     // What it is given, made short in a test: the web's times for a controller (redfish.py).
@@ -298,10 +310,16 @@ public:
         // Its firmware inventory, where its version is looked for when its manager says none: no read of it begins
         // after this, from the first (IMAGES_WITHIN).
         int imagesWithinMs = 10'000;
+        // For a test: told of each member of that inventory as it is gone through one by one (versionOf), which no
+        // inventory of more than redfish::mostImages ever is (outside review of 0.2.0, 5.3, and of its Redfish fixes,
+        // L8). None in the program.
+        std::function<void()> inventoryWalked;
         // Its console, for the card's still and for whoever has it live: what its screen and each live are held to
         // (the web's CONSOLE_IDLE and the rest: ServerScreen::Limits; ServerLive::Limits).
         ServerScreen::Limits screen;
         ServerLive::Limits live;
+        // ...and where its console is OpenBMC's, RFB at /kvm/0 (RfbScreen::Limits, the web's DoorScreen and its own).
+        RfbScreen::Limits rfb;
         // The seats of the controllers' consoles, one for every driver of a controller: none, the program's own
         // (ConsoleSeats::program()).
         std::shared_ptr<ConsoleSeats> seats;
@@ -313,6 +331,13 @@ public:
         int setupWithinMs = 120'000;
         int setupPatienceMs = 240'000;
         int bootQuietMs = 60'000;
+        // ...and a change of the override the controller only queued as a task (D1; the web follows AMI's mounts so,
+        // TASK_EVERY): its task looked at every confirmEveryMs until it ends, for this long at the most (half the
+        // restart's window, where the web gives a mount MEDIA_WITHIN's two minutes), never into the confirmWithinMs
+        // before the restart's own time, which the read-back keeps, and this many times; one that has not ended by then
+        // is as one that cannot be followed (outside review of D1, M1).
+        int taskWithinMs = 60'000;
+        int mostTaskLooks = 60;
         // A start into BIOS setup under way when this driver is let go of (the program's end among it, review 4's
         // MEDIUM 1): its override cleared by the goodbyes and read back within this in all, before the session is given
         // back (the change took a real board 19.8 s); and where which servers' override may be set is kept beside the
@@ -379,6 +404,8 @@ public:
     void consoleWay(std::function<void(base::Result<ConsoleWay>)> done);
     // The mark the server is known by now: what it was made with, or what it took since (knownAs).
     QString machine() const { return m_machine; }
+    // ...and where its controller keeps that server's computer, as it was made with it or found it since (foundAt).
+    ServerPlace serverPlace() const { return m_serverPlace; }
     // Its server's screen live, for one who asks (what makeLive() hands out does): over the driver's one screen.
     // Refused where another server answers at its address, or it has no console here.
     std::unique_ptr<Live> openLive(Live::Need need);
@@ -393,6 +420,7 @@ public:
     void act(const Action& what, std::function<void(base::Result<Done>)> done) override;
     void askWakeTargets(std::function<void(base::Result<QList<WakeTarget>>)> done) override;
     void tidy() override;
+    void stopTyping() override;
     std::unique_ptr<OwnLive> makeLive() override;
 
     // The words of what is said where another server answers at its address (the web's).
@@ -400,6 +428,28 @@ public:
     static base::Error noServerNumber();
     static base::Error anotherController();
     static base::Error noControllerNumber();
+    // ...and where its controller lists several computers and the card's was known by its controller alone.
+    static base::Error severalComputers();
+    // ...and where one that gives no number is listed alone, but not where the card's computer was found, or by a
+    // controller that was seen to list several (outside review of 0.2.0's Redfish fixes, M1).
+    static base::Error notWhereItsComputerIs();
+    // ...and where the card keeps no place (one from before 0.2.0, or from a file of the wall): its computer's number
+    // kept, and not given yet at a read that would keep where it is; known by its controller alone (round 2, L1).
+    static base::Error whereItsComputerIsNotKnownYet();
+    static base::Error whereItWasTakenIsNotKnown();
+    // ...and where its controller lists more than one computer that gives the number kept for the card's (outside
+    // review 2, 3.2).
+    static base::Error sameNumberTwice();
+    // ...and where it is known by its controller alone (its computer gave none when it was added), and the computer
+    // where it was taken gives a number of its own now (outside review 2, 3.4): what its card asks then, once (the
+    // owner's decision of 2026-11-22: Yes takes that number for the card, act "its_server"; No leaves it asking), and
+    // what a command or its console is refused with until that is answered.
+    static base::Error asksWhetherItsServer();
+    static base::Error asksFirst();
+    // ...what the box that changes it is told then, where it signs in with the kept password (review cx2-2, L4); and
+    // where such a computer is at another place than the card's was taken at, or its card was told No (L3).
+    static base::Error asksOnItsCard();
+    static base::Error elsewhereWithANumber();
     // What is said of its picture: a controller has none here.
     static base::Error noPicture();
 
@@ -408,6 +458,11 @@ signals:
     // number learnt beside its computer's: the mark it is known by from now on (`now`), and the one it was
     // known by before (`before`; empty where none was). Only ever of this driver's own server.
     void knownAs(const QString& before, const QString& now);
+    // Where its controller keeps the server's computer, found anew (ServerPlace): the place its computer was found at
+    // by its number (or, known by its controller alone, taken at), and whether that controller was seen to list several
+    // computers, for the server it is known by (`machine`, as machine() says it then). Said a turn of the loop after it
+    // was found, after a knownAs of the same moment; only ever of this driver's own server.
+    void foundAt(const QString& machine, const QString& place, bool amongSeveral);
 
 private:
     using Reply = DeviceAsker::Reply;
@@ -422,12 +477,42 @@ private:
         // It changes something on the server: it goes only under the session under which the computer was last
         // found to be this one's (another server at the address does not know that session).
         bool command = false;
+        // A command: the place of the computer it was decided for, as the read that decided it found it. It goes only
+        // where the last judgement of which server answers, under its session, was of that very place; else, where a
+        // number is kept for the server, the controller's list of computers is read anew and its computer judged where
+        // it is now, and where that is another place, nothing is sent (outside review 2, 3.1: after a second sign-in
+        // the computer was found at its new place, and the command went to the old one). One that names none is never
+        // sent.
+        QString decidedFor;
+        // ...and where the judgement that lets it go rests on its computer being the only one its controller lists (it
+        // gives no number), a list read at or after this moment (this driver's clock) counts as read for it: the
+        // press's own, read as it began; -1: none read before it is asked, so the list is read anew right before it
+        // goes (outside review 2, 3.3: "listed alone" was taken from a list up to ten minutes old).
+        qint64 listedFrom = -1;
+        // Told each time just before it is handed to its line (after any sign-in or asking of which server answers it
+        // waited for, and again where it is asked again after a 401): an error, and it is not sent, and answered with
+        // it (a start into BIOS setup's queued mark, which must be written down first: review cx2 of outside review 2,
+        // L2 and L3). None: it goes.
+        std::function<std::optional<base::Error>()> goingOut;
+        // Answered by then (this driver's clock), or not at all (0: whenever). Never sent at or after it; where it is
+        // no command, its answer held to what is left of it when it goes; and where a sign-in, the read of which
+        // server answers before a command, or the same question asked again after a 401 would take it past that, it
+        // is answered then as too late (tooLateCode), and nothing of it goes after. A command already out is waited
+        // for as ever (outside review of the fuzz work, round 3, L3 and L4).
+        qint64 by = 0;
     };
+    // What a question with a time (Ask::by) came to: answered once, and whether it is out on its line just now.
+    struct Held;
     struct Tries {
         bool signedInAgain = false; // signed in anew after the controller refused the session
         int asked = 0;              // times which server answers was asked before a command (MOST_ASKED)
         bool refused = false;       // a command the controller answered 401 under its session (not done)
+        std::shared_ptr<Held> held; // (where it has a time)
+        bool listedAnew = false;    // a command: its controller's list read anew for it, and its computer judged
     };
+    // What a question with a time is answered with where its time is over before it could go: never sent.
+    static constexpr const char* tooLateCode = "too_late";
+    static base::Error tooLate(bool command);
     struct Pressing;
     struct Setup;
     struct WayAsking;
@@ -454,7 +539,19 @@ private:
         QString fans;
         // Its UpdateService, where its firmware inventory is (none: it names none).
         QString update;
+        // Its controller lists this computer alone (one member, and no more said of the list): only then does one that
+        // gives no number pass for the card's (judge; outside review of 0.2.0, 5.2).
+        bool alone = false;
     };
+    // The computer the card is for as its controller lists it (whichComputer): its place, whether it is listed alone,
+    // and when that list was read (this driver's clock: what a command's Ask::listedFrom is held to, outside review 2,
+    // 3.3).
+    struct Listed {
+        QString place;
+        bool alone = false;
+        qint64 at = 0;
+    };
+    struct ComputerSearch;
     // A fan of the newer shape as last read: when (this driver's clock), and the fan (none: what is there is
     // no fan that is fitted).
     struct FanRead {
@@ -470,6 +567,7 @@ private:
         base::Error why;
         bool compared = false; // the controller's number was compared just before it
         QJsonObject root;      // its root, read on the sign-in's own line just before it (none: not read)
+        int attempt = 1;       // the sign-in's line: the first, or the one made after the first was gone
     };
     // Reads what came of a sign-in that was out (`out`), and tells the pacing so: for this driver, and for
     // one that was let go of while it was out.
@@ -485,19 +583,25 @@ private:
 
     // The session to ask with: signs in where that is needed and allowed.
     void withToken(std::function<void(base::Result<QByteArray>)> done);
-    void signIn();
+    // `attempt`: the first line, or the second, made where the first was gone before the password could go on it.
+    void signIn(int attempt = 1);
+    // The line which controller answers was asked on is gone before the password went on it (outside review of 0.2.0,
+    // 5.4): asked once more on a new line; where that one goes too, nothing is sent, and that is said.
+    void signInLineGone(int attempt);
     // Another driver of this controller has the same password out, and nothing else stands: what it comes to is
     // waited for, and then looked at again; and whether that may be done now.
     void afterTheOtherSignIn();
     bool mayWaitForTheOther() const;
-    // Where the controller's number is kept: its service root read with no session, and its number compared,
-    // before the password goes (the web's `_same_controller`), on the line the sign-in then goes on: whether it
-    // was compared.
-    void sameController(DeviceAsker& line, std::function<void(base::Result<bool>)> done);
-    void sendSignIn(DeviceAsker* line, bool compared);
+    // Its service root read with no session before the password goes, on the line the sign-in then goes on: refused
+    // where it is no Redfish service root ("bad_response", also where no number is kept: outside review of 0.2.0,
+    // 5.1); and where the controller's number is kept, its number compared (the web's `_same_controller`): whether it
+    // was compared, and whether the root's answer said that its line ends with it (the password, which goes only on
+    // that line, cannot go then: 5.4).
+    void sameController(DeviceAsker& line, std::function<void(base::Result<bool>, bool lineEnds)> done);
+    void sendSignIn(DeviceAsker* line, bool compared, int attempt);
     // Its service root, which anybody may read, read on `line` with no session; "bad_response" where what
-    // answered is no service root just then.
-    void askRoot(DeviceAsker& line, bool vital, std::function<void(base::Result<QJsonObject>)> done);
+    // answered is no service root just then; and whether its answer said that its line ends with it.
+    void askRoot(DeviceAsker& line, bool vital, std::function<void(base::Result<QJsonObject>, bool lineEnds)> done);
     void signInCame(const SignInCame& came);
     void signedIn(const base::Result<QByteArray>& token);
     SignInPacing& pacing() const;
@@ -517,16 +621,32 @@ private:
     // One question under the session, signed in once more where the controller refused it.
     void request(const Ask& question, std::function<void(base::Result<Reply>)> done);
     void request(const Ask& question, std::function<void(base::Result<Reply>)> done, Tries tries);
+    // A command that is not to go on the judgement that stands (Ask::decidedFor, Ask::listedFrom): its controller's
+    // list read anew, its computer judged where it is now, and the command asked again where that is the place it was
+    // decided for; else nothing sent, and said.
+    void askAgainBefore(const Ask& question, std::function<void(base::Result<Reply>)> done, const Tries& tries);
     // A resource of the controller's at `path`: a detail where it is not vital (`detail`, Ask), or as said.
     void read(const QString& path, bool vital, std::function<void(base::Result<QJsonObject>)> done);
     void read(const QString& path, bool vital, bool detail, std::function<void(base::Result<QJsonObject>)> done);
+    // ...answered by `by` (Ask::by; 0: whenever).
+    void read(const QString& path, bool vital, bool detail, qint64 by,
+              std::function<void(base::Result<QJsonObject>)> done);
     // The first member of a collection the controller points to; empty where it lists none of its own.
     void firstOf(const QJsonValue& collection, bool vital, std::function<void(base::Result<QString>)> done);
     void finish(const std::shared_ptr<Identifying>& asking, const base::Result<Identity>& result);
 
-    // Where it keeps things, found once every so often (placesFreshMs).
+    // Where it keeps things, found once every so often (placesFreshMs); `anew`: found anew now, whatever was found
+    // before (a press, and a command asked again which server answers: outside review 2, 3.2 and 3.3).
     void find(std::function<void(base::Result<Places>)> done);
-    void placesOf(const QJsonObject& root, const QString& system, std::function<void(base::Result<Places>)> done);
+    void find(bool anew, std::function<void(base::Result<Places>)> done);
+    // Which of the computers its controller lists is the card's (`root`: its root): the only one; of several, the one
+    // that gives the number kept for it, read in turn (the first few), else the first, which the judge then refuses;
+    // and none where more than one gives that number (sameNumberTwice, outside review 2, 3.2).
+    void whichComputer(const QJsonObject& root, std::function<void(base::Result<Listed>)> done);
+    void nextComputer(const std::shared_ptr<ComputerSearch>& search);
+    // (`listedAt`: when its controller's list of computers was read, which stamps what is found: m_placesAt.)
+    void placesOf(const QJsonObject& root, const QString& system, bool alone, qint64 listedAt,
+                  std::function<void(base::Result<Places>)> done);
     void sensorPlaces(const std::shared_ptr<Places>& places, std::function<void()> done);
     // Every temperature and every fan, in whichever shape this controller has them: a detail of how it is.
     void sensors(const Places& places, std::function<void(QList<redfish::Temperature>, QList<redfish::Fan>)> done);
@@ -554,16 +674,27 @@ private:
         QByteArray token;
         QByteArray mark;
     };
-    // The computer at `place`, read and judged by the number it gives for itself under that very session.
+    // The computer at `place`, read and judged by the number it gives for itself under that very session; where `by`
+    // is given (this driver's clock; 0: as any question), held to that: its question (Ask::by), and the judge's own
+    // read of the controller's number after it (judge, controllerUnder).
     void checkedRead(const QString& place, bool vital, std::function<void(base::Result<QJsonObject>, Checked)> done);
+    void checkedRead(const QString& place, bool vital, qint64 by,
+                     std::function<void(base::Result<QJsonObject>, Checked)> done);
     // Whether the server that answered under `token` is the one this driver is for, by the number its computer
-    // gave there (`seen`, empty: none) and its controller's (the web's `_judge`).
-    void judge(const QString& seen, const QByteArray& token, std::function<void(base::Result<void>)> done);
+    // gave there (`seen`, empty: none) and its controller's (the web's `_judge`); `place`: where that computer is.
+    // `by`: where given, the reads it makes are held to that time (checkedRead's; outside review of the fuzz work,
+    // round 3, L3).
+    void judge(const QString& seen, const QByteArray& token, const QString& place,
+               std::function<void(base::Result<void>)> done, qint64 by = 0);
     // The controller's number as the controller that made the session `token` says it: its root's, where its
-    // manager, read under that session, names the same; and whether that could be asked under it.
-    void controllerUnder(const QByteArray& token, std::function<void(const QString& found, bool asked)> done);
+    // manager, read under that session, names the same; and whether that could be asked under it. `by`: as judge's.
+    void controllerUnder(const QByteArray& token, std::function<void(const QString& found, bool asked)> done,
+                         qint64 by = 0);
     // Another server answers at its address: said from now on, until this one answers again.
     base::Error another(const base::Error& why);
+    // Its server was found to answer under `token`, its computer at `place`; `alone`: by its being the only computer
+    // its controller listed, as it gave no number (m_checkedPlace and the rest).
+    void judgedAt(const QByteArray& token, const QString& place, bool alone);
     // Whether the answer just handed over came under the session its server was last judged under: what was read
     // under another (signed in anew meanwhile, maybe at another controller) is not taken for this server's.
     bool underJudged() const { return !m_checkedToken.isEmpty() && m_answeredToken == m_checkedToken; }
@@ -581,6 +712,16 @@ private:
                const QByteArray& mark, bool meant);
     // Something was done to it: what its card says is old now, and it is looked at again at the moments after.
     void followUp();
+    // Its card's question answered Yes (act "its_server"): the computer at its place read and judged once more, on its
+    // controller's list read anew, and where it still gives the number the card asked about, that number taken for the
+    // card (knownAs), with its controller's; else nothing taken.
+    // (answeredOf: the number its box asked about, as the card's status said it: Status::askedAbout.)
+    void takeItsNumber(const std::shared_ptr<Pressing>& pressing, const QString& answeredOf);
+    // ...and answered No (act "not_its_server"): that place refused from now on, kept with the card (ServerPlace among
+    // several), until the card is changed with its password typed. Taken while the card asks, and of any number it
+    // asked about while this driver lived (`m_askedOf`) once it asks no more: its box may stand open while the
+    // computer goes off (review cx2-3, M-a).
+    void notItsServer(const std::shared_ptr<Pressing>& pressing, const QString& answeredOf);
 
     // Start into BIOS setup, in steps (redfish_setup.cpp): the computer read and judged, and what goes out planned
     // (`meant`: the change is sent as meant whatever the state); the override set, and seen set; the restart; the
@@ -590,10 +731,25 @@ private:
     void setupRead(const std::shared_ptr<Setup>& setup, bool meant);
     void setTheOverride(const std::shared_ptr<Setup>& setup, const QByteArray& mark, bool meant);
     void lookForTheOverride(const std::shared_ptr<Setup>& setup, qint64 until);
+    // The task of a change the controller only queued, looked at `place` until it ends, until `until` and `looks` more
+    // times at the most (D1): the computer read before each look (followTheTask), then the task looked at
+    // (lookAtTheTask), each held to what is left of the time.
+    void followTheTask(const std::shared_ptr<Setup>& setup, const QString& place, qint64 until, int looks);
+    void lookAtTheTask(const std::shared_ptr<Setup>& setup, const QString& place, qint64 until, int looks);
+    // A read before the restart showed qKVM's own override kept for every boot: cleared, and nothing restarted.
+    void keptForEveryBoot(const std::shared_ptr<Setup>& setup);
+    // The followed task failed, or its monitor answered an error (`failure`, as the press says it): cleared, and
+    // nothing restarted; but an override that stood before the press and still shows is restarted into, `note` said
+    // beside it.
+    void failedAfterAll(const std::shared_ptr<Setup>& setup, const QString& failure, const QString& note);
     void restartIntoSetup(const std::shared_ptr<Setup>& setup);
     void watchTheStart(const std::shared_ptr<Setup>& setup);
     void setupEnds(const std::shared_ptr<Setup>& setup);
-    void clearTheOverride(const std::shared_ptr<Setup>& setup, bool meant,
+    void clearTheOverride(const std::shared_ptr<Setup>& setup, std::function<void(std::optional<QString> left)> then);
+    // ...after the controller refused it (412, 428) `refusals` times, the last for the mark `refused`: read and looked
+    // at again, and sent shown the fresh mark, "*" only for that very mark, none, or a second refusal, as the change is
+    // (setTheOverride; outside review of 0.2.0's Redfish fixes, L9).
+    void clearTheOverride(const std::shared_ptr<Setup>& setup, const QByteArray& refused, int refusals,
                           std::function<void(std::optional<QString> left)> then);
     void clearShown(const std::shared_ptr<Setup>& setup, qint64 until,
                     std::function<void(std::optional<QString> left)> then);
@@ -608,8 +764,15 @@ private:
     // left standing until a change of its can no longer come; a look that shows the override off.
     SetupOverrides& overrides() const;
     QDateTime wallAt(qint64 ms) const;
-    // Whether the note is written down: the change goes out only where it is (outside review of 0.1.2, C6).
-    [[nodiscard]] bool noteMayBeSet(const std::shared_ptr<Setup>& setup);
+    // Whether the note is written down: the change goes out only where it is (outside review of 0.1.2, C6); and
+    // whether there was no room for it at all (SetupOverrides::Noted::full).
+    [[nodiscard]] SetupOverrides::Noted noteMayBeSet(const std::shared_ptr<Setup>& setup);
+    // The controller queued its change, or may have: its record marked so at once (SetupOverrides::markQueued), and
+    // whether it is written down, which the press says where it is not (outside review of 0.2.0, area 5, MEDIUM 5.9).
+    void markTheQueue(const std::shared_ptr<Setup>& setup);
+    // ...and the mark this press put on as its change went taken off again: its answer said the change was not queued
+    // (made, refused, or never sent: outside review 2, 3.5).
+    void unmarkTheQueue(const std::shared_ptr<Setup>& setup);
     void settleTheNote(const std::shared_ptr<Setup>& setup);
     void lookedAtTheOverride(const QJsonObject& system);
     // This driver is let go of: each start into BIOS setup under way is over, its press told that the override may be
@@ -633,6 +796,11 @@ private:
     static base::Result<QByteArray> webCameOf(const WebSignIn& out, const base::Result<Reply>& reply, bool late);
     void consolePass(const std::shared_ptr<WayAsking>& asking);
     void askThePass(const std::shared_ptr<WayAsking>& asking);
+    // The web page's line which controller answers was asked on is gone before the password or the pass's question
+    // went on it (outside review of 0.2.0, 5.4): `again` once more, on a new line; where that one goes too, no way.
+    void wayLineGone(const std::shared_ptr<WayAsking>& asking, const std::function<void()>& again);
+    // A new line of its web page for `asking`, the one before let go of (where no web sign-in of it is out on it).
+    void freshWayLine(const std::shared_ptr<WayAsking>& asking);
     void wayHanded(const std::shared_ptr<WayAsking>& asking, ConsoleWay way);
     void noWay(const std::shared_ptr<WayAsking>& asking, const base::Error& why);
     // This driver is let go of: every asking under way is told "stopped", and what it holds of its web page given back.
@@ -661,6 +829,20 @@ private:
     QString m_machine;
     QByteArray m_answeredToken;
     QByteArray m_checkedToken;
+    // ...and of that judgement: the place of the computer it was of; whether it rests on that computer being the only
+    // one its controller listed (it gave no number); and when that list was read (this driver's clock; -1: none). A
+    // command goes only on these (Ask::decidedFor, Ask::listedFrom; outside review 2, 3.1 and 3.3).
+    QString m_checkedPlace;
+    bool m_checkedAlone = false;
+    qint64 m_checkedListedAt = -1;
+    // ...and that judgement let reads go and nothing else: a card known by its controller alone whose computer, where
+    // it was taken, gives a number of its own now (`m_offered`), which its card asks about (the owner's decision of
+    // 2026-11-22, asksWhetherItsServer; its Yes, takeItsNumber).
+    bool m_checkedAsking = false;
+    std::optional<QString> m_offered;
+    // ...and the numbers its card asked about while this driver lived, the last few: a No of one of them is taken once
+    // the card asks no more (notItsServer; review cx2-3, M-a). Let go of by a Yes, which takes a number for the card.
+    QStringList m_askedOf;
     QList<QByteArray> m_controllerTokens;
     std::optional<std::pair<QString, QByteArray>> m_rootSeen;
     // Its root as read on a sign-in's own line just before the password went (for the sign-in to take along), and
@@ -668,6 +850,10 @@ private:
     QJsonObject m_rootBeforeSignIn;
     std::optional<std::pair<QJsonObject, QByteArray>> m_rootOfSession;
     std::optional<base::Error> m_other;
+    // Where its computer was last found by the number kept for it, and whether its controller was seen to list several
+    // (ServerPlace: from the card, then as found): one that gives no number at another place, or of a controller seen
+    // to list several, is not taken for it (outside review of 0.2.0, 5.2, and of its Redfish fixes, M1).
+    ServerPlace m_serverPlace;
     std::optional<Places> m_places;
     qint64 m_placesAt = 0;
     bool m_toldItsCertificate = false;
@@ -721,14 +907,37 @@ private:
     // Its server's screen (redfish_screen.cpp): made when it is first wanted, and what it showed handed to every
     // live of it; why it is not shown, and until when. It goes first as the driver goes, its console's goodbye
     // said on a line the program keeps until it has gone: at the program's end while the loop still runs
-    // (main.cpp sends the deferred deletions before it waits for the goodbyes; plan-m7 1b-i, item 14).
-    ServerScreen& screen();
+    // (main.cpp sends the deferred deletions before it waits for the goodbyes; plan-m7 1b-i, item 14). AMI's console
+    // (ServerScreen), or OpenBMC's where its manager announces one (RfbScreen): which, by what its manager said last;
+    // one made before the controller turned out the other is let go of, every live of it ended.
+    ServerConsole& screen();
+    // What its manager said: whether it runs OpenBMC with a console (where it is), and that it was read at all.
+    void controllerSaid(const QJsonObject* manager);
+    // A way into OpenBMC's console (the web's rfb_socket): under the session its computer was found to be this one's
+    // under, which server answers asked first where a number is kept; the session's token is the way in.
+    void rfbWay(std::function<void(base::Result<RfbScreen::WayIn>)> done);
+    // Why AMI's web page is not offered the password for a console: the controller is OpenBMC's, or what it is has not
+    // been read yet and its root does not say it is AMI's (the web's _openbmc_known).
+    std::optional<base::Error> notAmisConsole() const;
+    // It is known to have no console this program reads.
+    bool noConsoleHere() const;
     void shownOnTheScreen(const bmc::aspeed::Picture& picture, std::span<const bmc::aspeed::Rect> changed);
     void notedOnTheScreen(const base::Error& why);
     std::optional<base::Error> noScreen() const;
     bool hasScreen() const;
+    // What keeps its screen, its keys and its texts from it, whatever its console could do: another server at its
+    // address, or a computer its card asks about (review cx2-2 of outside review 2, M1); none where nothing does. And
+    // where its card begins to ask: its console let go of, a turn of the loop later, with every live and typing of it;
+    // and so where it is told No (letGoOfTheScreen, wherever something keeps the screen from it then).
+    std::optional<base::Error> keptFromTheScreen() const;
+    void askingFromNow();
+    void letGoOfTheScreen();
     void typeOnTheScreen(const Action& what, std::function<void(base::Result<Done>)> done);
-    std::unique_ptr<ServerScreen> m_screen;
+    std::unique_ptr<ServerConsole> m_screen;
+    bool m_screenIsRfb = false;
+    QString m_rfbConsole;           // where OpenBMC's console is, as its manager announces it; empty: none
+    bool m_controllerKnown = false; // its manager was read (or it lists none)
+    bool m_isOpenBmc = false; // its manager says it runs OpenBMC (its console is RFB or none, never AMI's web page)
     QList<QPointer<ServerLive>> m_lives;
     std::optional<base::Error> m_noScreen;
     qint64 m_noScreenUntil = 0;

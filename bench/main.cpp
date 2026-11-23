@@ -29,6 +29,7 @@
 #include "clips.h"
 #include "feeder.h"
 #include "meter.h"
+#include "server_feeder.h"
 
 namespace qkvm::bench {
 namespace {
@@ -39,6 +40,11 @@ constexpr const char* usage =
     "  --data FOLDER        where tools\\make_testdata.ps1 put the pictures\n"
     "  --source NAME        a file (pattern-720p15.h264) or a folder of JPEGs (desktop-preview-480) in it;\n"
     "                       given several times, the tiles take them in turn\n"
+    "  --server KIND        instead of --data and --source: one server's own screen, made here in ASPEED's\n"
+    "                       format, read by the program's decoder and drawn from what changed of it:\n"
+    "                       busy-1080p, busy-2048 (every block of every frame new) or clock-1080p\n"
+    "                       (a text console where a clock ticks)\n"
+    "  --fps N              frames a second the server sends (30)\n"
     "  --tiles N            how many tiles (16)\n"
     "  --decoding HOW       auto, card or software (auto)\n"
     "  --large N            how many of the tiles count as shown large, which with auto puts them on the card (0)\n"
@@ -58,6 +64,9 @@ constexpr const char* usage =
 struct Options {
     std::filesystem::path data;
     std::vector<std::string> sources;
+    bool server = false;
+    ServerScreenKind serverKind = ServerScreenKind::Busy1080;
+    int fps = 30;
     int tiles = 16;
     engine::DecodingChoice decoding = engine::DecodingChoice::Automatic;
     int large = 0;
@@ -103,6 +112,11 @@ bool read(int count, char** arguments, Options& options)
             options.data = value();
         } else if (name == "--source") {
             options.sources.emplace_back(value());
+        } else if (name == "--server") {
+            understood = serverScreenKind(value(), options.serverKind);
+            options.server = understood;
+        } else if (name == "--fps") {
+            understood = number(value(), options.fps) && options.fps >= 1 && options.fps <= 240;
         } else if (name == "--tiles") {
             understood = number(value(), options.tiles) && options.tiles >= 1 && options.tiles <= 256;
         } else if (name == "--decoding") {
@@ -212,6 +226,7 @@ struct Totals {
     std::uint64_t decoded = 0;
     std::uint64_t replaced = 0;
     std::uint64_t shown = 0;
+    std::uint64_t uploadedBytes = 0;
     int onTheCard = 0;
     int inSoftware = 0;
     double decodeMs = 0;
@@ -235,6 +250,7 @@ Totals totalsOf(const std::vector<engine::Stream*>& streams)
         totals.decoded += stats.decoded;
         totals.replaced += stats.replaced;
         totals.shown += stats.shown;
+        totals.uploadedBytes += stats.uploadedBytes;
         totals.onTheCard += stats.decoding == engine::Decoding::OnTheCard ? 1 : 0;
         totals.inSoftware += stats.decoding == engine::Decoding::InSoftware ? 1 : 0;
         if (stats.decodeMs > 0) {
@@ -333,10 +349,12 @@ int run(const Options& options)
         }
         return 0;
     }
-    if (options.data.empty() || options.sources.empty()) {
+    if (!options.server && (options.data.empty() || options.sources.empty())) {
         std::fputs(usage, stderr);
         return 2;
     }
+    // A server's screen is one tile, shown large.
+    const int tiles = options.server ? 1 : options.tiles;
 
     std::map<std::string, Clip> clips;
     for (const std::string& name : options.sources) {
@@ -393,7 +411,7 @@ int run(const Options& options)
     std::vector<engine::Stream*> streams;
     std::vector<Player> players;
     double wantedPerSecond = 0;
-    for (int index = 0; index < options.tiles; ++index) {
+    for (int index = 0; index < tiles && !options.server; ++index) {
         const Clip& clip = clips.at(options.sources[static_cast<std::size_t>(index) % options.sources.size()]);
         engine::Stream& stream = scene->add(static_cast<engine::StreamId>(index + 1), clip.codec);
         stream.shownAt({}, index < options.large ? engine::Importance::ShownLarge : engine::Importance::Preview);
@@ -401,21 +419,32 @@ int run(const Options& options)
         wantedPerSecond += clip.perSecond;
         players.push_back({&clip, &stream});
     }
-    scene->place(grid(options.tiles, state.size));
+    if (options.server) {
+        engine::Stream& stream = scene->add(1, engine::Codec::Rgb);
+        stream.shownAt({}, engine::Importance::ShownLarge);
+        streams.push_back(&stream);
+        wantedPerSecond = options.fps;
+    }
+    scene->place(grid(tiles, state.size));
 
     Report report(options.report);
     std::string sources;
     for (const std::string& name : options.sources) {
         sources += (sources.empty() ? "" : ",") + name;
     }
+    if (options.server) {
+        sources = options.serverKind == ServerScreenKind::Busy1080   ? "server-busy-1080p"
+                  : options.serverKind == ServerScreenKind::Busy2048 ? "server-busy-2048"
+                                                                     : "server-clock-1080p";
+    }
     report.line(formatted(
         "run tiles=%d sources=%s decoding=%s large=%d card_decoders=%d pace=%s window=%dx%d card_decodes_h264=%d",
-        options.tiles, sources.c_str(),
+        tiles, sources.c_str(),
         options.decoding == engine::DecodingChoice::GraphicsCard ? "card"
         : options.decoding == engine::DecodingChoice::Software   ? "software"
                                                                  : "auto",
-        options.large, options.cardDecoders, options.atOnce ? "at_once" : "monitor", state.size.width,
-        state.size.height, gpu->decodesH264() ? 1 : 0));
+        options.server ? 1 : options.large, options.cardDecoders, options.atOnce ? "at_once" : "monitor",
+        state.size.width, state.size.height, gpu->decodesH264() ? 1 : 0));
     // What the adapter calls itself stays on this PC: the report is not a file that is kept.
     report.line("adapter " + gpu->adapterName());
     report.line(formatted("card_budget_mb=%.0f", static_cast<double>(gpu->memory().budgetBytes) / 1048576.0));
@@ -439,11 +468,18 @@ int run(const Options& options)
     double sumDrawing = 0;
     double sumShownPerSecond = 0;
     double sumDecodedPerSecond = 0;
+    double sumUploadedPerSecond = 0;
+    double sumFramesPerSecond = 0;
     std::uint64_t mostCardBytes = 0;
     std::uint64_t mostCommitted = 0;
+    ServerCounts lastServer;
 
     {
-        const Feeder feeder(std::move(players));
+        // The made clips handed in at a network's pace, or a server's screen read from its frames.
+        const std::unique_ptr<Feeder> feeder = options.server ? nullptr : std::make_unique<Feeder>(std::move(players));
+        const std::unique_ptr<ServerFeeder> server =
+            options.server ? std::make_unique<ServerFeeder>(options.serverKind, options.fps, *streams.front())
+                           : nullptr;
         const engine::Surface::Pace pace =
             options.atOnce ? engine::Surface::Pace::AtOnce : engine::Surface::Pace::WithTheMonitor;
         while (!state.closed.load()) {
@@ -455,7 +491,7 @@ int run(const Options& options)
             }
             if (state.resized.exchange(false)) {
                 surface->resize(state.size);
-                scene->place(grid(options.tiles, state.size));
+                scene->place(grid(tiles, state.size));
             }
 
             if (!options.atOnce) {
@@ -488,6 +524,11 @@ int run(const Options& options)
                 const std::uint64_t drawn = draws - drawsAtLastLine;
                 const double shownPerSecond = static_cast<double>(totals.shown - last.shown) / span;
                 const double decodedPerSecond = static_cast<double>(totals.decoded - last.decoded) / span;
+                // Copied to the card from this program's memory (what software decoded, a server's screen).
+                const double uploadedPerSecond =
+                    static_cast<double>(totals.uploadedBytes - last.uploadedBytes) / span / 1048576.0;
+                const ServerCounts serverNow = server != nullptr ? server->counts() : ServerCounts{};
+                const double framesPerSecond = static_cast<double>(serverNow.frames - lastServer.frames) / span;
                 report.line(formatted(
                     "at=%.0f processor=%.1f decoding=%.1f drawing=%.1f card_mb=%.0f committed_mb=%.0f handles=%u "
                     "window_objects=%u "
@@ -506,6 +547,21 @@ int run(const Options& options)
                     static_cast<double>(drawn) / span, drawn > 0 ? drawingMs / static_cast<double>(drawn) : 0.0,
                     static_cast<unsigned long long>(surface->timesUnseen()),
                     static_cast<unsigned long long>(gpu->timesRecovered())));
+                report.line(
+                    formatted("at=%.0f uploaded_mb_s=%.2f", static_cast<double>(now - began) / 1e6, uploadedPerSecond));
+                if (server != nullptr) {
+                    // The console's thread: frames read a second, what reading one and making its packet took, and
+                    // what was handed to the engine.
+                    report.line(formatted(
+                        "at=%.0f server frames_s=%.1f frame_mb_s=%.2f packet_mb_s=%.2f read_ms=%.2f pack_ms=%.2f "
+                        "wholes=%llu behind=%llu refused=%llu",
+                        static_cast<double>(now - began) / 1e6, framesPerSecond,
+                        static_cast<double>(serverNow.frameBytes - lastServer.frameBytes) / span / 1048576.0,
+                        static_cast<double>(serverNow.packetBytes - lastServer.packetBytes) / span / 1048576.0,
+                        serverNow.readMs, serverNow.packMs, static_cast<unsigned long long>(serverNow.wholes),
+                        static_cast<unsigned long long>(serverNow.behind),
+                        static_cast<unsigned long long>(serverNow.refused)));
+                }
                 if (++lines > 2) {
                     ++counted;
                     sumProcessor += cost.processorPercent;
@@ -513,10 +569,13 @@ int run(const Options& options)
                     sumDrawing += cost.drawingPercent;
                     sumShownPerSecond += shownPerSecond;
                     sumDecodedPerSecond += decodedPerSecond;
+                    sumUploadedPerSecond += uploadedPerSecond;
+                    sumFramesPerSecond += framesPerSecond;
                 }
                 mostCardBytes = std::max(mostCardBytes, memory.usedBytes);
                 mostCommitted = std::max(mostCommitted, cost.committedBytes);
                 last = totals;
+                lastServer = serverNow;
                 drawsAtLastLine = draws;
                 drawingMs = 0;
                 nextLine = now + static_cast<std::int64_t>(options.every) * 1'000'000;
@@ -545,6 +604,16 @@ int run(const Options& options)
         totals.decodeMs, totals.uploadMs, totals.arrivedToShownMs, totals.arrivedToShownMaxMs,
         static_cast<unsigned long long>(surface->timesUnseen()),
         static_cast<unsigned long long>(gpu->timesRecovered())));
+    report.line(formatted("summary uploaded_mb_s=%.2f uploaded_mb=%.1f", sumUploadedPerSecond / runs,
+                          static_cast<double>(totals.uploadedBytes) / 1048576.0));
+    if (options.server) {
+        report.line(formatted("summary server frames_s=%.1f frames=%llu behind=%llu refused=%llu read_ms=%.2f "
+                              "pack_ms=%.2f",
+                              sumFramesPerSecond / runs, static_cast<unsigned long long>(lastServer.frames),
+                              static_cast<unsigned long long>(lastServer.behind),
+                              static_cast<unsigned long long>(lastServer.refused), lastServer.readMs,
+                              lastServer.packMs));
+    }
     // How long pictures took from arriving to being on the screen, as shares of all that were shown.
     std::string spread = "arrived_to_shown";
     const double all = static_cast<double>(std::max<std::uint64_t>(totals.shown, 1));

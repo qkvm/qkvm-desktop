@@ -12,16 +12,18 @@ libdatachannel are DLLs; the WebRTC support libraries below are linked into data
 | zlib, inside avcodec (for the PNG decoder) | 1.3.2 | Zlib (its notice: `licenses/zlib.txt`) | Unpacking PNG pictures | https://github.com/madler/zlib/releases/tag/v1.3.2; also with every release's third-party sources |
 | The MinGW-w64 runtime, inside avcodec and avutil: the start-up and support code the MinGW-w64 compiler links into every library it makes | 11.0.1, as Ubuntu 24.04 packages it (mingw-w64-x86-64-dev 11.0.1-3build1) | ZPL-2.1, and the licences of its other parts (its notice, with every part's: `licenses/mingw-w64-runtime.txt`) | Starting and running the FFmpeg DLLs | https://www.mingw-w64.org/; https://sourceforge.net/projects/mingw-w64/ |
 | libgcc, GCC's support library, inside avcodec and avutil (linked in with `-static-libgcc`) | GCC 13.2.0, as Ubuntu 24.04 packages it (gcc-mingw-w64-x86-64-win32 13.2.0-6ubuntu1+26.1) | GPL-3.0-or-later with the GCC Runtime Library Exception 3.1, under which what GCC compiles may be handed out on terms of its maker's choosing: it asks for no notice | The compiler's own helpers, such as those of arithmetic and of the stack | https://gcc.gnu.org/ |
+| For Windows on ARM (the ARM64 package), the MinGW-w64 runtime inside avcodec and avutil is the one llvm-mingw builds for ARM64 | 15.0.0, as llvm-mingw 20261104 carries it | ZPL-2.1, and the licences of its other parts (its notice, with every part's: `licenses/mingw-w64-runtime.txt` of the ARM64 package, `licenses/arm64/` here) | Starting and running the FFmpeg DLLs | https://github.com/mstorsjo/llvm-mingw/releases/tag/20261104; https://www.mingw-w64.org/ |
+| For Windows on ARM, LLVM's compiler-rt builtins inside avcodec and avutil, in place of libgcc | LLVM 23.1.5, as llvm-mingw 20261104 carries it | Apache-2.0 WITH LLVM-exception, under whose exception what the compiler embeds in a program may be handed out without the licence's conditions of notice: it asks for none | The compiler's own helpers | https://github.com/llvm/llvm-project |
 | Unicode CLDR's keyboard data (the layouts a JetKVM's computer may use), as the web's `app/qkvm/layouts.py` has it, copied to `core/data/jetkvm_layouts.py` and made into tables at build time | release 43 | Unicode License (its notice: `licenses/Unicode-CLDR.txt`) | Typing a text on a JetKVM in its computer's keyboard layout | https://github.com/unicode-org/cldr (keyboards/windows, keyboards/chromeos) |
-| Microsoft Visual C++ x64 runtime | From the installed Visual Studio 2022 redistributable directory; exact bytes in the package manifest | Microsoft redistributable software terms | Running the MSVC-built application and Qt | https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution |
-| Inno Setup's setup and uninstall program: inside the setup (`qKVM-Desktop-<version>-windows-x64-setup.exe`), and left by it in the program's folder as `unins000.exe`; not in the portable ZIP | 6.7.4 | Inno Setup License (its notice: `licenses/Inno-Setup-license.txt`). It carries zlib's decompressor (Zlib, `licenses/zlib.txt`) and the LZMA SDK's (public domain), and RemObjects Pascal Script (below) | Installing, upgrading and uninstalling the program | https://jrsoftware.org/isinfo.php; https://github.com/jrsoftware/issrc/tree/is-6_7_4 |
+| Microsoft Visual C++ x64 runtime (its ARM64 runtime in the ARM64 package) | From the installed Visual Studio 2022 redistributable directory; exact bytes in the package manifest | Microsoft redistributable software terms | Running the MSVC-built application and Qt | https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution |
+| Inno Setup's setup and uninstall program: inside the setup (`qKVM-Desktop-<version>-windows-setup.exe`, one for x64 and Windows on Arm), and left by it in the program's folder as `unins000.exe`; not in the portable ZIP | 6.7.4 | Inno Setup License (its notice: `licenses/Inno-Setup-license.txt`). It carries zlib's decompressor (Zlib, `licenses/zlib.txt`) and the LZMA SDK's (public domain), and RemObjects Pascal Script (below) | Installing, upgrading and uninstalling the program | https://jrsoftware.org/isinfo.php; https://github.com/jrsoftware/issrc/tree/is-6_7_4 |
 | RemObjects Pascal Script, inside Inno Setup's setup and uninstall program: the setup and its uninstaller are made using RemObjects Pascal Script, which can be found at https://github.com/remobjects/pascalscript | as Inno Setup 6.7.4 carries it | Its own licence (zlib-like; its notice: `licenses/RemObjects-Pascal-Script-license.md`) | Running the setup's own script (the update mode's wait) | https://github.com/remobjects/pascalscript |
 
 Which builds these are, to the byte, is written down in [tools/fetch_qt.ps1](tools/fetch_qt.ps1),
 [tools/fetch_inno.ps1](tools/fetch_inno.ps1) and
 [tools/build_ffmpeg.ps1](tools/build_ffmpeg.ps1): each archive with its size and SHA-256 (the compiler
-FFmpeg is built with too, as Ubuntu packages it; it is a tool and does not ship, but for the runtime and
-libgcc it links into the two DLLs, above). A development build may
+FFmpeg is built with too, as Ubuntu packages it, and for ARM64 llvm-mingw's; it is a tool and does not ship, but
+for the runtime and the compiler's helpers it links into the two DLLs, above). A development build may
 use the FFmpeg of [tools/fetch_ffmpeg.ps1](tools/fetch_ffmpeg.ps1) instead, which also carries
 `swresample-7.dll`; a release never does (`tools/audit_release.ps1 -Beta` refuses it).
 
@@ -36,14 +38,21 @@ with a runtime linked into a library that the table above does not name or whose
 | Qt | `Qt6Core.dll`, `Qt6Gui.dll`, `Qt6Network.dll`, `Qt6OpenGL.dll` (Qt Quick links it, though nothing is drawn with OpenGL), `Qt6Qml.dll`, `Qt6QmlMeta.dll`, `Qt6QmlModels.dll`, `Qt6QmlWorkerScript.dll`, `Qt6Quick.dll`, `Qt6QuickLayouts.dll`, `Qt6QuickShapes.dll`, `Qt6QuickTemplates2.dll`, `Qt6Svg.dll` |
 | Qt's plugins | `plugins/platforms/qwindows.dll`, `plugins/tls/qschannelbackend.dll` (TLS by Windows' own Schannel), `plugins/networkinformation/qnetworklistmanager.dll`, `plugins/iconengines/qsvgicon.dll`, `plugins/imageformats/qgif.dll`, `qico.dll`, `qjpeg.dll`, `qsvg.dll` |
 | Qt's QML modules | `qml/QtQml/qmlplugin.dll`, `qml/QtQml/Models/modelsplugin.dll`, `qml/QtQml/WorkerScript/workerscriptplugin.dll`, `qml/QtQuick/qtquick2plugin.dll`, `qml/QtQuick/Layouts/qquicklayoutsplugin.dll`, `qml/QtQuick/Shapes/qmlshapesplugin.dll`, `qml/QtQuick/Templates/qtquicktemplates2plugin.dll` |
-| FFmpeg, with zlib inside avcodec, and the MinGW-w64 runtime and libgcc inside both | `avcodec-63.dll`, `avutil-61.dll` (and `swresample-7.dll` in a development build only) |
+| FFmpeg, with zlib inside avcodec, and the MinGW-w64 runtime and libgcc (for ARM64, compiler-rt's builtins) inside both | `avcodec-63.dll`, `avutil-61.dll` (and `swresample-7.dll` in a development build only) |
 | libdatachannel, with libjuice, libsrtp, usrsctp, plog and Mbed TLS linked in | `datachannel.dll` |
-| Microsoft Visual C++ runtime | `concrt140.dll`, `msvcp140.dll`, `msvcp140_1.dll`, `msvcp140_2.dll`, `msvcp140_atomic_wait.dll`, `msvcp140_codecvt_ids.dll`, `vccorlib140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, `vcruntime140_threads.dll` (Microsoft's redistributable files, signed by Microsoft, unchanged) |
+| Microsoft Visual C++ runtime | `concrt140.dll`, `msvcp140.dll`, `msvcp140_1.dll`, `msvcp140_2.dll`, `msvcp140_atomic_wait.dll`, `msvcp140_codecvt_ids.dll`, `vccorlib140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll` (in the x64 package only: ARM64 has no such second part of the runtime), `vcruntime140_threads.dll` (Microsoft's redistributable files, signed by Microsoft, unchanged) |
 
 No Direct3D file ships. The program draws with Direct3D 11 alone (`ui/main.cpp`): the shader compiler
 Qt may ask for, `d3dcompiler_47.dll`, is part of Windows since Windows 8.1, and Direct3D 12's
 `dxcompiler.dll` and `dxil.dll` are never loaded. `tools/package.ps1` tells Qt's deployment tool to
 leave all three out.
+
+What each of these files is built with against the misuse of its memory is read from its own bytes, and
+held by [tools/image-protections.json](tools/image-protections.json) (SPEC.md section 3 says it in words).
+On both kinds every file has ASLR (of high entropy) and DEP; our program, Qt and the Visual C++ runtime have
+CFG, FFmpeg and libdatachannel not. On x64 our program, Qt and the runtime are marked fit for the
+processor's shadow stack. On ARM64 our program and the runtime sign their return addresses with the
+processor's pointer authentication; Qt's ARM64 build does not, so its returns have no guard there.
 
 The parts of other projects that Qt carries inside these files (PCRE2, zlib, FreeType, HarfBuzz,
 libpng, libjpeg-turbo, double-conversion, md4c and others), each with its licence, version, copyright
@@ -81,6 +90,10 @@ the same approved Microsoft C/C++ runtime linked statically so recovery does not
 depend on Qt or a replaced runtime directory. It adds no downloaded dependency.
 The application continues to use app-local redistributable runtime DLLs. Both
 forms remain subject to Microsoft's redistribution terms and the release audit.
+qKVM Setup's update check (`qkvm-update-check.exe`, which the setup carries and puts in
+the program's place while an update sets the earlier version aside) is built the same
+way: Windows SDK APIs and the same Microsoft C/C++ runtime linked statically, so that it
+runs where none of the package's libraries is. It adds no dependency either.
 
 `tools/package.ps1` creates the self-contained folder and ZIP. The Microsoft runtime files keep
 Microsoft's own signatures and are listed by hash in the manifest. Microsoft's

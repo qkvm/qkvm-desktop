@@ -50,7 +50,7 @@ Push-Location $DesktopRoot
 try {
     & {
         Write-Output "QKVM Desktop, checked on $(Get-Date -Format 'yyyy-MM-dd HH:mm') with the tools of $env:QKVM_BUILD_ENVIRONMENT"
-        $parts = 'base', 'engine', 'input', 'bmc', 'core', 'ui', 'bench' | Where-Object { Test-Path -LiteralPath $_ }
+        $parts = 'base', 'engine', 'input', 'bmc', 'rfb', 'core', 'ui', 'bench' | Where-Object { Test-Path -LiteralPath $_ }
         $cpp = @(Get-ChildItem -Path $parts -Recurse -File -Include *.h, *.cpp | ForEach-Object FullName)
         $qml = @(Get-ChildItem -Path $parts -Recurse -File -Include *.qml | ForEach-Object FullName)
 
@@ -72,7 +72,18 @@ try {
             if ($LASTEXITCODE -eq 0) { python (Join-Path $PSScriptRoot 'check_signs.py') }
         }
 
-        Step 'clang-format' { clang-format --version; clang-format --dry-run --Werror $cpp }
+        # Windows takes a command line of at most 32,767 characters, and the tree's files outgrew it on
+        # 2026-11-15 (34,452 with 0.1.2 merged into 0.2.0; PowerShell then says only that the program
+        # "failed to run"). So they are given a hundred at a time, and a part that fails fails the step.
+        Step 'clang-format' {
+            clang-format --version
+            $worst = 0
+            for ($at = 0; $at -lt $cpp.Count; $at += 100) {
+                clang-format --dry-run --Werror $cpp[$at..([Math]::Min($at + 99, $cpp.Count - 1))]
+                if ($LASTEXITCODE -ne 0) { $worst = $LASTEXITCODE }
+            }
+            $global:LASTEXITCODE = $worst
+        }
 
         Step 'update release tools' {
             try {
@@ -99,6 +110,9 @@ try {
 
         Step 'release audit tools' {
             try {
+                # (Its setups are made by tools/build_setup.ps1 with the pinned Inno Setup, fetched once into .deps and
+                # unpacked there, never installed, as the Windows setup step below has it; outside review of 0.2.0, 1.9.)
+                & (Join-Path $PSScriptRoot 'fetch_inno.ps1') 6>&1
                 & (Join-Path $PSScriptRoot 'test_release_audit.ps1')
                 $global:LASTEXITCODE = 0
             } catch {
@@ -109,6 +123,10 @@ try {
 
         # What the release build refuses before it begins (it builds and fetches nothing here).
         Step 'release build checks' { pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_build_release.ps1') }
+        # What each program and library that ships is built with against the misuse of its memory (made-up images).
+        Step 'image protection checks' { pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_image_protections.ps1') }
+        # What libdatachannel and Mbed TLS are built from, and the record of a build (made-up trees; nothing built).
+        Step 'WebRTC source checks' { pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_webrtc_sources.ps1') }
         # The release files of a run, and the check of what is published (made-up runs; a stand-in host on 127.0.0.1).
         Step 'release files checks' { pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_release_files.ps1') }
         Step 'published release checks' { pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_verify_release.ps1') }
@@ -209,6 +227,20 @@ try {
             }
         }
 
+        # libFuzzer's targets of the readers of what a device or a server sends, each for a bounded time from the seeds
+        # the tests' own inputs make (tools/fuzz.ps1: the fuzz preset's own build on every core, then half the fast
+        # cores at once, as the tests are held to them and as the step was measured, six minutes over the rounds that
+        # takes): anything one finds fails the step, its input kept (DESIGN.md section 8). It passes only where
+        # fuzz.ps1 ended well and said, as its last line, that every target ran its time and found nothing (outside
+        # review of FUZZ, L1 and L3).
+        Step 'fuzz' {
+            pwsh -NoProfile -File (Join-Path $PSScriptRoot 'fuzz.ps1') -Minutes 6 -FastCores | ForEach-Object { $_; $last = $_ }
+            if ($LASTEXITCODE -eq 0 -and $last -ne 'No fuzz target found anything.') {
+                Write-Output '*** fuzz.ps1 ended well without saying that every target ran its time and found nothing'
+                $global:LASTEXITCODE = 1
+            }
+        }
+
         if ($built -contains 'release') {
             Step 'Windows runnable package' {
                 try {
@@ -230,7 +262,9 @@ try {
                         $inno = Join-Path $DesktopRoot ".deps\inno\$InnoVersion"
                         $package = Get-Content -LiteralPath 'build/packages/latest.json' -Raw | ConvertFrom-Json
                         $setup = Join-Path $DesktopRoot "build\setups\$(Get-Date -Format 'yyyyMMdd-HHmmss-fff')"
-                        pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build_setup.ps1') -PackageDirectory $package.folder -Inno $inno -OutputDirectory $setup -ScanTwin
+                        # (With qKVM Setup's update check, this release build's own: the setup carries it.)
+                        $updateCheck = Join-Path $DesktopRoot 'build\release\bin\qkvm-update-check.exe'
+                        pwsh -NoProfile -File (Join-Path $PSScriptRoot 'build_setup.ps1') -PackageDirectory $package.folder -Inno $inno -OutputDirectory $setup -UpdateCheck $updateCheck -ScanTwin
                         if ($LASTEXITCODE -ne 0) { throw "The setup could not be made (exit $LASTEXITCODE)." }
                         pwsh -NoProfile -File (Join-Path $PSScriptRoot 'test_setup.ps1') -SetupDirectory $setup -PackageDirectory $package.folder -Inno $inno
                     } catch {
@@ -286,6 +320,14 @@ try {
             }
         }
 
+        # The steps that must have run, wherever a later edit puts them (in a branch that never runs, say): one that never
+        # ran fails the check (outside review of FUZZ, L1).
+        foreach ($must in 'fuzz', 'review follow-up guards') {
+            if (-not ($steps | Where-Object { $_ -like "${must}: *" })) {
+                $failed.Add("$must (never ran)")
+                Write-Output "*** $must never ran"
+            }
+        }
         Write-Output '' 'Steps:'
         $steps | ForEach-Object { Write-Output "  $_" }
         Write-Output ''

@@ -85,6 +85,9 @@ public:
         // Its row is opened: what stands behind it is on show.
         OpenRole,
         HasTextRole,
+        // It is a VNC server (its address is a vnc:// or vncs:// one): what is said beside its certificate is said
+        // in its family's words (outside review c9a-4, L3).
+        OfAVncServerRole,
     };
 
     explicit LaidOutList(QObject* parent = nullptr);

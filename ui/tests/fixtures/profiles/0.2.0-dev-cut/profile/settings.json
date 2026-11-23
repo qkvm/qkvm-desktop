@@ -1,0 +1,287 @@
+{
+    "actions": [
+        {
+            "changed": 0,
+            "danger": true,
+            "enter": false,
+            "id": "465fa30b",
+            "keys": "ControlLeft,AltLeft,Delete",
+            "kind": "keys",
+            "name": "Restart (Ctrl+Alt+Del)",
+            "writing": ""
+        },
+        {
+            "changed": 0,
+            "danger": false,
+            "enter": true,
+            "id": "20af154c",
+            "keys": "",
+            "kind": "text",
+            "name": "Type the BIOS password",
+            "writing": "a:5cc65a07ce3aaba9"
+        },
+        {
+            "changed": 0,
+            "danger": false,
+            "enter": false,
+            "id": "403389d4",
+            "keys": "",
+            "kind": "text",
+            "name": "Type the long note",
+            "writing": "a:a9f19496d7f765ec"
+        }
+    ],
+    "certificates": {
+        "198.51.100.20:443": "47ba65300ddbc007bca9cde92a4498365c3fef905c5729d9d9b733924b3202b2"
+    },
+    "check_updates": false,
+    "favorites": [
+        {
+            "machine": "8abfd423",
+            "scope": "pc"
+        },
+        {
+            "machine": "a",
+            "scope": "server-419f3afcbef0771291790fd8d16d479fe7b9816a4c847793b8e9ee29ac8e5d7b"
+        }
+    ],
+    "graphics_card": "power-saving",
+    "hardware_decoding": "off",
+    "kvms": [
+        {
+            "address": "https://192.0.2.10",
+            "asked": true,
+            "certificate": "e623fcaada7fbf8bcc0ca3baade2d54084b24f6ab7b933794f2e4135519c0161",
+            "group": "Rack A",
+            "id": "8abfd423",
+            "kind": "kvmd",
+            "known_by_certificate": true,
+            "machine": "",
+            "name": "Build server",
+            "number": "",
+            "secret_kept": true,
+            "user": "admin"
+        },
+        {
+            "address": "http://192.0.2.11:8080",
+            "asked": false,
+            "certificate": "",
+            "group": "Rack A",
+            "id": "38e92d49",
+            "kind": "kvmd",
+            "known_by_certificate": false,
+            "machine": "",
+            "name": "Lab KVM",
+            "no_signal_minutes": 15,
+            "number": "",
+            "secret_kept": true,
+            "unchanged_minutes": 60,
+            "user": "operator"
+        },
+        {
+            "address": "http://192.0.2.12",
+            "asked": false,
+            "certificate": "",
+            "group": "Desk",
+            "id": "41c7551d",
+            "kind": "jetkvm",
+            "known_by_certificate": false,
+            "machine": "",
+            "name": "Desk JetKVM",
+            "number": "jetkvm:42b7ce146108415bc503cc89f029fdae",
+            "secret_kept": true,
+            "user": "admin"
+        },
+        {
+            "address": "https://198.51.100.30",
+            "asked": true,
+            "certificate": "8a5d0bac661cb594e6ee523ec5b47a124557cf61a3517a509c9c37e3dcd4d1fc",
+            "group": "Rack B",
+            "id": "142b92f2",
+            "kind": "redfish",
+            "known_by_certificate": true,
+            "machine": "server:8d04392184451f1aa001bbd476951b0b9ca7cb7aa4534f62bb06cdda3c8e91c7",
+            "name": "Storage server",
+            "number": "",
+            "secret_kept": true,
+            "user": "operator"
+        },
+        {
+            "address": "https://198.51.100.31",
+            "asked": false,
+            "certificate": "de09352984d3d4c8d6e3bd2d8e29efba91f508b3e4a6950d69e5b1df7567ef24",
+            "certificate_pem": "-----BEGIN CERTIFICATE-----\nMIIBHzCBxqADAgECAgID6DAKBggqhkjOPQQDAjAZMRcwFQYDVQQDDA5hbiBleGFt\ncGxlIEtWTTAeFw0yNjAxMDEwMDAwMDBaFw0zNTEyMzAwMDAwMDBaMBkxFzAVBgNV\nBAMMDmFuIGV4YW1wbGUgS1ZNMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEkoYW\n6kW9oO3ILuXrYCeiDLKpt4eq/ON7DwCe1F6av2t9ygp9QbxUMJBePxGOkOLuiQoT\nJW8q35yG1qcAPd9gujAKBggqhkjOPQQDAgNIADBFAiEA3xyTzdfJz+sYMmDqd0/9\nf18OyJhT9K1FPBtZBVRLdj8CICcxZ6T++/Z1QCNp3ZqXhAsCk9P+kXQrJuCsPA43\nCOJH\n-----END CERTIFICATE-----\n",
+            "group": "Rack B",
+            "id": "b5e617c2",
+            "kind": "kvmd",
+            "known_by_certificate": true,
+            "machine": "",
+            "name": "Imported KVM",
+            "number": "",
+            "secret_kept": true,
+            "user": "admin"
+        },
+        {
+            "address": "https://198.51.100.33:8006",
+            "asked": true,
+            "boot_order_was": {
+                "machine": "proxmox:cd8d866150d20c968b8435150b1efa2d",
+                "order": "scsi0;ide2;net0",
+                "vmid": 101,
+                "written": "ide2;scsi0;net0"
+            },
+            "certificate": "67ddb78acfea7a2eb9949d67e12a826adf6b46ea4a20d52ca3222724e8fe1030",
+            "group": "Rack B",
+            "id": "8604ff47",
+            "kind": "proxmox",
+            "known_by_certificate": true,
+            "machine": "proxmox:cd8d866150d20c968b8435150b1efa2d",
+            "name": "Test VM",
+            "node": "pve1",
+            "number": "",
+            "secret_kept": true,
+            "user": "qkvm@pve!wall",
+            "vmid": 101
+        },
+        {
+            "address": "https://192.0.2.13",
+            "asked": false,
+            "certificate": "aa59680e621e2e3ae00c5c5984af481abea1926152670809201dfe82526f7545",
+            "group": "Rack A",
+            "id": "31c108c3",
+            "kind": "kvmd",
+            "known_by_certificate": true,
+            "machine": "",
+            "name": "Rack KVM",
+            "number": "",
+            "secret_kept": true,
+            "user": "admin"
+        },
+        {
+            "address": "https://198.51.100.32",
+            "asked": false,
+            "certificate": "",
+            "display": 2,
+            "group": "Rack B",
+            "id": "0f1e2d3c",
+            "kind": "a-later-family",
+            "known_by_certificate": false,
+            "machine": "",
+            "name": "A family of later",
+            "number": "",
+            "user": "admin"
+        }
+    ],
+    "last_update_check": "2026-11-10T12:00:00Z",
+    "own_wall": true,
+    "picture_every_ms": 2000,
+    "picture_scales": [
+        {
+            "machine": "8abfd423",
+            "scale": "125",
+            "scope": "pc"
+        },
+        {
+            "machine": "a",
+            "scale": "75",
+            "scope": "server-419f3afcbef0771291790fd8d16d479fe7b9816a4c847793b8e9ee29ac8e5d7b"
+        }
+    ],
+    "reached_encrypted": [
+        "198.51.100.20"
+    ],
+    "recent_machines": [
+        {
+            "machine": "41c7551d",
+            "scope": "pc"
+        },
+        {
+            "machine": "8abfd423",
+            "scope": "pc"
+        },
+        {
+            "machine": "a",
+            "scope": "server-419f3afcbef0771291790fd8d16d479fe7b9816a4c847793b8e9ee29ac8e5d7b"
+        }
+    ],
+    "release_key": "scroll-lock",
+    "server": "http://127.0.0.1:47391/",
+    "servers": [
+        "http://127.0.0.1:47391/"
+    ],
+    "settings_section": "security",
+    "stay_in_tray": true,
+    "tell_news": false,
+    "theme": "light",
+    "windows": [
+        {
+            "columns": 3,
+            "group": "Rack A",
+            "order": "group",
+            "place": {
+                "full_screen": false,
+                "height": 640,
+                "maximized": false,
+                "width": 960,
+                "x": 40,
+                "y": 40
+            },
+            "rotate": false,
+            "source": "pc"
+        },
+        {
+            "columns": 0,
+            "group": "",
+            "order": "state",
+            "place": {
+                "full_screen": false,
+                "height": 600,
+                "maximized": true,
+                "width": 900,
+                "x": 80,
+                "y": 60
+            },
+            "rotate": true,
+            "source": "http://127.0.0.1:47391/"
+        }
+    ],
+    "workspaces": [
+        {
+            "id": "d225ac8deddee5cebb01c1967b550ac9",
+            "name": "Night shift",
+            "windows": [
+                {
+                    "columns": 2,
+                    "group": "Desk",
+                    "order": "name",
+                    "place": {
+                        "full_screen": true,
+                        "height": 700,
+                        "maximized": false,
+                        "width": 1024,
+                        "x": 0,
+                        "y": 0
+                    },
+                    "rotate": true,
+                    "source": "pc"
+                },
+                {
+                    "columns": 3,
+                    "group": "Rack A",
+                    "order": "group",
+                    "place": {
+                        "full_screen": false,
+                        "height": 640,
+                        "maximized": false,
+                        "width": 960,
+                        "x": 40,
+                        "y": 40
+                    },
+                    "rotate": false,
+                    "source": "pc"
+                }
+            ]
+        }
+    ],
+    "written_by": "0.1.2"
+}

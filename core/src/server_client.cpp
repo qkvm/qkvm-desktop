@@ -19,6 +19,8 @@
 #include <QTimer>
 #include <QUrlQuery>
 
+#include <qkvm/core/kept_with.h>
+#include <qkvm/core/network_end.h>
 #include <qkvm/core/read_ahead.h>
 #include <qkvm/core/tls.h>
 
@@ -60,10 +62,6 @@ constexpr int uploadWholeWithinMs = 25 * 3600 * 1000;
 // go on one line and not on a new one (and a new TLS handshake) each time.
 constexpr int idleLineSeconds = 2;
 // What the server says of an image's name where it does not take it (kvm.NAME_RULE).
-constexpr const char* imageNameRule =
-    "An image's name is of letters, digits, spaces and . _ + - ( ) [ ] ~ , (200 at the most), and neither begins nor "
-    "ends with a space or a dot. Rename the file and upload it again.";
-
 // Each of these is how long nothing may come. The whole of a call, from the question to the last
 // byte of its answer, may take this many times as long (finish()).
 constexpr int wholeWithinTimes = 2;
@@ -163,7 +161,7 @@ void takeBack(const QList<QPointer<QNetworkReply>>& out)
 
 ServerClient::ServerClient(QObject* parent) : QObject(parent)
 {
-    prepare(m_network);
+    prepare(*m_network);
     m_clock.start();
     m_historyReads.later.setSingleShot(true);
     connect(&m_historyReads.later, &QTimer::timeout, this, [this] { nextInTurn(m_historyReads); });
@@ -178,14 +176,59 @@ void ServerClient::prepare(QNetworkAccessManager& network)
     network.setProxy(QNetworkProxy::NoProxy);
 }
 
+ServerClient::~ServerClient()
+{
+    // The lines made for one question each go off the interface thread as well, their questions with them here
+    // (network_end.h); the client's own, m_network, goes so as a member.
+    for (QNetworkAccessManager* line : findChildren<QNetworkAccessManager*>(Qt::FindDirectChildrenOnly)) {
+        endOffThisThread(line);
+    }
+}
+
 QNetworkReply* ServerClient::onALineOfItsOwn(const std::function<QNetworkReply*(QNetworkAccessManager&)>& send)
 {
     // (Its own, until its answer is over and the reply gone: with this client at the latest.)
     auto* line = new QNetworkAccessManager(this); // NOLINT(cppcoreguidelines-owning-memory): this client's child
     prepare(*line);
     QNetworkReply* reply = send(*line);
-    connect(reply, &QObject::destroyed, line, &QObject::deleteLater);
+    // Ended a turn after the reply is gone, when it is no longer among the line's (Qt's end of a manager deletes the
+    // replies it still has), and off the interface thread: its end waits up to five seconds for the thread it spoke
+    // on, which Windows may hold (network_end.h).
+    connect(
+        reply, &QObject::destroyed, this,
+        [line = QPointer<QNetworkAccessManager>(line)] {
+            if (line != nullptr) {
+                endOffThisThread(line);
+            }
+        },
+        Qt::QueuedConnection);
     return reply;
+}
+
+void ServerClient::endItsLines()
+{
+    // From here on, a manager made anew, as the first was: whoever is told below and asks again asks on it.
+    const std::shared_ptr<QNetworkAccessManager> old(m_network.release(), EndedOffThisThread{});
+    m_network = ownNetwork();
+    prepare(*m_network);
+    // A turn later, as the end of Qt's own thread under them had it: whoever is told may ask again there and then, and
+    // is told only once whatever was being changed here is changed (another server named: its turn, its address). And
+    // in turn with what Qt's thread has said of them by now: what it says later is said to a reply that is over.
+    QList<QPointer<QNetworkReply>> out;
+    for (QNetworkReply* reply : old->findChildren<QNetworkReply*>()) {
+        out.append(reply);
+    }
+    QMetaObject::invokeMethod(
+        this,
+        [old, out] {
+            for (const QPointer<QNetworkReply>& reply : out) {
+                if (reply != nullptr && !reply->isFinished()) {
+                    reply->abort();
+                }
+            }
+            // (The old manager ends as the last of these goes: here, or with the client.)
+        },
+        Qt::QueuedConnection);
 }
 
 base::Result<QUrl> ServerClient::addressFrom(const QString& typed)
@@ -236,7 +279,7 @@ base::Result<void> ServerClient::setAddress(const QString& typed)
         // Nor is the last one's certificate this one's; and no line to the last one is used again.
         m_knownCertificate.clear();
         m_shownCertificate.clear();
-        m_network.clearConnectionCache();
+        endItsLines();
         // Nor is what was known of contact with the last one, or asked of it. The calls that
         // waited to hear what answers there are not sent, and are told so a turn later.
         m_unsure = false;
@@ -338,7 +381,7 @@ void ServerClient::setKnownCertificate(const QByteArray& sha256)
     if (sha256 != m_knownCertificate) {
         m_knownCertificate = sha256;
         // A line that was opened under the old rule is not used under the new one.
-        m_network.clearConnectionCache();
+        endItsLines();
     }
 }
 
@@ -555,14 +598,16 @@ void ServerClient::finish(QNetworkReply* reply, qsizetype largest, bool signInCa
     // with (request()) is on how long nothing comes, and what dribbles never reaches it: whoever
     // waits for the answer would wait for hours. So the whole of a call has a limit too, twice
     // as long as it may be silent for, and every call alike. What keeps that time goes with its
-    // answer: it is held by what hears the answer, and by nothing else. (A timer that only fires
-    // once lives out its whole time whether or not anybody waits for it: thirty seconds for
-    // every picture of a wall.)
-    const auto whole = std::make_shared<QTimer>();
+    // answer: a child of the reply, it ends with the reply. (A timer that only fires once lives
+    // out its whole time whether or not anybody waits for it: thirty seconds for every picture
+    // of a wall.) So does whoever is to hear the answer (`done`): both are the reply's, and end
+    // on its thread, never with what listens to the reply below, which Qt may let go of on its
+    // own network thread (kept_with.h; that timer ended there once, and with it the program).
+    auto* whole = new QTimer(reply); // NOLINT(cppcoreguidelines-owning-memory): the reply's
     whole->setSingleShot(true);
     ++*m_limits;
-    connect(whole.get(), &QObject::destroyed, whole.get(), [alive = m_limits] { --*alive; });
-    connect(whole.get(), &QTimer::timeout, reply, [reply] {
+    connect(whole, &QObject::destroyed, whole, [alive = m_limits] { --*alive; });
+    connect(whole, &QTimer::timeout, reply, [reply] {
         if (!reply->isFinished()) {
             reply->setProperty("gaveUp", true);
             reply->abort();
@@ -573,9 +618,11 @@ void ServerClient::finish(QNetworkReply* reply, qsizetype largest, bool signInCa
     whole->start(wholeMs.isValid() ? wholeMs.toInt() : wholeWithinTimes * reply->request().transferTimeout());
     connect(
         reply, &QNetworkReply::finished, this,
-        [this, reply, whole, signInCall, of = m_serverTurn, done = std::move(done)] {
+        [this, reply, whole, signInCall, of = m_serverTurn, hears = &keptWith(*reply, std::move(done))] {
             whole->stop();
             reply->deleteLater();
+            // (A copy: whoever hears it may end the reply, and what it keeps with it, there and then.)
+            const Answer done = *hears;
             const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const bool saidYes = status >= 200 && status < 300;
             // A picture of a machine's screen may be larger than is taken, and the server fetches
@@ -670,7 +717,7 @@ void ServerClient::finish(QNetworkReply* reply, qsizetype largest, bool signInCa
 void ServerClient::askHealth(std::function<void(base::Result<Health>)> done)
 {
     // (Its 401 would not be the news that a session is gone: none went with the question.)
-    finish(m_network.get(request(u"healthz"_s, answerWithinMs, false)), largestHealthBytes, true,
+    finish(m_network->get(request(u"healthz"_s, answerWithinMs, false)), largestHealthBytes, true,
            [this, of = m_serverTurn, lost = m_lost, done = std::move(done)](const base::Result<QByteArray>& answer,
                                                                             QNetworkReply*) {
                if (!answer && isOwnFinding(answer.error())) {
@@ -704,7 +751,7 @@ void ServerClient::askHealth(std::function<void(base::Result<Health>)> done)
 void ServerClient::askSession(std::function<void(base::Result<Session>)> done)
 {
     // (Where a proxy in front of the server vouches for somebody, this answer signs them in.)
-    ask([this] { return m_network.get(request(u"api/v1/session"_s, answerWithinMs)); }, largestAnswerBytes, true,
+    ask([this] { return m_network->get(request(u"api/v1/session"_s, answerWithinMs)); }, largestAnswerBytes, true,
         [this, turn = m_sessionTurn, of = m_serverTurn, done = std::move(done)](base::Result<QByteArray> answer,
                                                                                 QNetworkReply* reply) {
             if (!answer) {
@@ -813,7 +860,7 @@ QByteArray ServerClient::displayKeyIn(const QString& typed)
 
 void ServerClient::askWall(std::function<void(base::Result<Wall>)> done)
 {
-    ask([this] { return m_network.get(request(u"api/v1/wall"_s, answerWithinMs)); }, largestAnswerBytes, false,
+    ask([this] { return m_network->get(request(u"api/v1/wall"_s, answerWithinMs)); }, largestAnswerBytes, false,
         [this, of = m_serverTurn, done = std::move(done)](base::Result<QByteArray> answer, QNetworkReply*) {
             if (!answer) {
                 done(answer.error());
@@ -836,7 +883,7 @@ void ServerClient::askHistory(const QString& machine, std::function<void(base::R
     readInTurn(
         m_historyReads,
         [this, machine, done = std::move(done)](const std::function<void(QNetworkReply*)>& over) {
-            ask([this, machine] { return m_network.get(request(ofMachine(machine, u"history"_s), answerWithinMs)); },
+            ask([this, machine] { return m_network->get(request(ofMachine(machine, u"history"_s), answerWithinMs)); },
                 largestAnswerBytes, false,
                 [over, done](const base::Result<QByteArray>& answer, QNetworkReply* reply) {
                     over(reply);
@@ -854,7 +901,7 @@ void ServerClient::askHistorySamples(const QString& machine, std::function<void(
         [this, machine, done = std::move(done)](const std::function<void(QNetworkReply*)>& over) {
             ask(
                 [this, machine] {
-                    return m_network.get(
+                    return m_network->get(
                         request(ofMachine(machine, u"history?what=samples&every=900&limit=5000"_s), answerWithinMs));
                 },
                 largestAnswerBytes, false,
@@ -918,9 +965,9 @@ void ServerClient::askDeviceActivity(const QString& machine, std::function<void(
 {
     ask(
         [this, machine] {
-            return m_network.get(request(u"api/v1/audit?device="_s +
-                                             QString::fromLatin1(QUrl::toPercentEncoding(machine)) + u"&limit=100"_s,
-                                         answerWithinMs));
+            return m_network->get(request(u"api/v1/audit?device="_s +
+                                              QString::fromLatin1(QUrl::toPercentEncoding(machine)) + u"&limit=100"_s,
+                                          answerWithinMs));
         },
         largestAnswerBytes, false,
         [done = std::move(done)](const base::Result<QByteArray>& answer, QNetworkReply*) {
@@ -930,7 +977,7 @@ void ServerClient::askDeviceActivity(const QString& machine, std::function<void(
 
 void ServerClient::askStatus(std::function<void(base::Result<QHash<QString, Status>>)> done)
 {
-    ask([this] { return m_network.get(request(u"api/v1/status"_s, answerWithinMs)); }, largestAnswerBytes, false,
+    ask([this] { return m_network->get(request(u"api/v1/status"_s, answerWithinMs)); }, largestAnswerBytes, false,
         [this, of = m_serverTurn, done = std::move(done)](base::Result<QByteArray> answer, QNetworkReply*) {
             if (!answer) {
                 done(answer.error());
@@ -1154,7 +1201,7 @@ void ServerClient::askConsole(const QString& machine, std::function<void(base::R
 
 void ServerClient::askSavedActions(std::function<void(base::Result<QList<SavedAction>>)> done)
 {
-    ask([this] { return m_network.get(request(u"api/v1/actions"_s, answerWithinMs)); }, largestAnswerBytes, false,
+    ask([this] { return m_network->get(request(u"api/v1/actions"_s, answerWithinMs)); }, largestAnswerBytes, false,
         [done = std::move(done)](base::Result<QByteArray> answer, QNetworkReply*) {
             done(answer ? savedActionsFrom(answer.value()) : base::Result<QList<SavedAction>>(answer.error()));
         });
@@ -1162,7 +1209,7 @@ void ServerClient::askSavedActions(std::function<void(base::Result<QList<SavedAc
 
 void ServerClient::askWakeTargets(const QString& machine, std::function<void(base::Result<QList<WakeTarget>>)> done)
 {
-    ask([this, machine] { return m_network.get(request(ofMachine(machine, u"wol"_s), answerWithinMs)); },
+    ask([this, machine] { return m_network->get(request(ofMachine(machine, u"wol"_s), answerWithinMs)); },
         largestAnswerBytes, false,
         [done = std::move(done)](base::Result<QByteArray> answer, QNetworkReply*) {
             done(answer ? wakeTargetsFrom(answer.value()) : base::Result<QList<WakeTarget>>(answer.error()));
@@ -1197,7 +1244,7 @@ void ServerClient::askAlertPicture(const QString& machine, const QString& stamp,
     }
     ask(
         [this, asked = ofMachine(machine, u"alert-picture/"_s + stamp)] {
-            QNetworkReply* reply = m_network.get(request(asked, pictureWithinMs));
+            QNetworkReply* reply = m_network->get(request(asked, pictureWithinMs));
             // (What is too large or too slow of this one says nothing of who answers, as of a snapshot.)
             reply->setProperty("picture", true);
             return reply;
@@ -1231,7 +1278,7 @@ void ServerClient::askSnapshot(const QString& machine, int width, double mayBeOl
     path.setQuery(query);
     ask(
         [this, asked = path.toString(QUrl::FullyEncoded)] {
-            QNetworkReply* reply = m_network.get(request(asked, pictureWithinMs));
+            QNetworkReply* reply = m_network->get(request(asked, pictureWithinMs));
             // (What is too large or too slow of this one says nothing of who answers: finish.)
             reply->setProperty("picture", true);
             return reply;
@@ -1288,7 +1335,7 @@ base::Result<QByteArray> ServerClient::doneOrNot(base::Result<QByteArray> answer
 
 void ServerClient::askMedia(const QString& machine, std::function<void(base::Result<MediaList>)> done)
 {
-    ask([this, machine] { return m_network.get(request(ofMachine(machine, u"media"_s), mediaListWithinMs)); },
+    ask([this, machine] { return m_network->get(request(ofMachine(machine, u"media"_s), mediaListWithinMs)); },
         largestAnswerBytes, false,
         [done = std::move(done)](const base::Result<QByteArray>& answer, QNetworkReply*) {
             done(answer ? mediaListFrom(answer.value()) : base::Result<MediaList>(answer.error()));
@@ -1298,7 +1345,7 @@ void ServerClient::askMedia(const QString& machine, std::function<void(base::Res
 void ServerClient::askUpload(const QString& machine,
                              std::function<void(base::Result<std::optional<MediaUploading>>)> done)
 {
-    ask([this, machine] { return m_network.get(request(ofMachine(machine, u"media/upload"_s), answerWithinMs)); },
+    ask([this, machine] { return m_network->get(request(ofMachine(machine, u"media/upload"_s), answerWithinMs)); },
         largestAnswerBytes, false,
         [done = std::move(done)](const base::Result<QByteArray>& answer, QNetworkReply*) {
             done(answer ? uploadingFrom(answer.value()) : base::Result<std::optional<MediaUploading>>(answer.error()));
@@ -1328,19 +1375,29 @@ void ServerClient::mountMedia(const QString& machine, const MediaMount& mount,
 }
 
 void ServerClient::unmountMedia(const QString& machine, const QString& image, const QString& named,
-                                std::function<void(base::Result<MediaDone>)> done)
+                                const QString& listed, std::function<void(base::Result<MediaDone>)> done)
 {
-    changeMedia(ofMachine(machine, u"media/unmount"_s), imageBody(image, named), std::move(done));
+    changeMedia(ofMachine(machine, u"media/unmount"_s), imageBody(image, named, listed), std::move(done));
 }
 
 void ServerClient::deleteMedia(const QString& machine, const QString& image, const QString& named,
-                               std::function<void(base::Result<MediaDone>)> done)
+                               const QString& listed, std::function<void(base::Result<MediaDone>)> done)
 {
-    changeMedia(ofMachine(machine, u"media/delete"_s), imageBody(image, named), std::move(done));
+    changeMedia(ofMachine(machine, u"media/delete"_s), imageBody(image, named, listed), std::move(done));
+}
+
+QByteArray ServerClient::mediaIdentity() const
+{
+    return QCryptographicHash::hash(m_address.toEncoded() + '\n' + m_session, QCryptographicHash::Sha256);
+}
+
+bool ServerClient::saidNothing(const base::Error& error) const
+{
+    return error.code == unreachable || error.code == "internal";
 }
 
 std::function<void()> ServerClient::uploadMedia(const QString& machine, const QString& name, const QString& named,
-                                                std::unique_ptr<QIODevice> image,
+                                                const QString& listed, std::unique_ptr<QIODevice> image,
                                                 std::function<void(base::Result<MediaUploaded>)> done)
 {
     // Only from a file that is read at a place, whose length is known before a byte goes: what has none is not
@@ -1377,9 +1434,12 @@ std::function<void()> ServerClient::uploadMedia(const QString& machine, const QS
         QPointer<QNetworkReply> reply;
     };
     const auto carrying = std::make_shared<Carrying>();
-    const QString path = ofMachine(machine, u"media/upload"_s) + u"?name="_s +
-                         QString::fromLatin1(QUrl::toPercentEncoding(name)) + u"&machine="_s +
-                         QString::fromLatin1(QUrl::toPercentEncoding(named));
+    // (The mark of the list it was picked from, 0.3.2, only where the list said one: a server before 0.3.2 is asked as
+    // before.)
+    const QString path =
+        ofMachine(machine, u"media/upload"_s) + u"?name="_s + QString::fromLatin1(QUrl::toPercentEncoding(name)) +
+        u"&machine="_s + QString::fromLatin1(QUrl::toPercentEncoding(named)) +
+        (listed.isEmpty() ? QString() : u"&listed="_s + QString::fromLatin1(QUrl::toPercentEncoding(listed)));
     ask(
         [this, path, file, size, carrying] {
             QNetworkRequest asked = request(path, m_uploadQuietMs);
@@ -1388,8 +1448,8 @@ std::function<void()> ServerClient::uploadMedia(const QString& machine, const QS
             asked.setAttribute(QNetworkRequest::DoNotBufferUploadDataAttribute, true);
             QNetworkReply* reply =
                 onALineOfItsOwn([&](QNetworkAccessManager& line) { return line.post(asked, file.get()); });
-            // (The file is the reply's for as long as it is out.)
-            connect(reply, &QObject::destroyed, reply, [file] {});
+            // (The file is the reply's for as long as it is out, and ends with it on its thread: kept_with.h.)
+            keptWith(*reply, file);
             reply->setProperty("wholeWithinMs", uploadWholeWithinMs);
             // (Once it has begun to go, Qt says that it went (sendOut), before all of it has: from then on it is not
             // taken back where contact is lost, as no POST that went is. Held by test_core_server_client_upload,

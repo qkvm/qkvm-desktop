@@ -91,7 +91,9 @@ Status statusFrom(const Looked& looked);
 // event on its line for events); nothing where it does not say. GLKVM's own word decides where the answer has one:
 // "on", and "sleep" (the power is there, and a short press wakes it), or "off"; a word of another kind, or one not
 // known, says nothing, and the light beside it is no witness there: a real Comet's stays off whatever the computer
-// does. Stock kvmd has no word, and its light (`leds.power`) it is. (The web's `power_said`.)
+// does. Stock kvmd has no word, and its lights it is: a lit disk light (`leds.hdd`) is a machine that is on, else the
+// power light (`leds.power`), as a JetKVM's two lights are read (the owner's decision of 2026-11-19, stricter than the
+// web's `power_said`, which reads the power light alone: review cx4-2 L5).
 std::optional<bool> powerSaid(const QJsonObject& atx);
 // Whether a power board's state says that the board is there: only a plain yes. (A Comet's board says "no board" to
 // whoever asks while it answers somebody else, on its line for events too: that says nothing of the board.)
@@ -102,7 +104,8 @@ inline constexpr qsizetype mostBoardWord = 4096;
 // A power board's state as it said it on the KVM's line for events (kvmd's /api/ws: an `atx` event, the whole state
 // each time, in the shape of /api/atx's answer); nothing where the message is no such thing. Only what is read of it is
 // kept, each by its kind, and what is of another kind is kept as saying nothing (a null): whether it is there and
-// busy, GLKVM's word for the computer's power where it said one, and the power light. (The web's `board_heard`.)
+// busy, GLKVM's word for the computer's power where it said one, and the power and disk lights. (The web's
+// `board_heard`, which keeps the power light alone.)
 std::optional<QJsonObject> boardHeard(const QByteArray& message);
 // Whether a Fingerbot is paired with the KVM, by its `fingerbot` event on the line for events: `{"exist": true}` on a
 // real Comet with one, `{"exist": false}` on one without; nothing where the message is no such thing, or says neither

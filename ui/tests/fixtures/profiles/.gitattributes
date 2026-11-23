@@ -5,3 +5,4 @@
 *.setup-overrides -text
 *.locked -text
 *.jpg binary
+*.version -text

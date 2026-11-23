@@ -1,8 +1,39 @@
 #include "screens_test.h"
 
+#include <QByteArrayView>
+#include <QCoreApplication>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QScopeGuard>
+#include <QTranslator>
+
+#include <utility>
+
+namespace {
+
+// One of the program's sentences three times over, while it is installed (a translation's longer words).
+class ThreeTimesAsLong final : public QTranslator {
+public:
+    explicit ThreeTimesAsLong(QByteArray source) : m_source(std::move(source)) {}
+    bool isEmpty() const override { return false; }
+    QString translate(const char* context, const char* source, const char* disambiguation, int n) const override
+    {
+        static_cast<void>(context);
+        static_cast<void>(disambiguation);
+        static_cast<void>(n);
+        if (QByteArrayView(source) != m_source) {
+            return {};
+        }
+        const QString once = QString::fromUtf8(m_source);
+        return once + u' ' + once + u' ' + once;
+    }
+
+private:
+    QByteArray m_source;
+};
+
+} // namespace
 
 // The boxes: a machine's menu and its questions, keys and text, the wall as a file, a KVM added
 // and changed and its certificates, signing in and the account, and the settings.
@@ -250,6 +281,123 @@ private slots:
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
+    void aQuestionWhoseNoSendsSomethingStartsTheKeyboardAtNeitherAnswer()
+    {
+        // (Review cx2-3, L-d; cx2-4, M1.) A card's question, Yes or No, whose No makes the card refuse that computer
+        // until its password is typed, and whose Yes takes that computer for the card: no answer has the keyboard as it
+        // opens, so neither Space nor Enter says either by a slip; and so every time it opens in a window, whatever an
+        // earlier question there did: one answered by a click on its Yes (which took the keyboard), one put away with
+        // the keyboard on its no, one put away by the cross; nor does a press on either answer slid off before its
+        // release give it the keyboard (review cx2-5, L1). The keyboard is on the box's item that takes no key
+        // (questionKeyless), and not outside the box (L2). Esc is a no that sends nothing, as ever; Tab reaches the
+        // answers; the No by its button is said as the card's No (saidNo). An ordinary question still starts at Cancel.
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        wall.machines()->setTiles(qkvm::ui::pretendWall());
+        qkvm::ui::SessionView session;
+        session.show(signedIn());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        QVERIFY(bringUp(window));
+        QObject* question = window->findChild<QObject*>(u"question"_s);
+        QVERIFY(question != nullptr);
+        const QSignalSpy answered(&actions, &qkvm::ui::ActionsView::answered);
+        const QSignalSpy saidNo(&actions, &qkvm::ui::ActionsView::saidNo);
+        const QVariantMap ordinary{
+            {u"title"_s, u"Power on"_s}, {u"text"_s, u"Power on db-01?"_s}, {u"yes"_s, u"Power on"_s}};
+        const QVariantMap asks{{u"title"_s, u"Is it this server?"_s},
+                               {u"text"_s, u"Is the server that answers now at db-01's place the server you added?"_s},
+                               {u"detail"_s, u"It says it is: SRV-2200, named db-01.lan."_s},
+                               {u"yes"_s, u"Yes, it is"_s},
+                               {u"no"_s, u"No"_s}};
+        const auto shown = [&](const QVariantMap& what) {
+            actions.showQuestion({});
+            QTRY_VERIFY(!question->property("opened").toBool());
+            actions.showQuestion(what);
+            QTRY_VERIFY(question->property("opened").toBool());
+            QTest::qWait(100);
+        };
+        // Neither answer has the keyboard, and no key but Esc says anything; Esc a no that sends nothing.
+        const auto keysSayNothing = [&](const char* after) {
+            const QString why = QString::fromLatin1(after);
+            const qsizetype answers = answered.count();
+            const qsizetype noes = saidNo.count();
+            const QQuickItem* no = theOne(window, u"questionNo"_s);
+            const QQuickItem* yes = theOne(window, u"questionYes"_s);
+            const QQuickItem* keyless = theOne(window, u"questionKeyless"_s);
+            QVERIFY2(no != nullptr && yes != nullptr && keyless != nullptr, qPrintable(why));
+            QVERIFY2(!no->hasActiveFocus(), qPrintable(why));
+            QVERIFY2(!yes->hasActiveFocus(), qPrintable(why));
+            QVERIFY2(keyless->hasActiveFocus(), qPrintable(why));
+            for (const Qt::Key key : {Qt::Key_Space, Qt::Key_Return, Qt::Key_Enter}) {
+                QTest::keyClick(window, key);
+            }
+            QTest::qWait(100);
+            QVERIFY2(answered.count() == answers && saidNo.count() == noes, qPrintable(why));
+            QVERIFY2(question->property("opened").toBool(), qPrintable(why));
+        };
+        // An ordinary question answered by a click on its Yes: its Yes takes the keyboard.
+        shown(ordinary);
+        QTRY_VERIFY(theOne(window, u"questionNo"_s)->hasActiveFocus());
+        clickOn(window, theOne(window, u"questionYes"_s));
+        QTRY_COMPARE(answered.count(), 1);
+        QCOMPARE(answered[0][0].toBool(), true);
+        shown(asks);
+        QVERIFY(says(theOne(window, u"questionNo"_s), u"No"_s));
+        QVERIFY(says(theOne(window, u"questionYes"_s), u"Yes, it is"_s));
+        keysSayNothing("after a Yes clicked");
+        // (Tab reaches them.) Put away with the keyboard on its No, by Esc.
+        for (int tab = 0; tab < 6 && !theOne(window, u"questionNo"_s)->hasActiveFocus(); ++tab) {
+            QTest::keyClick(window, Qt::Key_Tab);
+        }
+        QTRY_VERIFY(theOne(window, u"questionNo"_s)->hasActiveFocus());
+        QVERIFY(saidNo.isEmpty());
+        QTest::keyClick(window, Qt::Key_Escape);
+        QTRY_COMPARE(answered.count(), 2);
+        QCOMPARE(answered[1][0].toBool(), false);
+        QVERIFY(saidNo.isEmpty());
+        shown(asks);
+        keysSayNothing("after Tab to the No and Esc");
+        // Put away by the cross.
+        clickOn(window, theOneSeen(window, u"closeBox"_s));
+        QTRY_COMPARE(answered.count(), 3);
+        QCOMPARE(answered[2][0].toBool(), false);
+        shown(asks);
+        keysSayNothing("after the cross");
+        // A press on either answer, slid off before its release: nothing is said, and the keyboard stays where it was.
+        for (const QString& answer : {u"questionYes"_s, u"questionNo"_s}) {
+            const QQuickItem* pressed = theOne(window, answer);
+            const QQuickItem* beside = theOne(window, u"questionText"_s);
+            QVERIFY(pressed != nullptr && beside != nullptr);
+            letTheWallComeToRest(window);
+            const QPoint on = pressed->mapToScene(QPointF(pressed->width() / 2, pressed->height() / 2)).toPoint();
+            const QPoint off = beside->mapToScene(QPointF(beside->width() / 2, beside->height() / 2)).toPoint();
+            QTest::mousePress(window, Qt::LeftButton, {}, on);
+            QTest::mouseMove(window, off);
+            QTest::mouseRelease(window, Qt::LeftButton, {}, off);
+            QTest::qWait(100);
+            QCOMPARE(answered.count(), 3);
+            QVERIFY(saidNo.isEmpty());
+            keysSayNothing(answer == u"questionYes"_s ? "after a press on Yes slid off"
+                                                      : "after a press on No slid off");
+        }
+        // The No by its button.
+        clickOn(window, theOne(window, u"questionNo"_s));
+        QTRY_COMPARE(saidNo.count(), 1);
+        QCOMPARE(answered.count(), 3);
+        shown(asks);
+        keysSayNothing("after the No clicked");
+        // An ordinary question after them starts at Cancel, as ever.
+        shown(ordinary);
+        QTRY_VERIFY(theOne(window, u"questionNo"_s)->hasActiveFocus());
+        actions.showQuestion({});
+        QTRY_VERIFY(!question->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
     void theBoxForKeysSaysWhatWasChosen()
     {
         qkvm::ui::AboutModel about;
@@ -347,8 +495,17 @@ private slots:
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
+    void theMediaBoxHoldsStillAndOnlyItsListScrolls_data()
+    {
+        QTest::addColumn<bool>("jetKvm");
+        QTest::newRow("a kvmd KVM's") << false;
+        // (A JetKVM's, A3: a CD-ROM drive or a disk, and its foot and question say first that a switch between the two
+        // drops its keyboard and mouse: more words, and the box holds still all the same.)
+        QTest::newRow("a JetKVM's") << true;
+    }
     void theMediaBoxHoldsStillAndOnlyItsListScrolls()
     {
+        QFETCH(bool, jetKvm);
         // A QKVM with one machine's media, more images than the box has room for, and a mount that takes its time.
         QJsonArray images;
         for (int at = 1; at <= 40; ++at) {
@@ -359,12 +516,14 @@ private slots:
         }
         const QByteArray list =
             QJsonDocument(QJsonObject{{u"images"_s, images},
-                                      {u"offers"_s, QJsonObject{{u"drives"_s, QJsonArray{u"cd"_s, u"flash"_s}},
+                                      {u"offers"_s, QJsonObject{{u"drives"_s, jetKvm ? QJsonArray{u"cd"_s, u"disk"_s}
+                                                                                     : QJsonArray{u"cd"_s, u"flash"_s}},
                                                                 {u"boot"_s, QJsonArray{}},
-                                                                {u"restart"_s, true},
+                                                                {u"restart"_s, !jetKvm},
                                                                 {u"upload"_s, true},
                                                                 {u"where"_s, u"device"_s},
-                                                                {u"delete"_s, true}}},
+                                                                {u"delete"_s, true},
+                                                                {u"drops_input"_s, jetKvm}}},
                                       {u"mounted"_s, QJsonValue()}})
                 .toJson(QJsonDocument::Compact);
         int mounts = 0;
@@ -440,9 +599,13 @@ private slots:
         QTRY_VERIFY(question->property("opened").toBool());
         QVERIFY(saying(window->contentItem(),
                        u"NAS gets image-1.iso in its CD-ROM drive, read-only, and nothing else "
-                       "is done: pick the KVM's drive in its boot menu at its next start."_s) != nullptr);
+                       "is done: pick the KVM's drive in its boot menu at its next start."_s +
+                           (jetKvm ? u" Its keyboard and mouse drop for a moment if this switches its drive between "
+                                     u"CD-ROM and disk."_s
+                                   : QString())) != nullptr);
         QCOMPARE(mounts, 0);
-        keepPictureOf(window, u"media-question"_s);
+        const QString of = jetKvm ? u"-jetkvm"_s : QString();
+        keepPictureOf(window, u"media-question"_s + of);
         clickOn(window, theOne(window, u"mediaYes"_s));
         QTRY_VERIFY(!question->property("opened").toBool());
         // While it is out, nothing in the box takes a click, and nothing moves.
@@ -451,7 +614,7 @@ private slots:
         QVERIFY(!theOne(window, u"mediaMount"_s)->isEnabled());
         QVERIFY(!theOne(window, u"mediaDelete"_s)->isEnabled());
         holdsStill("while the mount was out");
-        keepPictureOf(window, u"media-box"_s);
+        keepPictureOf(window, u"media-box"_s + of);
         QTRY_VERIFY2(!actions.media()->busy(), qPrintable(actions.media()->said()));
         QTRY_COMPARE(theOne(window, u"mediaSaid"_s)->property("text").toString(), u"Mount image-1.iso: done."_s);
         holdsStill("once it was answered");
@@ -1877,6 +2040,423 @@ private slots:
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
+    void aVncServerIsAddedFromTheKvmBoxAsThePageAddsOne()
+    {
+        // The page's "What to add": a VNC server's address goes as one (vnc:// where nothing says otherwise) with no
+        // user name, and the box says a VNC server's words; and it holds still while that is chosen, at the narrowest
+        // the window may be too: the address's hint stands in a place as high as the tallest of its words (and
+        // theAddressHintHoldsStillWhateverTheHeightOfItsWords makes one taller), and the user name's line stays where
+        // it stood, not typed into.
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        m_adding.reset();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        window->resize(window->minimumWidth(), window->height());
+        QVERIFY(bringUp(window));
+        const QSignalSpy asked(&m_adding, &qkvm::ui::AddKvmView::addAsked);
+        QObject* box = window->findChild<QObject*>(u"addKvm"_s);
+        QVERIFY(box != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(box, "open"));
+        QTRY_VERIFY(box->property("opened").toBool());
+        auto* what = window->findChild<QQuickItem*>(u"kvmWhat"_s);
+        auto* address = window->findChild<QQuickItem*>(u"kvmAddress"_s);
+        auto* user = window->findChild<QQuickItem*>(u"kvmUser"_s);
+        const auto* password = window->findChild<QQuickItem*>(u"kvmPassword"_s);
+        const auto* group = window->findChild<QQuickItem*>(u"kvmGroup"_s);
+        const auto* hint = window->findChild<QQuickItem*>(u"kvmAddressHint"_s);
+        QVERIFY(what != nullptr && address != nullptr && user != nullptr && password != nullptr && group != nullptr);
+        QVERIFY(hint != nullptr);
+        QCOMPARE(what->property("value").toString(), u"auto"_s);
+        QVERIFY(says(window->contentItem(), u"KVMs and servers (told apart automatically)"_s));
+        QVERIFY(hint->property("text").toString().startsWith(u"IP address or name of the KVM"_s));
+        QVERIFY(user->isEnabled());
+        letTheWallComeToRest(window);
+        const QPointF userWasAt = user->mapToScene({0, 0});
+        const QPointF passwordWasAt = password->mapToScene({0, 0});
+        const QPointF groupWasAt = group->mapToScene({0, 0});
+
+        // VNC servers chosen: their words, and no user name.
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"vnc"_s))));
+        QTRY_COMPARE(what->property("value").toString(), u"vnc"_s);
+        QTRY_VERIFY(hint->property("text").toString().startsWith(u"IP address or name of the VNC server"_s));
+        QVERIFY(says(window->contentItem(),
+                     u"IP address or name of the VNC server, with its port after a colon where it "
+                     "is not 5900 (192.168.1.20:5901). The password below is the VNC password; "
+                     "the user name is not used."_s));
+        QVERIFY(user->isVisible());
+        QVERIFY(!user->isEnabled());
+        letTheWallComeToRest(window);
+        QCOMPARE(user->mapToScene({0, 0}), userWasAt);
+        QCOMPARE(password->mapToScene({0, 0}), passwordWasAt);
+        QCOMPARE(group->mapToScene({0, 0}), groupWasAt);
+        keepPictureOf(window, u"add-vnc-server"_s);
+        QVERIFY(address->property("hasKeyboard").toBool());
+        type(window, u"192.168.1.30:5901"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        type(window, u"a password"_s);
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(asked.count(), 1);
+        QCOMPARE(asked[0][0].toString(), u"vnc://192.168.1.30:5901"_s);
+        QCOMPARE(asked[0][1].toString(), QString());
+        QCOMPARE(asked[0][2].toString(), u"a password"_s);
+
+        // Told apart automatically, one at a vncs:// address is a VNC server all the same: as it was typed, and with
+        // no user name, whatever stands in that line.
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"auto"_s))));
+        QTRY_VERIFY(hint->property("text").toString().startsWith(u"IP address or name of the KVM"_s));
+        QVERIFY(user->isEnabled());
+        user->setProperty("text", u"operator"_s);
+        address->setProperty("text", u"vncs://192.168.1.31"_s);
+        QTRY_VERIFY(hint->property("text").toString().startsWith(u"IP address or name of the VNC server"_s));
+        QVERIFY(!user->isEnabled());
+        QVERIFY(QMetaObject::invokeMethod(box, "submit"));
+        QCOMPARE(asked.count(), 2);
+        QCOMPARE(asked[1][0].toString(), u"vncs://192.168.1.31"_s);
+        QCOMPARE(asked[1][1].toString(), QString());
+        // And a KVM's address goes as it was typed, with its user name.
+        address->setProperty("text", u"192.168.1.32"_s);
+        QTRY_VERIFY(user->isEnabled());
+        QVERIFY(QMetaObject::invokeMethod(box, "submit"));
+        QCOMPARE(asked.count(), 3);
+        QCOMPARE(asked[2][0].toString(), u"192.168.1.32"_s);
+        QCOMPARE(asked[2][1].toString(), u"operator"_s);
+
+        // Proxmox's guests chosen (the third choice, after the rebase onto the VNC servers): what is typed is a
+        // Proxmox's address, whatever it begins with, and its guests are asked for, as the page asks them; a vnc://
+        // one among them, which the listing refuses (test_ui_own_wall_proxmox). The user name's line is the API
+        // token's ID, and typed into; the hint the Proxmox's.
+        const QSignalSpy listAsked(&m_adding, &qkvm::ui::AddKvmView::listGuestsAsked);
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"proxmox"_s))));
+        QTRY_COMPARE(what->property("value").toString(), u"proxmox"_s);
+        address->setProperty("text", u"vnc://192.168.1.33"_s);
+        QTRY_VERIFY(hint->property("text").toString().startsWith(u"The address of a Proxmox VE host"_s));
+        QVERIFY(user->isEnabled());
+        QCOMPARE(user->property("label").toString(), u"API token ID"_s);
+        user->setProperty("text", u"qkvm@pve!wall"_s);
+        QVERIFY(QMetaObject::invokeMethod(box, "submit"));
+        QCOMPARE(asked.count(), 3);
+        QCOMPARE(listAsked.count(), 1);
+        QCOMPARE(listAsked[0][0].toString(), u"vnc://192.168.1.33"_s);
+        QCOMPARE(listAsked[0][1].toString(), u"qkvm@pve!wall"_s);
+
+        // Closed, the box is for KVMs and servers again the next time.
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"vnc"_s))));
+        QVERIFY(QMetaObject::invokeMethod(box, "close"));
+        QTRY_VERIFY(!box->property("opened").toBool());
+        QCOMPARE(what->property("value").toString(), u"auto"_s);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    void aVncSchemeWrittenAmissGoesAsItWasTypedWhateverIsChosen()
+    {
+        // Outside review c9a-3, L1: "vncs:/10.0.0.6:5901", "vncs//box" and "vnc:/box" (in any case) are not made into
+        // vnc://vncs:/... by the box where VNC servers are chosen, which the program would read as a VNC server at a
+        // host called "vncs". With either choice they go as they were typed, and the program refuses them
+        // (vnc::schemeAmiss, by both rules for an address: test_core_vnc_device, test_core_kvm_probe).
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        m_adding.reset();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        QVERIFY(bringUp(window));
+        const QSignalSpy asked(&m_adding, &qkvm::ui::AddKvmView::addAsked);
+        QObject* box = window->findChild<QObject*>(u"addKvm"_s);
+        QVERIFY(box != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(box, "open"));
+        QTRY_VERIFY(box->property("opened").toBool());
+        auto* what = window->findChild<QQuickItem*>(u"kvmWhat"_s);
+        auto* address = window->findChild<QQuickItem*>(u"kvmAddress"_s);
+        QVERIFY(what != nullptr && address != nullptr);
+        const QStringList amiss{u"vncs:/10.0.0.6:5901"_s, u"vncs//box.lan"_s, u"vnc:/box.lan"_s,
+                                u"VNCS:/10.0.0.6:5901"_s, u"Vnc:/box.lan"_s,  u"vNcS//box.lan"_s};
+        for (const QString& choice : {u"vnc"_s, u"auto"_s}) {
+            QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(choice))));
+            QTRY_COMPARE(what->property("value").toString(), choice);
+            for (const QString& typed : amiss) {
+                address->setProperty("text", typed);
+                const qsizetype before = asked.count();
+                QVERIFY(QMetaObject::invokeMethod(box, "submit"));
+                QCOMPARE(asked.count(), before + 1);
+                QCOMPARE(asked.last().at(0).toString(), typed);
+            }
+        }
+        // (One without a scheme, VNC servers chosen, is a vnc:// one still.)
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"vnc"_s))));
+        QTRY_COMPARE(what->property("value").toString(), u"vnc"_s);
+        address->setProperty("text", u"vncbox.lan:5901"_s);
+        QVERIFY(QMetaObject::invokeMethod(box, "submit"));
+        QCOMPARE(asked.last().at(0).toString(), u"vnc://vncbox.lan:5901"_s);
+        QVERIFY(QMetaObject::invokeMethod(box, "close"));
+        QTRY_VERIFY(!box->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    void theAddressHintHoldsStillWhateverTheHeightOfItsWords_data()
+    {
+        QTest::addColumn<QByteArray>("longer");
+        QTest::newRow("a VNC server's hint three times as long")
+            << QByteArray("IP address or name of the VNC server, with its port after a colon where it is not 5900 "
+                          "(192.168.1.20:5901). The password below is the VNC password; the user name is not used.");
+        QTest::newRow("a KVM's hint three times as long")
+            << QByteArray("IP address or name of the KVM, or of a server's management controller (BMC). GL.iNet "
+                          "Comet, PiKVM, JetKVM and Redfish controllers are spoken to by this program itself.");
+        // (After the rebase onto the VNC servers: the third choice's hint, a Proxmox's, measured with the others.)
+        QTest::newRow("a Proxmox's hint three times as long")
+            << QByteArray("The address of a Proxmox VE host (its port after a colon where it is not 8006). The "
+                          "virtual machines the API token may see are listed to pick from; to add one at once, put "
+                          "its ID after the address (192.168.1.5/100).");
+    }
+
+    void theAddressHintHoldsStillWhateverTheHeightOfItsWords()
+    {
+        // The second reading of c9a, difference 5 (boxes hold still): one of the address's hints taller than the
+        // other (a translation, a font, or another choice's hint: the page's Proxmox one is twice as long). The
+        // choice changes which stands, and the lines under it, the box and its buttons stay where they are.
+        QFETCH(QByteArray, longer);
+        ThreeTimesAsLong translation(longer);
+        QVERIFY(QCoreApplication::installTranslator(&translation));
+        const auto untranslated = qScopeGuard([&translation] { QCoreApplication::removeTranslator(&translation); });
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        m_adding.reset();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        window->resize(window->minimumWidth(), window->height());
+        QVERIFY(bringUp(window));
+        QObject* box = window->findChild<QObject*>(u"addKvm"_s);
+        QVERIFY(box != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(box, "open"));
+        QTRY_VERIFY(box->property("opened").toBool());
+        auto* what = window->findChild<QQuickItem*>(u"kvmWhat"_s);
+        const auto* hint = window->findChild<QQuickItem*>(u"kvmAddressHint"_s);
+        QVERIFY(what != nullptr && hint != nullptr);
+        QVERIFY(
+            hint->property("text").toString().contains(QString::fromUtf8(longer) + u' ' + QString::fromUtf8(longer)) ==
+            longer.startsWith("IP address or name of the KVM"));
+        QList<const QQuickItem*> held;
+        for (const QString& name :
+             {u"kvmUser"_s, u"kvmPassword"_s, u"kvmGroup"_s, u"kvmLines"_s, u"kvmClose"_s, u"kvmAdd"_s}) {
+            const auto* one = window->findChild<QQuickItem*>(name);
+            QVERIFY2(one != nullptr, qPrintable(name));
+            held.append(one);
+        }
+        const auto standing = [&held, box] {
+            QList<QRectF> places;
+            for (const QQuickItem* one : std::as_const(held)) {
+                places.append(one->mapRectToScene(QRectF(0, 0, one->width(), one->height())));
+            }
+            places.append(QRectF(box->property("x").toReal(), box->property("y").toReal(),
+                                 box->property("width").toReal(), box->property("height").toReal()));
+            return places;
+        };
+        // And the place is as high as the tallest of its hints at its width, and no higher; and the hint that stands is
+        // as high as its own measure. A place too tall, or measured at another width or before its words came, holds
+        // still as well, and is no place for the hint (outside review c9a-3, L3).
+        const auto* place = window->findChild<QQuickItem*>(u"kvmAddressHintPlace"_s);
+        QVERIFY(place != nullptr);
+        const auto fitsItsTallest = [place, hint]() -> QString {
+            qreal tallest = 0;
+            int measures = 0;
+            for (const QQuickItem* one : place->childItems()) {
+                if (one->objectName() != u"kvmAddressHintMeasure"_s) {
+                    continue;
+                }
+                ++measures;
+                tallest = std::max(tallest, one->implicitHeight());
+                if (one->property("text") == hint->property("text") &&
+                    !qFuzzyCompare(one->implicitHeight(), hint->implicitHeight())) {
+                    return u"the hint that stands is %1 high, and its measure %2"_s.arg(hint->implicitHeight())
+                        .arg(one->implicitHeight());
+                }
+            }
+            if (measures != 3) {
+                return u"%1 measures"_s.arg(measures);
+            }
+            return qFuzzyCompare(place->height(), tallest)
+                       ? QString()
+                       : u"the place is %1 high, and the tallest hint %2"_s.arg(place->height()).arg(tallest);
+        };
+        letTheWallComeToRest(window);
+        const QList<QRectF> before = standing();
+        QString fits = fitsItsTallest();
+        QVERIFY2(fits.isEmpty(), qPrintable(fits));
+        for (const QString& choice : {u"vnc"_s, u"auto"_s, u"vnc"_s}) {
+            QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(choice))));
+            QTRY_COMPARE(what->property("value").toString(), choice);
+            letTheWallComeToRest(window);
+            QCOMPARE(standing(), before);
+            fits = fitsItsTallest();
+            QVERIFY2(fits.isEmpty(), qPrintable(choice + u": "_s + fits));
+        }
+        // Proxmox's guests chosen: their list comes below the box's lines, and the lines themselves hold still: the
+        // hint's place is as high as before, and the user name's line stands as far under the address.
+        const auto* address = window->findChild<QQuickItem*>(u"kvmAddress"_s);
+        const auto* user = window->findChild<QQuickItem*>(u"kvmUser"_s);
+        QVERIFY(address != nullptr && user != nullptr);
+        const qreal placeWas = place->height();
+        const QPointF userUnderAddress = user->mapToItem(address, QPointF(0, 0));
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"proxmox"_s))));
+        QTRY_COMPARE(what->property("value").toString(), u"proxmox"_s);
+        letTheWallComeToRest(window);
+        QVERIFY(hint->property("text").toString().startsWith(u"The address of a Proxmox VE host"_s));
+        QCOMPARE(place->height(), placeWas);
+        QCOMPARE(user->mapToItem(address, QPointF(0, 0)), userUnderAddress);
+        // (And since the box keeps one size whichever is chosen, review c9b-4 L7: the box, its buttons and every line
+        // in it, all but the height of the lines' own place, which of a Proxmox leaves room for its guests below and
+        // scrolls in what is left.)
+        static constexpr qsizetype linesAt = 3;
+        QCOMPARE(held.at(linesAt)->objectName(), u"kvmLines"_s);
+        const auto butTheLinesHeight = [](QList<QRectF> places) {
+            places[linesAt].setHeight(0);
+            return places;
+        };
+        QCOMPARE(butTheLinesHeight(standing()), butTheLinesHeight(before));
+        fits = fitsItsTallest();
+        QVERIFY2(fits.isEmpty(), qPrintable(u"proxmox: "_s + fits));
+        // And where the box is narrower than it was when its hints were measured (as a font of Windows', changed while
+        // the program runs, makes every line longer), the place is as high as the tallest hint at its new width: each
+        // measure that grows says so (outside review c9a-4, L4). Then it holds still again whichever of the three is
+        // chosen: the box and every line in it, and of Proxmox's guests the hint's place, the user name's line, and
+        // all but the lines' own height as above (after the rebase of the Proxmox VE guests onto the VNC servers: the
+        // narrower check over all three choices).
+        QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(u"vnc"_s))));
+        QTRY_COMPARE(what->property("value").toString(), u"vnc"_s);
+        box->setProperty("width", 300);
+        letTheWallComeToRest(window);
+        fits = fitsItsTallest();
+        QVERIFY2(fits.isEmpty(), qPrintable(u"narrower: "_s + fits));
+        const QList<QRectF> narrower = standing();
+        const qreal placeNarrower = place->height();
+        const QPointF userUnderAddressNarrower = user->mapToItem(address, QPointF(0, 0));
+        for (const QString& choice : {u"auto"_s, u"vnc"_s, u"proxmox"_s, u"auto"_s}) {
+            QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(choice))));
+            QTRY_COMPARE(what->property("value").toString(), choice);
+            letTheWallComeToRest(window);
+            if (choice == u"proxmox"_s) {
+                QCOMPARE(place->height(), placeNarrower);
+                QCOMPARE(user->mapToItem(address, QPointF(0, 0)), userUnderAddressNarrower);
+                QCOMPARE(butTheLinesHeight(standing()), butTheLinesHeight(narrower));
+            } else {
+                QCOMPARE(standing(), narrower);
+            }
+            fits = fitsItsTallest();
+            QVERIFY2(fits.isEmpty(), qPrintable(u"narrower, "_s + choice + u": "_s + fits));
+        }
+        QVERIFY(QMetaObject::invokeMethod(box, "close"));
+        QTRY_VERIFY(!box->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Review c9b-4, L7, the boxes-hold-still rule: whichever is chosen under "What to add", and whatever comes of an
+    // adding, the box that adds keeps one size and one place, and so do the choice just used under the hand, the
+    // search in its title and its buttons, all in the window; in the window's size and in the smallest.
+    void theBoxThatAddsHoldsStillWhicheverIsChosen_data()
+    {
+        QTest::addColumn<bool>("smallest");
+        QTest::newRow("as it opens") << false;
+        QTest::newRow("in the smallest window") << true;
+    }
+
+    void theBoxThatAddsHoldsStillWhicheverIsChosen()
+    {
+        QFETCH(bool, smallest);
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        m_adding.reset();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        if (smallest) {
+            window->resize(window->minimumWidth(), window->minimumHeight());
+        }
+        QVERIFY(bringUp(window));
+        QObject* box = window->findChild<QObject*>(u"addKvm"_s);
+        QVERIFY(box != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(box, "open"));
+        QTRY_VERIFY(box->property("opened").toBool());
+        auto* what = window->findChild<QQuickItem*>(u"kvmWhat"_s);
+        QVERIFY(what != nullptr);
+        QList<const QQuickItem*> held;
+        for (const QString& name : {u"kvmWhat"_s, u"discoverKvmOpen"_s, u"kvmClose"_s, u"kvmAdd"_s}) {
+            const auto* one = window->findChild<QQuickItem*>(name);
+            QVERIFY2(one != nullptr, qPrintable(name));
+            held.append(one);
+        }
+        const auto standing = [&held, box] {
+            QList<QRectF> places;
+            for (const QQuickItem* one : std::as_const(held)) {
+                places.append(one->mapRectToScene(QRectF(0, 0, one->width(), one->height())));
+            }
+            places.append(QRectF(box->property("x").toReal(), box->property("y").toReal(),
+                                 box->property("width").toReal(), box->property("height").toReal()));
+            return places;
+        };
+        const QRectF inside(0, 0, window->width(), window->height());
+        letTheWallComeToRest(window);
+        const QList<QRectF> before = standing();
+        for (qsizetype at = 0; at + 1 < before.size(); ++at) {
+            QVERIFY2(inside.contains(before.at(at)), qPrintable(held.at(at)->objectName()));
+        }
+        for (const QString& choice : {u"proxmox"_s, u"vnc"_s, u"proxmox"_s, u"auto"_s}) {
+            QVERIFY(QMetaObject::invokeMethod(what, "picked", Q_ARG(QVariant, QVariant(choice))));
+            QTRY_COMPARE(what->property("value").toString(), choice);
+            letTheWallComeToRest(window);
+            QCOMPARE(standing(), before);
+        }
+        // What came of an adding said, of a KVM: refused in many words, asked, and added.
+        const auto* problem = window->findChild<QQuickItem*>(u"kvmProblem"_s);
+        const auto* added = window->findChild<QQuickItem*>(u"kvmAdded"_s);
+        QVERIFY(problem != nullptr && added != nullptr);
+        m_adding.refused(u"This KVM shows a certificate that nobody has vouched for and that is not the one this PC "
+                         "remembers for it. Nothing was sent to it. Compare the two before you go on."_s);
+        letTheWallComeToRest(window);
+        QVERIFY(problem->isVisible());
+        QCOMPARE(standing(), before);
+        // A KVM whose plain address sends everybody on to HTTPS (web 0.3.2): that address offered, as on the page,
+        // the box holding still; taken only when it is chosen, and then added there.
+        auto* use = window->findChild<QQuickItem*>(u"kvmUseInstead"_s);
+        QVERIFY(use != nullptr && !use->isVisible());
+        m_adding.began();
+        m_adding.refused(u"This KVM answers on HTTPS: its plain address sends everybody to https://192.168.1.20:8443. "
+                         "To use it there, type https://192.168.1.20:8443"_s,
+                         false, u"https://192.168.1.20:8443"_s);
+        letTheWallComeToRest(window);
+        QVERIFY(problem->isVisible() && use->isVisible());
+        QCOMPARE(use->property("text").toString(), u"Use https://192.168.1.20:8443"_s);
+        QCOMPARE(standing(), before);
+        const QSignalSpy asked(&m_adding, &qkvm::ui::AddKvmView::addAsked);
+        // (Its click, as the button says it: the outcome's lines scroll, and it may lie below what is in sight.)
+        QVERIFY(QMetaObject::invokeMethod(use, "clicked"));
+        QTRY_COMPARE(asked.count(), 1);
+        QCOMPARE(asked.constFirst().constFirst().toString(), u"https://192.168.1.20:8443"_s);
+        m_adding.began();
+        letTheWallComeToRest(window);
+        QVERIFY(!use->isVisible());
+        QVERIFY(added->isVisible());
+        QCOMPARE(standing(), before);
+        m_adding.took(u"\"Rack\" added"_s, u"AB:CD:EF"_s);
+        letTheWallComeToRest(window);
+        QVERIFY(added->isVisible());
+        QCOMPARE(standing(), before);
+        keepPictureOf(window, smallest ? u"add-holds-still-smallest"_s : u"add-holds-still"_s);
+        m_adding.reset();
+        QVERIFY(QMetaObject::invokeMethod(box, "close"));
+        QTRY_VERIFY(!box->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
     void theBoxThatAddsAKvmGoesWithThisPcsOwnWall()
     {
         qkvm::ui::AboutModel about;
@@ -1915,6 +2495,172 @@ private slots:
         QTRY_VERIFY(!box->property("opened").toBool());
         QCOMPARE(giveUpAsked.count(), 1);
         m_adding.gaveUp();
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Review c9b-1, M4 and L3: a Proxmox's guests are in a list of one height of their own from the moment the box is
+    // for a Proxmox on. With forty of them only that list scrolls: the box holds still, its buttons where they were and
+    // in sight, in the window's size and in the smallest. Before anything is listed it says what comes there, and a
+    // list with none says why that may be.
+    void theBoxThatAddsAProxmoxsGuestsHoldsStill_data()
+    {
+        QTest::addColumn<bool>("smallest");
+        QTest::newRow("as it opens") << false;
+        QTest::newRow("in the smallest window") << true;
+    }
+
+    void theBoxThatAddsAProxmoxsGuestsHoldsStill()
+    {
+        QFETCH(bool, smallest);
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        m_adding.reset();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        if (smallest) {
+            window->resize(window->minimumWidth(), window->minimumHeight());
+        }
+        QVERIFY(bringUp(window));
+        QObject* box = window->findChild<QObject*>(u"addKvm"_s);
+        QVERIFY(box != nullptr);
+        QVERIFY(QMetaObject::invokeMethod(box, "open"));
+        QTRY_VERIFY(box->property("opened").toBool());
+        QVERIFY(box->setProperty("what", u"proxmox"_s));
+        letTheWallComeToRest(window);
+        const auto placeOf = [](const QQuickItem* item) {
+            return item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+        };
+        const QStringList holdStill{u"kvmClose"_s, u"kvmAdd"_s, u"kvmAddTicked"_s, u"kvmGuests"_s, u"kvmGuestsSaid"_s};
+        QHash<QString, QRectF> before;
+        for (const QString& name : holdStill) {
+            const auto* item = window->findChild<QQuickItem*>(name);
+            QVERIFY2(item != nullptr && item->isVisible(), qPrintable(name));
+            before.insert(name, placeOf(item));
+        }
+        const auto* said = window->findChild<QQuickItem*>(u"kvmGuestsSaid"_s);
+        QVERIFY(said->property("text").toString().contains(u"List its virtual machines"_s));
+        QVariantList guests;
+        for (int vmid = 100; vmid < 140; ++vmid) {
+            guests.append(QVariantMap{{u"vmid"_s, vmid},
+                                      {u"node"_s, u"pve1"_s},
+                                      {u"name"_s, u"vm%1"_s.arg(vmid)},
+                                      {u"status"_s, u"running"_s},
+                                      {u"taken"_s, QString()}});
+        }
+        m_adding.listed(guests, 2);
+        auto* list = window->findChild<QQuickItem*>(u"kvmGuests"_s);
+        QTRY_COMPARE(list->property("count").toInt(), 40);
+        letTheWallComeToRest(window);
+        const QRectF inside(0, 0, window->width(), window->height());
+        for (const QString& name : holdStill) {
+            const auto* item = window->findChild<QQuickItem*>(name);
+            QCOMPARE(placeOf(item), before.value(name));
+            QVERIFY2(inside.contains(placeOf(item)), qPrintable(name));
+        }
+        QVERIFY(said->property("text").toString().contains(u"40"_s));
+        QVERIFY(said->property("text").toString().contains(u"2 containers"_s));
+        // Only the list scrolls: its last guest is reached in it, and stays inside it.
+        QVERIFY(list->property("contentHeight").toReal() > list->height());
+        QVERIFY(QMetaObject::invokeMethod(list, "positionViewAtEnd"));
+        // (A list's lines are its content's items, not the window's children.)
+        const auto guestIn = [list](const QString& name) -> QQuickItem* {
+            const auto* content = list->property("contentItem").value<QQuickItem*>();
+            const QList<QQuickItem*> lines = content != nullptr ? content->childItems() : QList<QQuickItem*>();
+            const auto found =
+                std::ranges::find_if(lines, [&name](const QQuickItem* one) { return one->objectName() == name; });
+            return found == lines.end() ? nullptr : *found;
+        };
+        QTRY_VERIFY(guestIn(u"kvmGuest139"_s) != nullptr);
+        QTRY_VERIFY(placeOf(list).adjusted(0, -1, 0, 1).contains(placeOf(guestIn(u"kvmGuest139"_s))));
+        // Review c9b-3, L3: that there are more guests than are seen, by the house's mark at the list's edge.
+        // (The mark at the right edge of what it marks, from inside it: at the end of a long list it may stand out
+        // below by its least height, as ScrollMark is everywhere.)
+        const auto markedIn = [&placeOf](const QQuickItem* mark, const QQuickItem* marked) {
+            const QRectF at = placeOf(mark);
+            const QRectF in = placeOf(marked).adjusted(0, -1, 0, 1);
+            return mark->isVisible() && in.contains(at.topLeft()) && at.right() >= in.right() - 1 &&
+                   at.right() <= in.right() + 1;
+        };
+        const auto* guestsMark = window->findChild<QQuickItem*>(u"kvmGuestsMark"_s);
+        QVERIFY(guestsMark != nullptr);
+        QVERIFY(markedIn(guestsMark, list));
+        keepPictureOf(window, smallest ? u"add-proxmox-guests-smallest"_s : u"add-proxmox-guests"_s);
+        // Review c9b-2, M2: a run of thirty adds, one of them refused, and what it says while it goes and after: in a
+        // place of one height of its own, which alone scrolls; the buttons, the list and its line where they were,
+        // and every added line and the refused one said together.
+        auto* outcome = window->findChild<QQuickItem*>(u"kvmOutcome"_s);
+        const auto* checking = window->findChild<QQuickItem*>(u"kvmChecking"_s);
+        QVERIFY(outcome != nullptr && outcome->isVisible());
+        QVERIFY(checking != nullptr && checking->isVisible());
+        const QRectF outcomeWas = placeOf(outcome);
+        QVERIFY(inside.contains(outcomeWas));
+        const QRectF checkingWas = placeOf(checking);
+        // (A run before it, whose lines go when this one begins: review c9b-3, L3.)
+        m_adding.beganARun();
+        m_adding.tookGuest(u"\"vm99\" added (VM 99 on pve1 Proxmox VE 9.2.21)"_s, u"AB:CD:EF"_s);
+        m_adding.guestsDone();
+        m_adding.beganARun();
+        letTheWallComeToRest(window);
+        QCOMPARE(checking->property("text").toString(), u"Checking"_s + QChar(0x2026));
+        const QRectF seen = placeOf(outcome).adjusted(0, -1, 0, 1);
+        const auto* problem = window->findChild<QQuickItem*>(u"kvmProblem"_s);
+        const auto* added = window->findChild<QQuickItem*>(u"kvmAdded"_s);
+        for (int vmid = 100; vmid < 130; ++vmid) {
+            if (vmid == 114) {
+                m_adding.refusedGuest(u"This device is already on the wall"_s);
+            } else {
+                m_adding.tookGuest(u"\"vm%1\" added (VM %1 on pve1 Proxmox VE 9.2.21)"_s.arg(vmid), u"AB:CD:EF"_s);
+            }
+            letTheWallComeToRest(window);
+            for (const QString& name : holdStill) {
+                QCOMPARE(placeOf(window->findChild<QQuickItem*>(name)), before.value(name));
+            }
+            QCOMPARE(placeOf(outcome), outcomeWas);
+            QCOMPARE(placeOf(checking), checkingWas);
+            // (Its newest line in sight while it goes.)
+            QVERIFY2(seen.contains(placeOf(added).bottomLeft() - QPointF(0, 4)), qPrintable(QString::number(vmid)));
+        }
+        // (While it goes, what it came to so far is said, both kinds: of this run alone, and that there is more.)
+        QVERIFY(problem->isVisible() && added->isVisible());
+        QCOMPARE(added->property("text").toString().count(u" added (VM "_s), 29);
+        QVERIFY(!added->property("text").toString().contains(u"VM 99 "_s));
+        const auto* outcomeMark = window->findChild<QQuickItem*>(u"kvmOutcomeMark"_s);
+        QVERIFY(outcomeMark != nullptr);
+        QVERIFY(markedIn(outcomeMark, outcome));
+        m_adding.guestsDone();
+        letTheWallComeToRest(window);
+        QVERIFY(checking->property("text").toString().isEmpty());
+        for (const QString& name : holdStill) {
+            const auto* item = window->findChild<QQuickItem*>(name);
+            QCOMPARE(placeOf(item), before.value(name));
+            QVERIFY2(inside.contains(placeOf(item)), qPrintable(name));
+        }
+        QCOMPARE(placeOf(outcome), outcomeWas);
+        QVERIFY(problem->isVisible() && added->isVisible());
+        QCOMPARE(problem->property("text").toString(), u"This device is already on the wall"_s);
+        QCOMPARE(added->property("text").toString().count(u" added (VM "_s), 29);
+        // The refusal and the first of those added in sight at once when it is over, the rest reached by scrolling that
+        // place alone.
+        QVERIFY(seen.contains(placeOf(problem)));
+        QVERIFY(seen.contains(placeOf(added).topLeft() + QPointF(0, 4)));
+        QVERIFY(outcome->property("contentHeight").toReal() > outcome->height());
+        QVERIFY(outcome->setProperty("contentY", outcome->property("contentHeight").toReal() - outcome->height()));
+        letTheWallComeToRest(window);
+        QVERIFY(seen.contains(placeOf(added).bottomLeft() - QPointF(0, 4)));
+        for (const QString& name : holdStill) {
+            QCOMPARE(placeOf(window->findChild<QQuickItem*>(name)), before.value(name));
+        }
+        keepPictureOf(window, smallest ? u"add-proxmox-run-smallest"_s : u"add-proxmox-run"_s);
+        // A list with none says why that may be.
+        m_adding.listed({}, 0);
+        QTRY_VERIFY(said->property("text").toString().contains(u"VM.Audit"_s));
+        for (const QString& name : holdStill) {
+            QCOMPARE(placeOf(window->findChild<QQuickItem*>(name)), before.value(name));
+        }
+        m_adding.reset();
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
@@ -2178,6 +2924,60 @@ private slots:
         QVERIFY(!m_editing.busy());
         QCOMPARE(giveUpAsked.count(), 1);
         keepPictureOf(window, u"edit-kvm-saved"_s);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    void removingAGuestStartedFromAnImageSaysWhatBecomesOfItsBootOrder()
+    {
+        // The outside review of the wave 2 desktop, 6.4: a guest started from an image "until unmounted" keeps the boot
+        // order it had beside its card alone. Removing the card forgot it, and no box said so: added again, an unmount
+        // had nothing to put back, and the guest kept its CD-ROM drive first. The question says so before the yes.
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        wall.machines()->setTiles(qkvm::ui::pretendWall());
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        m_editing.closed();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        QVERIFY(bringUp(window));
+        QObject* box = window->findChild<QObject*>(u"editKvm"_s);
+        QVERIFY(box != nullptr);
+        qkvm::ui::EditKvmView::Shown guest = aKvmOfTheWall();
+        guest.family = u"proxmox"_s;
+        guest.address = u"pve.lan/pve1/100"_s;
+        guest.bootOrderWas = u"scsi0;net0"_s;
+        guest.bootOrderWritten = u"ide2;scsi0;net0"_s;
+        m_editing.show(guest, false);
+        QTRY_VERIFY(box->property("opened").toBool());
+        const auto* remove = window->findChild<QQuickItem*>(u"editRemove"_s);
+        const auto* no = window->findChild<QQuickItem*>(u"removeNo"_s);
+        const auto* said = window->findChild<QQuickItem*>(u"removeBootOrder"_s);
+        QVERIFY(remove != nullptr && no != nullptr && said != nullptr);
+        QVERIFY(!said->isVisible());
+        clickOn(window, remove);
+        QTRY_VERIFY(says(window->contentItem(), u"Remove \"NAS\"?"_s));
+        QVERIFY(said->isVisible());
+        QCOMPARE(
+            said->property("text").toString(),
+            u"qKVM changed this guest's boot order to ide2;scsi0;net0 to start it from an image, and has not put "
+            "back the order it had, scsi0;net0. Removing the card forgets that order: the guest keeps the one it "
+            "has now. To have it put back, take the image out first; or set it on Proxmox (Options, Boot Order)."_s);
+        keepPictureOf(window, u"edit-guest-remove-boot-order"_s);
+        clickOn(window, no);
+        QTRY_VERIFY(!said->isVisible());
+        // A guest with no boot order from before, and any other card: nothing of one is said.
+        m_editing.closed();
+        guest.bootOrderWas.clear();
+        guest.bootOrderWritten.clear();
+        m_editing.show(guest, false);
+        QTRY_VERIFY(box->property("opened").toBool());
+        clickOn(window, remove);
+        QTRY_VERIFY(says(window->contentItem(), u"Remove \"NAS\"?"_s));
+        QVERIFY(!said->isVisible());
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
@@ -2583,6 +3383,27 @@ private slots:
         clickOn(window, close);
         QTRY_VERIFY(isSeen(name));
         QCOMPARE(trustAsked.count(), 3);
+        // What shows the certificate of another card of the wall: named, and no yes; where that is by what a VNC
+        // server's certificate says (two displays behind one TLS proxy may be both), the road there is (review cx6-2,
+        // L2: the box said that each needs a certificate of its own).
+        for (const bool saysSo : {true, false}) {
+            clickOn(window, review);
+            m_editing.began(u"looking"_s);
+            m_editing.reviewed(oneCertificate(), anotherCertificate(), u"\"Display one\""_s, saysSo);
+            QTRY_VERIFY(certificates->isVisible());
+            QVERIFY(m_editing.presentedSaysSo() == saysSo);
+            const QString said = warning->property("text").toString();
+            QVERIFY2(said.startsWith(u"What answers at this address shows the certificate of \"Display one\", which is "
+                                     "on this wall."_s),
+                     qPrintable(said));
+            QVERIFY2(said.endsWith(saysSo ? u"then remove this card and add it again, with Keep both."_s
+                                          : u"then each needs one of its own before both can be on the wall."_s),
+                     qPrintable(said));
+            QVERIFY(!m_editing.mayTrust());
+            clickOn(window, close);
+            QTRY_VERIFY(isSeen(name));
+        }
+        QCOMPARE(trustAsked.count(), 3);
         QVERIFY(QMetaObject::invokeMethod(box, "close"));
         QTRY_VERIFY(!box->property("opened").toBool());
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
@@ -2797,6 +3618,30 @@ private slots:
             QTest::keyClick(window, at < inTurn.size() - 1 ? Qt::Key_Tab : Qt::Key_Backtab);
         }
         keepPictureOf(window, u"edit-kvm-smallest"_s);
+
+        // A KVM whose plain address sends everybody on to HTTPS (web 0.3.2): that address offered, in sight with the
+        // buttons. Chosen, it goes into the address line and the keyboard to the password, as on the page; nothing is
+        // saved by itself.
+        m_editing.began(u"saving"_s);
+        m_editing.refused(u"This KVM answers on HTTPS: its plain address sends everybody to https://192.168.1.20:8443. "
+                          "To use it there, type https://192.168.1.20:8443"_s,
+                          false, u"https://192.168.1.20:8443"_s);
+        QTRY_VERIFY(isInSight(u"editUseInstead"_s));
+        for (const QString& name : {u"editProblem"_s, u"editCancel"_s, u"editSave"_s}) {
+            QVERIFY2(isInSight(name), qPrintable(name));
+        }
+        auto* use = window->findChild<QQuickItem*>(u"editUseInstead"_s);
+        QCOMPARE(use->property("text").toString(), u"Use https://192.168.1.20:8443"_s);
+        const QSignalSpy savedAsked(&m_editing, &qkvm::ui::EditKvmView::saveAsked);
+        clickOn(window, use);
+        const auto* address = window->findChild<QQuickItem*>(u"editAddress"_s);
+        QTRY_COMPARE(address->property("text").toString(), u"https://192.168.1.20:8443"_s);
+        QTRY_VERIFY(window->findChild<QQuickItem*>(u"editPassword"_s)->property("hasKeyboard").toBool());
+        QTRY_VERIFY(!use->isVisible());
+        QCOMPARE(savedAsked.count(), 0);
+        m_editing.began(u"saving"_s);
+        m_editing.refused(complaint);
+        QTRY_VERIFY(says(window->contentItem(), complaint));
 
         // The question before the KVM is taken off: all of it, and its two buttons. What was
         // complained of under the lines is not said under the question: it is not about that.
@@ -4084,6 +4929,71 @@ private slots:
                  "word."_s);
         letTheWallComeToRest(window);
         keepPictureOf(window, u"edit-kvm-known-by-windows-word-and-a-certificate-there-640x400"_s);
+        QVERIFY(QMetaObject::invokeMethod(box, "close"));
+        QTRY_VERIFY(!box->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    void aVncServerToBeKnownByWindowsWordIsSaidSoInItsFamilysWords()
+    {
+        // Outside review c9a-3, L3 (c9a-4, L3): a vncs:// server at an address where Windows trusts what is shown, in
+        // the box that changes it, was said to be "this KVM" from then on known by Windows' word. In its family's
+        // words, as everything else of its box is, whether it is known by a certificate now or by none; a KVM's stay.
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        wall.machines()->setTiles(qkvm::ui::pretendWall());
+        qkvm::ui::SessionView session;
+        session.show(atItsOwnWall());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        m_editing.closed();
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        window->resize(1280, 800);
+        QVERIFY(bringUp(window));
+        QObject* box = window->findChild<QObject*>(u"editKvm"_s);
+        const auto* warning = window->findChild<QQuickItem*>(u"certificateWarning"_s);
+        const auto* trust = window->findChild<QQuickItem*>(u"reviewTrust"_s);
+        QVERIFY(box != nullptr && warning != nullptr && trust != nullptr);
+        qkvm::ui::EditKvmView::Shown server = aKvmOfTheWall();
+        server.family = u"vnc"_s;
+        server.address = u"vncs://192.168.1.22:5901"_s;
+        server.user.clear();
+        qkvm::ui::EditKvmView::Shown known = server;
+        known.certificate.clear();
+        const QString at = u"vncs://console.example.com:5901"_s;
+        const QString notItsCertificate = u"Saying yes means that this VNC server is known by Windows' word from then "
+                                          "on, and no longer by its certificate."_s;
+        const QString fromThenOn = u"Saying yes means that this VNC server is known by Windows' word from then on."_s;
+        const auto saidOf = [&](const qkvm::ui::EditKvmView::Shown& shown, const QByteArray& remembered) -> QString {
+            m_editing.show(shown, false);
+            if (!QTest::qWaitFor([box] { return box->property("opened").toBool(); }, 5000)) {
+                return u"(not opened)"_s;
+            }
+            m_editing.began(u"saving"_s);
+            m_editing.differing(remembered, anotherCertificate(), at, true);
+            if (!QTest::qWaitFor([trust] { return isSeen(trust); }, 5000)) {
+                return u"(no yes)"_s;
+            }
+            const QString said = trust->property("text").toString() + u" | "_s +
+                                 (warning->isVisible() ? warning->property("text").toString() : u"(hidden)"_s);
+            static_cast<void>(QMetaObject::invokeMethod(box, "close"));
+            static_cast<void>(QTest::qWaitFor([box] { return !box->property("opened").toBool(); }, 5000));
+            return said;
+        };
+        QCOMPARE(saidOf(server, oneCertificate()), u"Trust Windows' word | "_s + notItsCertificate);
+        QCOMPARE(saidOf(known, QByteArray()), u"Trust Windows' word | "_s + fromThenOn);
+        QTRY_VERIFY(!box->property("opened").toBool());
+        // (A KVM's, as they were.)
+        m_editing.show(aKvmOfTheWall(), false);
+        QTRY_VERIFY(box->property("opened").toBool());
+        m_editing.began(u"saving"_s);
+        m_editing.differing(oneCertificate(), anotherCertificate(), u"kvm.example.com"_s, true);
+        QTRY_VERIFY(isSeen(trust));
+        QCOMPARE(warning->property("text").toString(),
+                 u"Saying yes means that this KVM is known by Windows' word from then on, and no longer by its "
+                 "certificate."_s);
         QVERIFY(QMetaObject::invokeMethod(box, "close"));
         QTRY_VERIFY(!box->property("opened").toBool());
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));

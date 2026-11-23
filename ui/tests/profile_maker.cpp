@@ -14,6 +14,7 @@
 // typed, in plain words: what the next version must read back the same). What that version's Windows code makes of
 // each secret is written beside them by qkvm-test-credential-shape. All made up.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -43,6 +44,11 @@
 #include <qkvm/core/settings.h>
 #include <qkvm/core/setup_overrides.h>
 #include <qkvm/core/sign_in_pacing.h>
+// (The record of the version that started with the profile, from 0.1.2 on: a version before has none.)
+#if __has_include(<qkvm/core/profile.h>)
+#include <qkvm/core/profile.h>
+#define QKVM_PROFILE_RECORDS_ITS_VERSION 1
+#endif
 
 #include "app_lock.h"
 #include "memory_secrets.h"
@@ -177,6 +183,18 @@ void writeJson(const QString& file, const QJsonObject& what, const QString& name
     check(out.open(QIODevice::WriteOnly) && out.write(QJsonDocument(what).toJson()) > 0, name + u" was not written"_s);
 }
 
+// A start, as main.cpp begins one before anything of the profile is read: from 0.1.2 on, the version is recorded
+// (core::profile::atStart: at a first start nothing is there to be kept, and only the record is written).
+void recordTheStart(const QString& settingsFile)
+{
+#ifdef QKVM_PROFILE_RECORDS_ITS_VERSION
+    const auto started = core::profile::recordStart(settingsFile, QCoreApplication::applicationVersion());
+    check(static_cast<bool>(started) && started.value().keptAs.isEmpty(), u"the start was not recorded"_s);
+#else
+    static_cast<void>(settingsFile);
+#endif
+}
+
 struct Kvm {
     core::OwnKvm kvm;
     QString password;
@@ -233,6 +251,7 @@ void makeAWallScreen(const QDir& out, const QString& commit, const QDateTime& no
 {
     const QString settingsFile = out.filePath(u"profile/settings.json"_s);
     core::testing::MemorySecrets secrets;
+    recordTheStart(settingsFile);
     core::Settings settings(settingsFile);
     core::SignInPacing pacing(core::SignInPacing::mostKept, [] { return qint64{1'000'000}; });
     core::PacingFile::Pace pace;
@@ -289,6 +308,9 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now);
 int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
+    // The version, as the program has it (ui/application.cpp, prepareApplication): from 0.1.2 on, the settings say it
+    // wrote them ("written_by").
+    QCoreApplication::setApplicationVersion(QStringLiteral(QKVM_DESKTOP_VERSION));
     if (argc != 3 && argc != 4) {
         stop(u"give an empty folder, the commit this was built at, and person or wall-screen"_s);
     }
@@ -318,6 +340,7 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
     const QString settingsFile = out.filePath(u"profile/settings.json"_s);
     const qint64 nowMs = now.toMSecsSinceEpoch();
     core::testing::MemorySecrets secrets;
+    recordTheStart(settingsFile);
     core::Settings settings(settingsFile);
     core::SignInPacing pacing(core::SignInPacing::mostKept, [] { return qint64{1'000'000}; });
     core::PacingFile::Pace pace;
@@ -346,8 +369,9 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
 
     // This PC's own wall: a kvmd known by its certificate, a kvmd over plain HTTP with two screen watches, a JetKVM,
     // and a server's management controller, each with its password, as the box that adds a KVM hands it over; and a
-    // kvmd from a file of the wall, with its certificate itself. And three saved actions: one that presses keys, one
-    // that types a short text, and one whose text is kept in two parts.
+    // kvmd from a file of the wall, with its certificate itself; and (from 0.2.0 on) a virtual machine on Proxmox VE,
+    // with its API token's secret, and a kvmd whose renewed certificate was said yes to as a cut left that change. And
+    // three saved actions: one that presses keys, one that types a short text, and one whose text is kept in two parts.
     QList<Kvm> kvms;
     {
         core::OwnKvm one;
@@ -406,6 +430,36 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
         one.certificate = read.value_or(core::exchange::KeptCertificate{}).sha256;
         kvms.append({one, u"made-up imported password"_s, read.value_or(core::exchange::KeptCertificate{}).pem});
     }
+    {
+        // A guest of a Proxmox VE (wave 2), as the box that adds one hands it over: its Proxmox's API address, its node
+        // and number there, the token's ID as the user, the Proxmox's certificate, and the number the guest gives for
+        // itself (rule 30). The token's secret is in the shape Proxmox gives one, and made up.
+        core::OwnKvm one;
+        one.kind = u"proxmox"_s;
+        one.name = u"Test VM"_s;
+        one.address = u"https://198.51.100.33:8006"_s;
+        one.node = u"pve1"_s;
+        one.vmid = 101;
+        one.user = u"qkvm@pve!wall"_s;
+        one.group = u"Rack B"_s;
+        one.knownByCertificate = true;
+        one.certificate = madeUpDigest("a made-up certificate of the Proxmox VE host");
+        one.machine = u"proxmox:"_s + QString::fromLatin1(madeUpDigest("a made-up guest").toHex().left(32));
+        kvms.append({one, u"5e1f0c2a-7b3d-4e6f-9a8b-1c2d3e4f5a6b"_s, {}});
+    }
+    {
+        // A kvmd whose renewed certificate is said yes to below, the change of its password cut off (madeACut).
+        core::OwnKvm one;
+        one.kind = u"kvmd"_s;
+        one.name = u"Rack KVM"_s;
+        one.address = u"https://192.0.2.13"_s;
+        one.user = u"admin"_s;
+        one.group = u"Rack A"_s;
+        one.knownByCertificate = true;
+        one.certificate = madeUpDigest("a made-up certificate of the rack KVM");
+        kvms.append({one, u"made-up rack password"_s, {}});
+    }
+    QJsonValue madeACut;
     struct Typed {
         core::OwnActions::Typed typed;
         QString id;
@@ -425,6 +479,35 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
         check(taken.size() == 1 && taken.front(), u"the KVM of a file was not taken"_s);
         imported.kvm.id = taken.front().value();
         check(!wall.certificateOf(imported.kvm.id).isEmpty(), u"the certificate itself was not kept"_s);
+        Kvm& guest = kvms[5];
+        const base::Result<QString> addedGuest = wall.add(guest.kvm, guest.password);
+        check(static_cast<bool>(addedGuest), u"%1 was not added"_s.arg(guest.kvm.name));
+        guest.kvm.id = addedGuest.value();
+        // The rack KVM's renewed certificate said yes to, and Windows not taking the change's last keeping, after the
+        // settings were written: from 0.2.0 on the store keeps the two records together (`QKVM-KVM-2+`, SPEC.md section
+        // 11.4), as a change cut off leaves them, and the settings name the KVM as it is now, with its password; every
+        // later version reads it so, and makes it one record (review cx6-1, M2). A version before keeps one record of
+        // it, and says none was left so. (A template: a version's store in memory without that refusal refuses none.)
+        Kvm& renewed = kvms[6];
+        const base::Result<QString> addedRenewed = wall.add(renewed.kvm, renewed.password);
+        check(static_cast<bool>(addedRenewed), u"%1 was not added"_s.arg(renewed.kvm.name));
+        renewed.kvm.id = addedRenewed.value();
+        const QByteArray certificateBefore = renewed.kvm.certificate;
+        renewed.kvm.certificate = madeUpDigest("the renewed certificate of the rack KVM");
+        // (The keeping `after` keepings from now refused; none where `after` is 0.)
+        const auto refuseTheKeep = [](auto& store, int after) {
+            if constexpr (requires { store.refusesTheKeep = store.keeps; }) {
+                store.refusesTheKeep = after == 0 ? 0 : store.keeps + after;
+            }
+        };
+        refuseTheKeep(secrets, 2);
+        check(static_cast<bool>(wall.knowBy(renewed.kvm.id, renewed.kvm.certificate)),
+              u"the rack KVM's renewed certificate was not said yes to"_s);
+        refuseTheKeep(secrets, 0);
+        if (secrets.all.value(core::LocalWall::secretOf(renewed.kvm.id)).startsWith("QKVM-KVM-2+\n")) {
+            madeACut = QJsonObject{{u"id"_s, renewed.kvm.id},
+                                   {u"certificate_before"_s, QString::fromLatin1(certificateBefore.toHex())}};
+        }
         core::OwnActions::Typed presses;
         presses.name = u"Restart (Ctrl+Alt+Del)"_s;
         presses.keys = u"ControlLeft,AltLeft,Delete"_s;
@@ -449,11 +532,13 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
     }
 
     // What a person chooses, and where the windows were: as the settings box, the windows and the menus remember it.
-    // And a KVM of a family this version does not speak to, as a newer build would have left it: kept as it stands.
+    // And a KVM of a family this version does not speak to, as a newer build would have left it: kept as it stands. Of
+    // a kind no version speaks to: the makers of 0.1.0 and 0.1.1 wrote "vnc" here, a family from 0.2.0 on, and their
+    // fixtures were changed to this kind by hand (the fixtures' README says how).
     const QUrl server(serverAddress);
     const QString serverScope = scopeOf(server, u"u1"_s);
     const QJsonObject unknownFamily{{u"id"_s, u"0f1e2d3c"_s},
-                                    {u"kind"_s, u"vnc"_s},
+                                    {u"kind"_s, u"a-later-family"_s},
                                     {u"name"_s, u"A family of later"_s},
                                     {u"address"_s, u"https://198.51.100.32"_s},
                                     {u"user"_s, u"admin"_s},
@@ -483,6 +568,27 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
         chosen.reachedEncrypted = {u"198.51.100.20"_s};
         chosen.certificates.insert(u"198.51.100.20:443"_s, madeUpDigest("a made-up certificate of another server"));
         chosen.kvmsItDoesNotRead.append(unknownFamily);
+        // The guest's boot order from before (from 0.2.0 on): its driver started it from an image "until unmounted",
+        // and the order it replaced is kept with it until the unmount puts it back (as the wall notes it).
+        {
+            Kvm& guest = kvms[5];
+            guest.kvm.bootOrderWas =
+                core::BootOrderWas{u"scsi0;ide2;net0"_s, u"ide2;scsi0;net0"_s, guest.kvm.vmid, guest.kvm.machine};
+            const auto kept =
+                std::ranges::find_if(chosen.kvms, [&guest](const core::OwnKvm& one) { return one.id == guest.kvm.id; });
+            check(kept != chosen.kvms.end(), u"the guest is not on the wall"_s);
+            kept->bootOrderWas = guest.kvm.bootOrderWas;
+        }
+        // Where the server's controller keeps its computer (from 0.2.0 on), as the wall notes what its driver found: at
+        // its place, among the several computers its controller lists.
+        {
+            Kvm& controller = kvms[3];
+            controller.kvm.serverPlace = core::ServerPlace{u"/redfish/v1/Systems/Self"_s, true};
+            const auto kept = std::ranges::find_if(
+                chosen.kvms, [&controller](const core::OwnKvm& one) { return one.id == controller.kvm.id; });
+            check(kept != chosen.kvms.end(), u"the server is not on the wall"_s);
+            kept->serverPlace = controller.kvm.serverPlace;
+        }
         core::WallWindow first;
         first.source = u"pc"_s;
         first.place = core::WindowPlace{40, 40, 960, 640, false, false};
@@ -606,12 +712,29 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
     {
         core::SetupOverrides overrides(settingsFile + u".setup-overrides"_s, [when = now] { return when; });
         static_cast<void>(overrides.mayBeSet(QUrl(storage.address), storage.machine, now.addSecs(120)));
+        // And, from 0.1.2 on, the controller only queued the press's change (a 202): marked so, and no look lets it
+        // go (SetupOverrides::markQueued). A version before has no such mark. (Templates, so that what a version does
+        // not have is never looked at.)
+        const auto markQueued = [&storage](auto& kept) {
+            if constexpr (requires { kept.markQueued(QUrl(), QString()); }) {
+                kept.markQueued(QUrl(storage.address), storage.machine);
+            }
+        };
+        markQueued(overrides);
         check(overrides.written().value_or(false), u"the setup overrides were not written"_s);
+        const auto queued = [](const auto& left) {
+            if constexpr (requires { left.queued; }) {
+                return static_cast<bool>(left.queued);
+            } else {
+                return false;
+            }
+        };
         for (const core::SetupOverrides::Left& left : overrides.all()) {
             madeOverrides.append(QJsonObject{{u"address"_s, left.address},
                                              {u"machine"_s, left.machine},
                                              {u"since"_s, left.since.toString(Qt::ISODateWithMs)},
-                                             {u"doubt_until"_s, left.doubtUntil.toString(Qt::ISODateWithMs)}});
+                                             {u"doubt_until"_s, left.doubtUntil.toString(Qt::ISODateWithMs)},
+                                             {u"queued"_s, queued(left)}});
         }
     }
     // An update handed over to Setup ("Install and restart"), and Setup's log of it: the note in the form this
@@ -644,20 +767,33 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
     dumpSecrets(out, secrets);
     QJsonArray madeKvms;
     for (const Kvm& one : std::as_const(kvms)) {
-        madeKvms.append(QJsonObject{{u"id"_s, one.kvm.id},
-                                    {u"name"_s, one.kvm.name},
-                                    {u"kind"_s, one.kvm.kind},
-                                    {u"address"_s, one.kvm.address},
-                                    {u"user"_s, one.kvm.user},
-                                    {u"group"_s, one.kvm.group},
-                                    {u"password"_s, one.password},
-                                    {u"known_by_certificate"_s, one.kvm.knownByCertificate},
-                                    {u"certificate"_s, QString::fromLatin1(one.kvm.certificate.toHex())},
-                                    {u"certificate_pem"_s, one.certificatePem},
-                                    {u"number"_s, one.kvm.number},
-                                    {u"machine"_s, one.kvm.machine},
-                                    {u"no_signal_minutes"_s, one.kvm.noSignalMinutes},
-                                    {u"unchanged_minutes"_s, one.kvm.unchangedMinutes}});
+        const std::optional<core::BootOrderWas>& was = one.kvm.bootOrderWas;
+        madeKvms.append(QJsonObject{
+            {u"id"_s, one.kvm.id},
+            {u"name"_s, one.kvm.name},
+            {u"kind"_s, one.kvm.kind},
+            {u"address"_s, one.kvm.address},
+            {u"user"_s, one.kvm.user},
+            {u"group"_s, one.kvm.group},
+            {u"password"_s, one.password},
+            {u"known_by_certificate"_s, one.kvm.knownByCertificate},
+            {u"certificate"_s, QString::fromLatin1(one.kvm.certificate.toHex())},
+            {u"certificate_pem"_s, one.certificatePem},
+            {u"number"_s, one.kvm.number},
+            {u"machine"_s, one.kvm.machine},
+            {u"server_place"_s, one.kvm.serverPlace != core::ServerPlace{}
+                                    ? QJsonValue(QJsonObject{{u"place"_s, one.kvm.serverPlace.place},
+                                                             {u"among_several"_s, one.kvm.serverPlace.amongSeveral}})
+                                    : QJsonValue()},
+            {u"node"_s, one.kvm.node},
+            {u"vmid"_s, one.kvm.vmid},
+            {u"boot_order_was"_s, was ? QJsonValue(QJsonObject{{u"order"_s, was->order},
+                                                               {u"written"_s, was->written},
+                                                               {u"vmid"_s, was->vmid},
+                                                               {u"machine"_s, was->machine}})
+                                      : QJsonValue()},
+            {u"no_signal_minutes"_s, one.kvm.noSignalMinutes},
+            {u"unchanged_minutes"_s, one.kvm.unchangedMinutes}});
     }
     QJsonArray madeActions;
     for (const Typed& one : std::as_const(actions)) {
@@ -677,6 +813,8 @@ void makeAPerson(const QDir& out, const QString& commit, const QDateTime& now)
                   {u"app_password"_s, appPassword},
                   {u"automatic"_s, true},
                   {u"kvms"_s, madeKvms},
+                  // (From 0.2.0 on: the KVM whose record of two a cut change left, and what it was known by before.)
+                  {u"cut_change"_s, madeACut},
                   {u"kvm_of_another_family"_s, unknownFamily},
                   {u"actions"_s, madeActions},
                   {u"server"_s, QJsonObject{{u"address"_s, serverAddress},

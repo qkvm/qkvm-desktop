@@ -23,7 +23,7 @@ Checks: >
   modernize-make-shared,
   readability-identifier-naming
 WarningsAsErrors: '*'
-HeaderFilterRegex: '[/\\]desktop[/\\](base|engine|input|bmc|core|ui|bench)[/\\]'
+HeaderFilterRegex: '[/\\]desktop[/\\](base|engine|input|bmc|rfb|core|ui|bench)[/\\]'
 CheckOptions:
   # Qt's way of naming, because QML needs it (DESIGN.md section 10).
   - { key: readability-identifier-naming.ClassCase, value: CamelCase }

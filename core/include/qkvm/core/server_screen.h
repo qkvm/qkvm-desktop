@@ -22,6 +22,7 @@
 #include <qkvm/bmc/ami_console.h>
 #include <qkvm/bmc/aspeed.h>
 #include <qkvm/core/device_line.h>
+#include <qkvm/core/server_console.h>
 #include <qkvm/core/typed_keys.h>
 
 namespace qkvm::core {
@@ -66,11 +67,16 @@ class ScreenReader;
 // * Nothing in the first Limits::keysSettleMs of a first session (the controller attaches its keyboard and mouse to
 //   the server only then, and a key before is lost); keys wait at most Limits::inputWaitMs for a console that is open
 //   and this program's.
-// * Nothing is said behind what has waited Limits::inputSayMs to leave: a key from then would be pressed now. A
-//   report that only lets go (of a key, a modifier or a button, and presses none) is said all the same, behind what
-//   waits: it presses nothing. Where it has not left within Limits::letGoWithinMs, while the line goes on, the
-//   session is ended (the controller lets go of what a session had down as it ends) and said so ("dropped": a key
-//   may have stayed down meanwhile).
+// * Nothing that presses, moves or turns the wheel is said behind what has waited Limits::inputSayMs to leave: a key
+//   from then would be pressed now ("busy": the turn stands, and the console goes on). (What was said before that
+//   waits, and goes, up to Limits::sayMs, the line's own limit, ten seconds in 0.2.0: SPEC.md section 8 says why.)
+//   What a report lets go of (a key, a modifier or a button) is said all the same, behind what waits, alone: it presses
+//   nothing; a button let go of there goes where the pointer stands, without its move and its wheel. Each letting go is
+//   watched by where it ends among all that was said (DeviceLine::mark): where it has not left within
+//   Limits::letGoWithinMs, while the line goes on, the session is ended (the controller lets go of what a session had
+//   down as it ends; an assumption of the web's, not yet seen on a real board) and said so (`leftDown`, then "dropped":
+//   a key may have stayed down meanwhile). A console that is slow and well, behind which something always waits, takes
+//   each in its time, and goes on.
 // * Nothing stays down: what this program has down is let go of with the turn, before the console is given away,
 //   at once where it was switched to another session, before the goodbye where the screen is closed or thrown away,
 //   and where the server's mouse becomes a relative one (a relative report then, as the web's); a typing stopped with
@@ -79,7 +85,7 @@ class ScreenReader;
 //   again every Limits::askAgainEvery keys whether they may still have it typed.
 // The keys are the program's own: a live line's by their USB numbers, as input/keys.h gives them (typed::Keyboard
 // makes the whole keyboard of them, typed::buttonBit a button), an action's by name or as a text (typed_keys.h).
-class ServerScreen : public QObject {
+class ServerScreen : public ServerConsole {
     Q_OBJECT
 
 public:
@@ -122,8 +128,6 @@ public:
     // seat of that controller, whichever driver made them (ConsoleSeats). On one thread: the screens it is given to
     // live on the thread it was made on.
     static Asker oneSeatAtATime(Asker asker);
-    // The screen, each time a frame changed it.
-    using Shown = std::function<void(const bmc::aspeed::Picture&, std::span<const bmc::aspeed::Rect>)>;
 
     // What the console is held to, as the web's (redfish.py 141-205). A test makes the times short.
     struct Limits {
@@ -170,47 +174,50 @@ public:
     // is open and none was refused for now; holds one open. What stands: ok once the screen has been shown in the
     // session that is open; "no_stream" while one opens or the screen has not come; why the last came to nothing,
     // until the next may be asked for.
-    base::Result<void> look();
+    base::Result<void> look() override;
     // The session's screen as it stands; empty before its first frame and after it ended (the screen is not kept
     // beyond the line it came over).
-    const bmc::aspeed::Picture& picture() const noexcept;
+    const bmc::aspeed::Picture& picture() const noexcept override;
     // This program's session holds the console's keyboard and mouse: the controller said "the console is yours",
     // and has given it to nobody since.
     bool holdsTheConsole() const noexcept;
     // Frames of the session that is open taken off its line and not shown yet (read, or waiting to be): two at the
     // most, and whatever completes in the one message of the line under way as the second does.
     int framesWaiting() const noexcept;
+    // How long what was said to the console has waited to leave this program, in milliseconds (0: nothing waits, or no
+    // session is open): what keys and the pointer are held back by (Limits::inputSayMs).
+    qint64 inputWaitedMs();
     // The screen's still for a card `width` pixels wide (base/screen_still.h), made on the frames' thread from the
     // screen as it stands once the frames taken off the line before have been read, and handed to `done` later on this
     // thread: the packet, or why there is none ("no_stream": no session shows the screen now, or it ended first; what
     // the session came to where it ended for a reason). Not answered where this is thrown away first.
-    using StillAnswer = std::function<void(base::Result<QByteArray>)>;
-    void still(int width, StillAnswer done);
+    void still(int width, StillAnswer done) override;
     // Ends the session that is open, letting go of what is down and saying goodbye, and opens none again. Whoever
     // waits for keys (askForInput) or a typing is answered, from inside this ("dropped"). Thrown away, the same, but
     // nobody is answered: whoever asked threw it away.
-    void close();
+    void close() override;
 
     // The console's keyboard and mouse are asked for, to go in a turn (see above): a number no other turn of any
-    // screen of this program has. Answered once, now or later,
+    // screen of this program has, while it runs. Answered once, now or later,
     // within Limits::inputWaitMs: the turn, or why not: "in_use" where the console is somebody else's, or was given
     // to somebody at the controller's own page; "no_stream" where it is not open and this program's when the time
     // is up, or its keyboard is not attached yet; what look() says where the screen cannot be had now
     // ("console_held", "no_picture", ...). Asking looks at the screen (look()), and so keeps the console.
-    using InputAnswer = std::function<void(base::Result<int>)>;
-    void askForInput(InputAnswer answer);
-    // The whole keyboard (the modifiers and the keys down), in that turn. Refused with why where the turn has
-    // ended, and where the keyboard is not attached yet; "dropped" where what was said to the console before has
-    // waited Limits::inputSayMs to leave (nothing that presses is said behind it; the console goes on), and where the
+    void askForInput(InputAnswer answer) override;
+    // The whole keyboard (the modifiers and the keys down), in that turn. Refused with why: "invalid" for more than
+    // six keys or one twice (before anything else); where the turn has ended, and where the keyboard is not attached
+    // yet; "busy" where what was said to the console before has waited Limits::inputSayMs to leave and the report
+    // presses something (what it lets go of goes all the same: see above; the turn stands); "dropped" where the
     // console has gone in the saying.
-    base::Result<void> keyboard(const typed::Report& keys, int turn);
+    base::Result<void> keyboard(const typed::Report& keys, Turn turn) override;
     // The mouse, as an absolute one: the buttons held (bits, typed::buttonBit), the place (0 to 32767 each way over
-    // the screen) and a turn of the wheel. Refused as keyboard() is, and where the console says the server's mouse
-    // is relative ("no_input": this program moves an absolute one only, so far), but for a report that lets go of
-    // buttons, which goes as a relative one there.
-    base::Result<void> mouse(std::uint8_t buttons, int x, int y, int wheel, int turn);
+    // the screen) and a turn of the wheel. Refused as keyboard() is ("busy" also for a move and a turn of the wheel
+    // behind what waits; a report that only lets go is done there without them), and where the console says the
+    // server's mouse is relative ("no_input": this program moves an absolute one only, so far; nothing is down then,
+    // what was held was let go of, as a relative report, as it became so).
+    base::Result<void> mouse(std::uint8_t buttons, int x, int y, int wheel, Turn turn) override;
     // Whether keys of this turn may go: why not where the turn is over (as keyboard() would refuse them).
-    base::Result<void> inTurn(int turn) const;
+    base::Result<void> inTurn(Turn turn) const override;
 
     // Typings: keys pressed together and let go of (an action's keys, Ctrl+Alt+Del), or a text typed, over the
     // console, one typing after the other (two at once would interleave on the one keyboard). Each asks for the
@@ -218,20 +225,15 @@ public:
     // and every Limits::askAgainEvery keys ("stopped" where not). Answered once, later: done, or why not: "invalid"
     // for keys or a text that cannot be typed (before anything is asked; the text never quoted), "stopped", or what
     // askForInput or keyboard() said.
-    using Still = std::function<bool()>;
-    using Typed = std::function<void(base::Result<void>)>;
-    void press(const QString& keys, Still still, Typed done);
-    void type(const QString& text, Still still, Typed done);
+    void press(const QString& keys, Still still, Typed done) override;
+    void type(const QString& text, Still still, Typed done, bool thenEnter = false) override;
     // Every typing is stopped: the one under way where it is (a key it holds down is let go of), and those that
     // wait. Each is answered "stopped", from inside this.
-    void stopTyping();
+    void stopTyping() override;
 
-signals:
-    // A session ended: how. An empty code: nobody looked any more, and it was given back.
-    void ended(const QString& code, const QString& message);
-    // A key or a button this program let go of may have stayed down on the server (its letting go did not leave in
-    // time): said just before the session is ended for it (`ended`).
-    void leftDown();
+    // (Its signals are ServerConsole's: `ended`, a session ended, how, an empty code where nobody looked any more and
+    // it was given back; `leftDown`, a key or a button this program let go of may have stayed down on the server, its
+    // letting go not having left in time, said just before the session is ended for it.)
 
 private:
     struct Session;
@@ -269,13 +271,15 @@ private:
     // Whoever asked for them and may be answered now is.
     void answerInput();
     // What an asking that waits until then is answered now; nothing while it waits.
-    std::optional<base::Result<int>> inputNow(qint64 until, const base::Result<void>& looked) const;
+    std::optional<base::Result<Turn>> inputNow(qint64 until, const base::Result<void>& looked) const;
     // Asks for the keyboard for a typing (by its number): taken out again where the typing ends first.
     void askForInput(InputAnswer answer, std::uint64_t typing);
-    // Whether keys of this turn may go now; `letsGo`: the report only lets go, and goes behind what waits.
-    base::Result<void> mayGo(int turn, bool letsGo);
+    // Whether keys of this turn may go now (the turn stands, and the keyboard is attached).
+    base::Result<void> mayGo(Turn turn);
+    // What was said to the console before has waited Limits::inputSayMs to leave: nothing that presses goes now.
+    bool backlogged();
     // A keyboard or mouse report of this turn, said.
-    base::Result<void> sayInput(int turn, const bmc::ami::Bytes& report);
+    base::Result<void> sayInput(Turn turn, const bmc::ami::Bytes& report);
     // The console goes to somebody else: what this program has down there is let go of, and its turn ends. False
     // where the session ended in that.
     bool giveUpInput();
@@ -284,14 +288,14 @@ private:
     bool letGoOfWhatIsDown();
     // The turn is over, for this reason.
     void endTurn(base::Error why);
-    // A letting go was said behind what waits: it has to leave within Limits::letGoWithinMs; and whether it has.
+    // A letting go was said: where it has not left yet, it has to within Limits::letGoWithinMs; and whether it has.
     void watchLettingGo();
     void letGoOwed();
     void inputTick();
     // Typings: the next step of the first, its end, and the queue.
     void queueTyping(std::unique_ptr<Typing> typing);
     void typingStep();
-    void typingTurn(std::uint64_t number, base::Result<int> turn);
+    void typingTurn(std::uint64_t number, base::Result<Turn> turn);
     void endTyping(base::Result<void> how);
 
     Asker m_asker;
@@ -321,7 +325,7 @@ private:
     int m_failures = 0;
     std::optional<bool> m_completeFirst;
     // Keys and the pointer: the turn they go in now, and why the last one ended (what keys of an ended turn are told).
-    int m_turn = 0;
+    Turn m_turn = 0;
     base::Error m_lost{"dropped", "The server's console was closed"};
     struct Asking {
         InputAnswer answer;
@@ -329,8 +333,6 @@ private:
         std::uint64_t typing = 0; // the typing it was asked for, if one
     };
     std::vector<Asking> m_askings;
-    // A letting go that was said behind what waits to leave: by when it has to have left.
-    std::optional<qint64> m_owed;
     QTimer m_inputTicks;
     // The typings, the first under way.
     std::deque<std::unique_ptr<Typing>> m_typings;

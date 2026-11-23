@@ -10,6 +10,7 @@
 #include <QString>
 #include <QUrl>
 
+#include <qkvm/core/media_place.h>
 #include <qkvm/core/server_types.h>
 #include <qkvm/core/wall_source.h>
 
@@ -103,10 +104,11 @@ public:
     // How an address is opened in the browser of whoever sits here, and whether that went. Without
     // one nothing is opened, and that is said: a test opens no browser.
     void openPagesWith(std::function<bool(const QUrl&)> opener);
-    // Of which source whoever sits here may have the machines' virtual media, and through which client: an admin of
-    // that qKVM, signed in in person, while the program does not only show (the windows' wall says: MergedWall).
-    // Nothing: of none, as without this. Asked whenever a menu is filled, a box opened, or who is there is told.
-    void useMedia(std::function<core::ServerClient*(const QString& source)> of) { m_mediaOf = std::move(of); }
+    // Of which source whoever sits here may have the machines' virtual media, and where they are asked for: through
+    // the client of a qKVM, for an admin of it signed in in person; this PC's own wall, for its kvmd KVMs; and neither
+    // while the program only shows (the windows' wall says: MergedWall). Nothing: of none, as without this. Asked
+    // whenever a menu is filled, a box opened, or who is there is told.
+    void useMedia(std::function<core::MediaPlace*(const QString& source)> of) { m_mediaOf = std::move(of); }
     // The QKVM's own page, in the same browser: only a web address is opened, and where none
     // opens, that is said.
     void openThePage(const QUrl& address);
@@ -147,6 +149,8 @@ private:
     void close();
     void choose(const QString& row);
     void answer(bool yes, int paceSeconds, bool ticked);
+    // The no of a question by its button, where that no sends something (a card's No: Ask::noAction).
+    void answerNo();
     // Several machines: those that are picked on the wall get their menu (one alone gets its own).
     void openPicked();
     void chooseForSeveral(const QString& row);
@@ -185,11 +189,11 @@ private:
     // Whom the open box is for, as a question names them: a machine, or "3 KVMs".
     QString formIsFor() const;
     void followTheWall();
-    // The media box of this machine (by its key), for whoever may have its media; and whose they are: the client of
+    // The media box of this machine (by its key), for whoever may have its media; and where they are: the place of
     // that source where whoever sits here may have them, and nothing otherwise. The box goes where that is so no
     // longer (keepTheMediaBox).
     void openMedia(const QString& machine);
-    core::ServerClient* mediaOf(const QString& source) const;
+    core::MediaPlace* mediaOf(const QString& source) const;
     void keepTheMediaBox();
     // Asks first where that is called for, and sends otherwise. `fromMenu`: the menu holds still
     // until it is over. `savedOf`: as for several.
@@ -197,6 +201,10 @@ private:
     void send(const core::Machine& machine, const Ask& ask, bool fromMenu, const std::optional<QString>& savedOf);
     // Whether this goes to a machine of this source: a saved action only to the source it is of.
     static bool goesTo(const Ask& ask, const std::optional<QString>& savedOf, const QString& source);
+    // Whether it goes only where the machine's status offers it: all but a card's No (review cx2-3, M-a); and what is
+    // said where that No could not be sent.
+    static bool heldToItsStatus(const core::Action& action);
+    static QString notSaid(const core::Machine& machine);
     // The answer of the place it was sent to.
     void told(const core::Machine& machine, const Ask& ask, const base::Result<core::Done>& answer,
               const Reached& sentTo);
@@ -292,8 +300,12 @@ private:
     void putInView(const core::Machine& machine, const QString& view);
     bool m_viewing = false;
     // Whose media whoever sits here may have (useMedia); and the source of the machine the media box is open for.
-    std::function<core::ServerClient*(const QString& source)> m_mediaOf;
+    std::function<core::MediaPlace*(const QString& source)> m_mediaOf;
     QString m_mediaFor;
+    // Where the wall said that machine is when its box was opened (its host and page): where it says another, the box
+    // goes (MediaView::movedElsewhere).
+    QString m_mediaWhere;
+    static QString whereOf(const core::Machine& machine);
 };
 
 } // namespace qkvm::ui

@@ -48,10 +48,18 @@ bool aPass(const QString& said)
 }
 
 // How a controller said one of its two words for "the server's own monitor goes dark while a console is open" (the
-// web's said_yes, and the owner's decision of 2026-11-05 for a word that is not said). A real board says 0 or 1. A
-// plain no is a no; said some other way, or as something that cannot be read, it is not taken for a no (the console
-// is the thing to leave alone when in doubt); and not said at all (or said as nothing) is no no either.
+// web's said_yes and not_said, and the owner's decision of 2026-11-05 for a word that is not said). A real board says
+// 0 or 1. A plain no is a no; said some other way, or as something that cannot be read, it is not taken for a no (the
+// console is the thing to leave alone when in doubt); and not said at all, or said as nothing (an empty text, or
+// blanks), is no no either (web 0.3.2, its review's LOW: the empty text was taken for a no, and the console opened).
 enum class MonitorWord { No, Yes, NotSaid };
+
+// A blank as the web's strip() takes one off a text (Python's str.isspace): Qt's spaces, and the four separators
+// 0x1C to 0x1F, which Qt's are not.
+bool blank(QChar letter)
+{
+    return letter.isSpace() || (letter.unicode() >= 0x1C && letter.unicode() <= 0x1F);
+}
 
 MonitorWord monitorWordOf(const QJsonValue& value)
 {
@@ -65,8 +73,22 @@ MonitorWord monitorWordOf(const QJsonValue& value)
         return value.toDouble() != 0 ? MonitorWord::Yes : MonitorWord::No;
     }
     if (value.isString()) {
-        static const QStringList noes{QString(), u"0"_s, u"false"_s, u"off"_s, u"no"_s, u"disabled"_s};
-        return noes.contains(value.toString().trimmed().toLower()) ? MonitorWord::No : MonitorWord::Yes;
+        const QString said = value.toString();
+        qsizetype from = 0;
+        qsizetype to = said.size();
+        while (from < to && blank(said[from])) {
+            ++from;
+        }
+        while (to > from && blank(said[to - 1])) {
+            --to;
+        }
+        if (from == to) {
+            return MonitorWord::NotSaid;
+        }
+        // (Lowered as the web's lower() lowers it, by Unicode's full mapping: a capital I with a dot becomes two
+        // letters, and no letter outside ASCII becomes one of these.)
+        static const QStringList noes{u"0"_s, u"false"_s, u"off"_s, u"no"_s, u"disabled"_s};
+        return noes.contains(said.sliced(from, to - from).toLower()) ? MonitorWord::No : MonitorWord::Yes;
     }
     return MonitorWord::Yes;
 }
@@ -100,9 +122,25 @@ base::Error mayDarken()
     return {"no_picture", "The controller does not say whether it switches the server's own monitor off while its "
                           "console is open, so qKVM leaves the console alone"};
 }
+// (Web 0.3.2, its independent review's L2: one of the two a plain no, and the other not. That it "is set to switch"
+// the monitor off may be untrue then: the owner's real boards were taken to darken it only where both were 1.)
+base::Error oneOff()
+{
+    return {"no_picture", "Of the controller's two settings that switch the server's own monitor off while its console "
+                          "is open, only one is off, so qKVM leaves the console alone"};
+}
 base::Error stoppedWay()
 {
     return {"stopped", "The connection to the controller was let go of before its console could be opened"};
+}
+// (The web's CONSOLE_LINE_CLOSES, without its exception for a certificate that no other card shows: outside review of
+// 0.2.0, area 5, MEDIUM 5.4.)
+base::Error consoleLineCloses()
+{
+    return {"no_picture",
+            "The controller closes the connection after every answer, so what its console needs (the "
+            "sign-in of its web page, the console's pass) cannot go on the connection its number was asked "
+            "on: none of it is sent, and the console is not opened. It is asked again later."};
 }
 
 // What stops the question which server answers for the console at once; a moment of its own is asked through again.
@@ -122,6 +160,7 @@ struct RedfishDevice::WayAsking {
     std::function<void(base::Result<ConsoleWay>)> done;
     QPointer<DeviceAsker> line; // its web page's, held to what the controller is known by
     QByteArray session;         // its web page's once signed in: its cookies and its token, as the line carries them
+    int linesGone = 0;          // times the line its root was read on was gone before what was to follow (wayLineGone)
 };
 
 // Its web page's sign-in that is out, on the asking's line, which can outlive the driver (~RedfishDevice).
@@ -156,13 +195,25 @@ void RedfishDevice::consoleWay(std::function<void(base::Result<ConsoleWay>)> don
     }
     // Its web page is spoken to on a line of its own, held to what the controller is known by, its session in the
     // cookies that page hands out and the token it wants beside them.
+    freshWayLine(asking);
+    hasConsole(asking);
+}
+
+void RedfishDevice::freshWayLine(const std::shared_ptr<WayAsking>& asking)
+{
+    // (A line, here, is a manager of HTTP of its own, which keeps the connections its questions made, and no other: one
+    // made for the question about the root, and for what follows on its connection, has made no other connection that a
+    // question could go on unasked. Outside review of 0.2.0, 5.4.)
+    if (asking->line != nullptr && (!m_webSignInOut || m_webSignInOut->line != asking->line)) {
+        asking->line->deleteLater();
+    }
     const DeviceAsker::Where where{m_where.address, m_where.knownByCertificate, m_where.certificate};
     asking->line =
         new DeviceAsker(where, // NOLINT(cppcoreguidelines-owning-memory): this driver's, or the goodbyes'
                         DeviceAsker::Times{m_pace.connectWithinMs, m_pace.quietMs, m_pace.transferMs},
                         DeviceAsker::Carried{DeviceAsker::Carried::In::CookiesAndHeader, "X-CSRFTOKEN"_ba}, this);
+    asking->line->keepToOneConnection();
     connect(asking->line, &DeviceAsker::showedItsCertificate, this, &RedfishDevice::showed);
-    hasConsole(asking);
 }
 
 void RedfishDevice::hasConsole(const std::shared_ptr<WayAsking>& asking)
@@ -173,6 +224,10 @@ void RedfishDevice::hasConsole(const std::shared_ptr<WayAsking>& asking)
         whichServerForTheConsole(1, [this, asking](const std::optional<base::Error>& why) {
             if (why) {
                 noWay(asking, *why);
+                return;
+            }
+            if (const std::optional<base::Error> notAmis = notAmisConsole()) {
+                noWay(asking, *notAmis);
                 return;
             }
             webSignIn(asking);
@@ -241,9 +296,16 @@ void RedfishDevice::whichServerForTheConsole(int asked, const std::function<void
             return;
         }
         checkedRead(places.value().system, false,
-                    [then, failed](const base::Result<QJsonObject>& system, const Checked& /*checked*/) {
+                    [this, then, failed](const base::Result<QJsonObject>& system, const Checked& /*checked*/) {
                         if (!system) {
                             failed(system.error());
+                            return;
+                        }
+                        // (Nor where its card asks whether the computer there, which gives a number of its own now,
+                        // is its server: no key and no picture of it until that is answered, the owner's decision of
+                        // 2026-11-22.)
+                        if (m_checkedAsking) {
+                            then(asksFirst());
                             return;
                         }
                         then(std::nullopt);
@@ -276,12 +338,26 @@ void RedfishDevice::webSignIn(const std::shared_ptr<WayAsking>& asking)
     login.quietMs = m_pace.signInQuietMs;
     // On its web page's own line, its root anybody may read, compared with the controller's number where one is kept,
     // before the password goes: the question asked about the server went on another line, and in a clash of leases
-    // under one certificate another controller may answer this one. (And so the line is shown to be up.) Where no
-    // number is kept, nothing is compared here (sameController): what holds the password to this controller then is
-    // its certificate alone, as on the web, which has the same gap.
-    sameController(*asking->line, [this, asking, login, mark](const base::Result<bool>& compared) {
+    // under one certificate another controller may answer this one. (And so the line is shown to be up.) What answers
+    // is to be a Redfish service root, whether a number is kept or not (sameController; outside review of 0.2.0, 5.1).
+    // Where no number is kept, nothing more is compared here: what holds the password to this controller then is its
+    // certificate, as on the web, which has the same gap. On a line made for the two, the root's and the password's (a
+    // line that asked before may hold a connection nobody asked the root on: freshWayLine).
+    freshWayLine(asking);
+    sameController(*asking->line, [this, asking, login, mark](const base::Result<bool>& compared, bool lineEnds) {
         if (!compared) {
             noWay(asking, compared.error());
+            return;
+        }
+        if (lineEnds) {
+            // (Its root's answer said that its line ends with it: the password would go on a new one, unasked.)
+            wayLineGone(asking, [this, asking] { webSignIn(asking); });
+            return;
+        }
+        // Looked at once more just before the password goes: a look that landed while the controller's number was
+        // asked may have learned this is OpenBMC (finding 4). The password is never posted to its web page then.
+        if (const std::optional<base::Error> notAmis = notAmisConsole()) {
+            noWay(asking, *notAmis);
             return;
         }
         // Looked at again just before it is counted: another asking, of this driver or another of this controller's,
@@ -321,6 +397,8 @@ void RedfishDevice::webSignIn(const std::shared_ptr<WayAsking>& asking)
         // copy of it held but by what goes, which writes it over once its answer came (DeviceAsker; from the merged
         // review, 3). This one is written over here where nothing went.
         DeviceAsker::Ask sent = login;
+        // On the connection its root was just read and compared on, and on no other (outside review of 0.2.0, 5.4).
+        sent.onItsLine = true;
         sent.body = secretForm({{"username", m_where.user}, {"password", m_password.view()}});
         const WipedOnLeaving overTheBody(sent.body);
         asking->line->send(sent, {}, [out](const base::Result<Reply>& reply) {
@@ -426,11 +504,17 @@ base::Result<QByteArray> RedfishDevice::webCameOf(const WebSignIn& out, const ba
 
 void RedfishDevice::webSignInCame(const std::shared_ptr<WayAsking>& asking, const base::Result<QByteArray>& session)
 {
+    if (!session && session.error().code == DeviceAsker::lineMadeAnewCode) {
+        // (The connection its root was read on was gone, and the password was not sent on a new one.)
+        wayLineGone(asking, [this, asking] { webSignIn(asking); });
+        return;
+    }
     if (!session) {
         noWay(asking, session.error());
         return;
     }
     asking->session = session.value();
+    asking->linesGone = 0;
     // Asked again now that its web page has signed this program in, before it hands out the pass: the address that
     // answered that sign-in may have changed hands since the question before it, and its console is not opened to
     // another server.
@@ -445,14 +529,31 @@ void RedfishDevice::webSignInCame(const std::shared_ptr<WayAsking>& asking, cons
 
 void RedfishDevice::consolePass(const std::shared_ptr<WayAsking>& asking)
 {
-    // Its root on the web page's own line compared again, before the pass is asked for on it (as before the password).
-    sameController(*asking->line, [this, asking](const base::Result<bool>& compared) {
+    // Its root on the web page's own line compared again, before the pass is asked for on it (as before the password),
+    // and the pass asked for on that very connection (outside review of 0.2.0, 5.4), on a line made for the two.
+    freshWayLine(asking);
+    sameController(*asking->line, [this, asking](const base::Result<bool>& compared, bool lineEnds) {
         if (!compared) {
             noWay(asking, compared.error());
             return;
         }
+        if (lineEnds) {
+            wayLineGone(asking, [this, asking] { consolePass(asking); });
+            return;
+        }
         askThePass(asking);
     });
+}
+
+void RedfishDevice::wayLineGone(const std::shared_ptr<WayAsking>& asking, const std::function<void()>& again)
+{
+    // Asked once more, on a new line, its root read and compared on it first; where that one is gone too, the
+    // controller closes the connection after every answer, and nothing that needs it is sent.
+    if (++asking->linesGone < 2) {
+        again();
+        return;
+    }
+    noWay(asking, consoleLineCloses());
 }
 
 void RedfishDevice::askThePass(const std::shared_ptr<WayAsking>& asking)
@@ -460,7 +561,12 @@ void RedfishDevice::askThePass(const std::shared_ptr<WayAsking>& asking)
     DeviceAsker::Ask asked;
     asked.path = u"/api/kvm/token"_s;
     asked.largest = largestWebBytes;
+    asked.onItsLine = true;
     asking->line->send(asked, asking->session, [this, asking](const base::Result<Reply>& reply) {
+        if (!reply && reply.error().code == DeviceAsker::lineMadeAnewCode) {
+            wayLineGone(asking, [this, asking] { consolePass(asking); });
+            return;
+        }
         if (!reply) {
             noWay(asking, reply.error());
             return;
@@ -475,11 +581,16 @@ void RedfishDevice::askThePass(const std::shared_ptr<WayAsking>& asking)
             return;
         }
         // Opened only where both words are said, and both are a plain no. Anywhere else whoever stands at the server
-        // may see its monitor go dark: that is not "only looking" any more, and the card says why.
+        // may see its monitor go dark: that is not "only looking" any more, and the card says why, in one of three
+        // sentences as the web's monitor_goes_dark does: either not said; both not a plain no; only one of them off.
         const MonitorWord automatic = monitorWordOf(given.value("automatic_off"_L1));
         const MonitorWord local = monitorWordOf(given.value("local_monitor_off"_L1));
-        if (automatic != MonitorWord::No || local != MonitorWord::No) {
-            noWay(asking, automatic == MonitorWord::Yes || local == MonitorWord::Yes ? darkens() : mayDarken());
+        if (automatic == MonitorWord::NotSaid || local == MonitorWord::NotSaid) {
+            noWay(asking, mayDarken());
+            return;
+        }
+        if (automatic == MonitorWord::Yes || local == MonitorWord::Yes) {
+            noWay(asking, automatic == local ? darkens() : oneOff());
             return;
         }
         ConsoleWay way;

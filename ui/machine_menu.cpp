@@ -159,13 +159,15 @@ MenuSection savedOf(const QList<core::SavedAction>& saved, const QString& who)
 
 // Whether the server lists this word in what the machine can be asked (`can`, the status's fresher than the
 // wall's), and does not merely leave it unsaid. Where nothing says what it can be asked (this PC's own Comet: its
-// driver says no `can`), a Fingerbot is there where its driver heard the KVM say one is paired (Status::fingerbot).
+// driver says no `can`), a Fingerbot is there where its driver heard the KVM say one is paired (Status::fingerbot),
+// and virtual media where its driver says its drive is switched on (Status::offersMedia).
 bool lists(const core::Machine& machine, const std::optional<core::Status>& status, const QString& word)
 {
     const std::optional<QStringList>& can =
         status && status->capabilities ? status->capabilities : machine.capabilities;
     if (!can) {
-        return word == "fingerbot"_L1 && status && status->fingerbot.has_value();
+        return status && ((word == "fingerbot"_L1 && status->fingerbot.has_value()) ||
+                          (word == "media"_L1 && status->offersMedia));
     }
     return can->contains(word);
 }
@@ -578,8 +580,8 @@ Menu menuFor(const MenuOf& of)
         ways.rows.append(edit);
     }
     // Its virtual media, in a box of their own (MediaView), as the page's "Media...": for whoever may have them (an
-    // admin of its qKVM, in person: MenuOf::media), where the server says the machine has some. An older server, which
-    // does not say what a machine can, has none.
+    // admin of its qKVM, in person, or anybody at this PC's own wall: MenuOf::media), where the server, or this PC's
+    // own driver, says the machine has some. An older server, which does not say what a machine can, has none.
     if (of.media && lists(machine, of.status, u"media"_s)) {
         MenuRow media;
         media.id = u"media"_s;
@@ -741,11 +743,16 @@ QVariantMap shown(const Menu& menu)
 
 QVariantMap shown(const Ask& ask)
 {
-    return {
+    QVariantMap question{
         {u"title"_s, ask.title},        {u"text"_s, ask.question}, {u"detail"_s, ask.detail},
         {u"warning"_s, ask.warning},    {u"danger"_s, ask.danger}, {u"yes"_s, ask.yes.isEmpty() ? ask.title : ask.yes},
         {u"targets"_s, QVariantList()}, {u"tick"_s, QString()},    {u"paces"_s, QVariantList()},
     };
+    // (Only where its no says other than "Cancel": a card's question of Yes or No.)
+    if (!ask.no.isEmpty()) {
+        question.insert(u"no"_s, ask.no);
+    }
+    return question;
 }
 
 QVariantMap shown(const Ask& ask, const QList<Target>& targets)

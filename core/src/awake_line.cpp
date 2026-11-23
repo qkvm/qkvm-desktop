@@ -13,11 +13,19 @@ constexpr qint64 mostUnsent = qint64{64} * 1024;
 // kvmd's own "are you there" on its line for events (the web's EVENT_PING), answered with a `pong`.
 constexpr const char* kvmdPing = R"({"event_type": "ping", "event": {}})";
 
+// The longest message it takes from a KVM, the rest of it thrown away unread where it is longer than what is heard
+// (hearWhatItSays), and the most it takes in a second: kvmd says the state of each of its parts as the line opens, the
+// state of its drive with every image of its storage named in it among them (the web's MOST_EVENT: kvmd_media.h).
+constexpr qint64 mostMessage = qint64{1} << 20;
+constexpr qint64 mostASecond = qint64{4} << 20;
+
 DeviceLine::Limits heldTo(int letInWithinMs)
 {
     DeviceLine::Limits limits;
     limits.letInWithinMs = letInWithinMs;
     limits.mostUnsentBytes = mostUnsent;
+    limits.largestFrameBytes = mostMessage;
+    limits.mostBytesASecond = mostASecond;
     return limits;
 }
 

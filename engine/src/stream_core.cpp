@@ -31,6 +31,10 @@ constexpr std::size_t mostRectsToCopy = 64;
 // stays full is tried once a second, not at every frame.
 constexpr std::int64_t firstCopyAgainUs = 50'000;
 constexpr std::int64_t longestCopyAgainUs = 1'000'000;
+// A card drawn larger than its still was kept at is decoded again once its place has held still for this long, and not
+// at every step of it: a window whose edge is dragged changes every card's size on most frames, and each step decoded
+// every card's key frame again, on up to eleven of the twelve decoding threads (the review of f513c8e6, M3).
+constexpr std::int64_t heldStillUs = 200'000;
 
 // A mean that follows what is measured, weighing about the last ten measurements.
 double towards(double mean, double value) noexcept
@@ -101,7 +105,79 @@ int shifted(int value, int shift) noexcept
     return (value + (1 << shift) - 1) >> shift;
 }
 
+// One plane made smaller: each value of the smaller one the mean of the values of the larger that lie under it (whole
+// rows and columns, at least one of each), as a picture is drawn smaller without its fine lines shimmering.
+void shrinkPlane(const std::uint8_t* from, int fromStride, int fromWidth, int fromHeight, std::uint8_t* to,
+                 int toStride, int toWidth, int toHeight)
+{
+    // Where each column of the smaller one begins and ends in the larger.
+    std::vector<int> columns(static_cast<std::size_t>(toWidth) + 1);
+    for (int x = 0; x <= toWidth; ++x) {
+        columns[static_cast<std::size_t>(x)] = static_cast<int>(static_cast<std::int64_t>(x) * fromWidth / toWidth);
+    }
+    std::vector<std::uint32_t> sums(static_cast<std::size_t>(fromWidth));
+    for (int y = 0; y < toHeight; ++y) {
+        const int top = static_cast<int>(static_cast<std::int64_t>(y) * fromHeight / toHeight);
+        const int bottom =
+            std::max(top + 1, static_cast<int>(static_cast<std::int64_t>(y + 1) * fromHeight / toHeight));
+        std::ranges::fill(sums, 0U);
+        for (int row = top; row < bottom; ++row) {
+            const std::uint8_t* line = from + static_cast<std::ptrdiff_t>(row) * fromStride;
+            for (int x = 0; x < fromWidth; ++x) {
+                sums[static_cast<std::size_t>(x)] += line[x];
+            }
+        }
+        std::uint8_t* out = to + static_cast<std::ptrdiff_t>(y) * toStride;
+        for (int x = 0; x < toWidth; ++x) {
+            const int left = columns[static_cast<std::size_t>(x)];
+            const int right = std::max(left + 1, columns[static_cast<std::size_t>(x) + 1]);
+            std::uint32_t sum = 0;
+            for (int column = left; column < right; ++column) {
+                sum += sums[static_cast<std::size_t>(column)];
+            }
+            const auto count = static_cast<std::uint32_t>((right - left) * (bottom - top));
+            out[x] = static_cast<std::uint8_t>((sum + count / 2) / count);
+        }
+    }
+}
+
 } // namespace
+
+// A picture decoded in software made smaller, to `size`, each of its planes by itself; nothing where it is of a kind
+// the engine does not draw, or where there is no memory for it (the picture is kept whole then). What it says of its
+// colours goes with it; and where it says nothing of its standard, the one its own size had it read by (colourRowsFor
+// takes the high-definition one from 577 lines on).
+FramePtr shrunkTo(const AVFrame& from, SizePx size)
+{
+    const Layout layout = layoutOf(from.format);
+    if (layout.planes == 0 || size.width <= 0 || size.height <= 0 || size.width > from.width ||
+        size.height > from.height) {
+        return nullptr;
+    }
+    FramePtr made(av_frame_alloc());
+    if (made == nullptr) {
+        return nullptr;
+    }
+    made->format = from.format;
+    made->width = size.width;
+    made->height = size.height;
+    if (av_frame_get_buffer(made.get(), 0) < 0 || av_frame_copy_props(made.get(), &from) < 0) {
+        return nullptr;
+    }
+    if (from.format != AV_PIX_FMT_GBRP && from.colorspace != AVCOL_SPC_BT709 && from.colorspace != AVCOL_SPC_BT470BG &&
+        from.colorspace != AVCOL_SPC_SMPTE170M) {
+        const bool high = from.height > 576 && !usesTheWholeRange(from.format);
+        made->colorspace = high ? AVCOL_SPC_BT709 : AVCOL_SPC_BT470BG;
+    }
+    for (int plane = 0; plane < layout.planes; ++plane) {
+        const int shiftX = plane == 0 ? 0 : layout.shiftX;
+        const int shiftY = plane == 0 ? 0 : layout.shiftY;
+        shrinkPlane(from.data[plane], from.linesize[plane], shifted(from.width, shiftX), shifted(from.height, shiftY),
+                    made->data[plane], made->linesize[plane], shifted(size.width, shiftX),
+                    shifted(size.height, shiftY));
+    }
+    return made;
+}
 
 ColourRows colourRowsFor(const AVFrame& frame) noexcept
 {
@@ -153,7 +229,22 @@ StreamCore::~StreamCore()
     // No recovery asks it for its decoder from here on, and so none wakes it as it lets go of its
     // decoding; then no thread decodes for it, and what woke it before is undone.
     m_gpu.detach(static_cast<CardDecoderHolder*>(this));
+    // (Out of the stills' line first, its place to the next, and refused there from then on: what its decoding under
+    // way hands in as it ends, below, puts nothing of it back in the line, which would wake it once it is freed, or
+    // hold its place for good: the review of abb20deb, M2.)
+    if (keyFrameStills()) {
+        m_gpu.stillsGate().forget(m_member);
+    }
     m_gpu.decodePool().forget(this);
+}
+
+void StreamCore::handIn(bool fresh)
+{
+    if (gated()) {
+        m_gpu.stillsGate().handIn(m_member, fresh);
+    } else {
+        m_gpu.decodePool().wake(this);
+    }
 }
 
 void StreamCore::push(const Packet& packet)
@@ -238,7 +329,7 @@ void StreamCore::push(const Packet& packet)
         m_keyFrameWish.store(true, std::memory_order_release);
     }
     if (taken) {
-        m_gpu.decodePool().wake(this);
+        handIn(true);
     }
 }
 
@@ -316,6 +407,24 @@ void StreamCore::run()
         letGoOfDecoding(decoding);
         return;
     }
+    // A card drawn larger, whose place has held still since (woken for that at its time: placedAt): its last still
+    // again.
+    if (still()) {
+        std::int64_t dueUs = 0;
+        {
+            const std::lock_guard guard(m_inboxLock);
+            static_cast<void>(decodeAgainIfLarger(true, dueUs));
+        }
+        if (dueUs != 0) {
+            m_gpu.decodePool().wakeAt(this, dueUs);
+        }
+    }
+    // A card's key frame is decoded only in a place of the stills' line (StillsGate): one woken without a place (by
+    // its time above, or its place given on meanwhile) hands what it has in as it lets go, and waits its turn.
+    if (gated() && !m_gpu.stillsGate().holds(m_member)) {
+        letGoOfDecoding(decoding);
+        return;
+    }
 
     Waiting packet;
     bool none = false;
@@ -344,7 +453,9 @@ void StreamCore::run()
     // The last picture again, after a lost device took the one drawn: as it is now, the newest
     // decoded, unless a newer one waits to be drawn already (and of a stream that never decoded
     // one, nothing).
-    if (packet.again && (m_lastStill.size == 0 || hasNewer())) {
+    // (Decoded again for a larger place, the picture of it that waits to be drawn is taken the place of: it is the same
+    // still, kept smaller.)
+    if (packet.again && (m_lastStill.size == 0 || (hasNewer() && !packet.larger))) {
         letGoOfDecoding(decoding);
         return;
     }
@@ -398,7 +509,15 @@ void StreamCore::run()
     double took = 0;
     Decoding how = Decoding::NotYet;
     if (!failed) {
+        // (Counted where a card's key frame is decoded, for what is said of the stills' line: StillsGate::seen.)
+        const bool counted = gated();
+        if (counted) {
+            m_gpu.stillsGate().decodingBegins();
+        }
         base::Result<Picture> decoded = m_decoder->decode(bytes, size, packet.arrivedUs);
+        if (counted) {
+            m_gpu.stillsGate().decodingEnds();
+        }
         if (!decoded && decoded.error().code != refusedByTheGate && m_decoder->kind() == Decoding::OnTheCard &&
             packet.keyFrame && !m_gpu.lost()) {
             // The card cannot decode this stream (larger than it takes, a kind it does not have):
@@ -413,13 +532,31 @@ void StreamCore::run()
         if (!decoded) {
             failed = true;
         } else if (decoded.value()) {
-            took = static_cast<double>(base::steadyNowUs() - began) / 1000.0;
             picture = std::move(decoded).value();
             picture.beganUs = began;
             how = m_decoder->kind();
         }
     }
+    // A still is kept at the size it is drawn at (keptSizeFor), from here on: only that waits to be drawn, and only
+    // that goes to the card. Its stream's size is what it says of itself (Stats::picture).
+    SizePx whole;
+    SizePx kept;
+    if (picture) {
+        whole = {picture.frame->width, picture.frame->height};
+        kept = whole;
+        if (still() && !picture.onTheCard()) {
+            if (const SizePx wanted = keptSizeFor(whole); wanted != whole) {
+                if (FramePtr smaller = shrunkTo(*picture.frame, wanted)) {
+                    picture.frame = std::move(smaller);
+                    kept = wanted;
+                }
+            }
+        }
+        took = static_cast<double>(base::steadyNowUs() - began) / 1000.0;
+    }
 
+    bool larger = false;
+    std::int64_t largerDueUs = 0;
     {
         const std::lock_guard guard(m_inboxLock);
         // A still that made a picture is kept as it came, before the picture is told of: whoever sees it
@@ -433,10 +570,23 @@ void StreamCore::run()
             m_lastStillUndrawn = false;
         }
         m_stillInHand = false;
+        if (still() && picture) {
+            m_lastStillWhole = whole;
+            m_lastStillKept = kept;
+            // Placed larger while it was decoded: decoded again for that once its place holds still (placedAt found
+            // it in hand). Where it is no card any more (shown large while it was made a card's size), at once: a
+            // card's place is held still for, a machine shown large is not (the review of abb20deb, M1).
+            larger = decodeAgainIfLarger(m_member.card.load(std::memory_order_relaxed), largerDueUs);
+        }
         keepSpare(std::move(packet.bytes));
     }
     if (picture) {
-        publish(std::move(picture), took, how);
+        publish(std::move(picture), took, how, whole, packet.larger);
+    }
+    if (larger) {
+        handIn();
+    } else if (largerDueUs != 0) {
+        m_gpu.decodePool().wakeAt(this, largerDueUs);
     }
     if (failed) {
         // A lost device is told to the host as that, once, and not as each stream's failure.
@@ -445,15 +595,122 @@ void StreamCore::run()
     letGoOfDecoding(decoding);
 }
 
+void StreamCore::placedAt(SizePx size)
+{
+    if (!still() || size.width <= 0 || size.height <= 0) {
+        return;
+    }
+    const int width = m_placedWidth.exchange(size.width, std::memory_order_relaxed);
+    const int height = m_placedHeight.exchange(size.height, std::memory_order_relaxed);
+    if (width == size.width && height == size.height) {
+        return;
+    }
+    m_placedAtUs.store(base::steadyNowUs(), std::memory_order_relaxed);
+    std::int64_t dueUs = 0;
+    bool larger = false;
+    {
+        const std::lock_guard guard(m_inboxLock);
+        larger = decodeAgainIfLarger(true, dueUs);
+    }
+    // (Looked at again once it may have held still: run.)
+    if (larger) {
+        handIn();
+    } else if (dueUs != 0) {
+        m_gpu.decodePool().wakeAt(this, dueUs);
+    }
+}
+
+void StreamCore::shownAsACard(bool card)
+{
+    // (Told to the stills' line, which changes it under its lock: no card any more, it is out of the line in the same
+    // step, and what is handed in from then on is woken at once, whatever was read of it before.)
+    if (!m_gpu.stillsGate().setCard(m_member, card) || card) {
+        return;
+    }
+    // No card any more (shown large, say): the still that waited in the line for its turn is decoded at once, and
+    // whole; or the last one, kept at a card's size, is decoded again whole, at once (the review of abb20deb, M1).
+    bool wake = false;
+    {
+        const std::lock_guard guard(m_inboxLock);
+        std::int64_t dueUs = 0;
+        wake = decodeAgainIfLarger(false, dueUs) || !m_inbox.empty();
+    }
+    // (Woken by itself: no card, it is out of the stills' line from here on.)
+    if (wake) {
+        handIn();
+    }
+}
+
+bool StreamCore::decodeAgainIfLarger(bool onceItHoldsStill, std::int64_t& dueUs)
+{
+    dueUs = 0;
+    // Only where the last still was kept smaller than it is to be now, and nothing newer waits or is being decoded:
+    // that one is kept for the place as it is when it is decoded.
+    if (m_lastStill.size == 0 || m_lastStillKept == m_lastStillWhole || !m_inbox.empty() || m_stillInHand) {
+        return false;
+    }
+    const SizePx wanted = keptSizeFor(m_lastStillWhole);
+    if (wanted.width <= m_lastStillKept.width && wanted.height <= m_lastStillKept.height) {
+        return false;
+    }
+    // Not while its place is still changing: once it has held still for a moment.
+    if (const std::int64_t due = m_placedAtUs.load(std::memory_order_relaxed) + heldStillUs;
+        onceItHoldsStill && base::steadyNowUs() < due) {
+        dueUs = due;
+        return false;
+    }
+    Waiting last;
+    last.again = true;
+    last.larger = true;
+    last.keyFrame = true;
+    m_inbox.push_back(std::move(last));
+    return true;
+}
+
+SizePx StreamCore::keptSizeFor(SizePx picture) const noexcept
+{
+    const int width = m_placedWidth.load(std::memory_order_relaxed);
+    const int height = m_placedHeight.load(std::memory_order_relaxed);
+    // Only a card of a wall (shownAsACard): a machine shown large, and a picture live of whatever kind, keep every
+    // picture whole, and a copy of the screen is made of the whole (the review of f513c8e6, M1 and M2).
+    if (!still() || !m_member.card.load(std::memory_order_relaxed) || width <= 0 || height <= 0 || picture.width <= 0 ||
+        picture.height <= 0) {
+        return picture;
+    }
+    // The largest that fits the place with the picture's shape, as the scene draws it (drawTile); and the whole
+    // picture where that is more than half of it (a card that large saves little).
+    const double scale =
+        std::min(static_cast<double>(width) / picture.width, static_cast<double>(height) / picture.height);
+    if (scale > 0.5) {
+        return picture;
+    }
+    return {std::max(1, static_cast<int>(std::ceil(picture.width * scale))),
+            std::max(1, static_cast<int>(std::ceil(picture.height * scale)))};
+}
+
 void StreamCore::retire()
 {
     m_retired.store(true, std::memory_order_release);
-    const std::lock_guard guard(m_inboxLock);
-    m_inbox.clear();
+    {
+        const std::lock_guard guard(m_inboxLock);
+        m_inbox.clear();
+    }
+    // (Out of the stills' line before the pool is handed it to end, and refused there from then on: nothing of the line
+    // wakes it after, whatever its decoding under way hands in.)
+    if (keyFrameStills()) {
+        m_gpu.stillsGate().forget(m_member);
+    }
 }
 
 void StreamCore::letGoOfDecoding(std::unique_lock<std::mutex>& decoding)
 {
+    // Its place in the stills' line goes as it lets go, to the first in line; what it has more is handed in again, and
+    // waits behind those. (Where it held none, nothing: and a card shown large meanwhile gives back what it held.)
+    // Before its decoding is let go: a thread that runs it the moment that is (woken while it decoded) finds no place,
+    // and so never decodes beside the one the place went to.
+    if (keyFrameStills()) {
+        m_gpu.stillsGate().leave(m_member);
+    }
     decoding.unlock();
     bool more = false;
     {
@@ -461,7 +718,7 @@ void StreamCore::letGoOfDecoding(std::unique_lock<std::mutex>& decoding)
         more = !m_inbox.empty();
     }
     if (more) {
-        m_gpu.decodePool().wake(this);
+        handIn();
     }
 }
 
@@ -492,14 +749,14 @@ void StreamCore::startAgain(bool tellTheHost)
     }
 }
 
-void StreamCore::publish(Picture picture, double decodeMs, Decoding how)
+void StreamCore::publish(Picture picture, double decodeMs, Decoding how, SizePx size, bool remade)
 {
-    const SizePx size{picture.frame->width, picture.frame->height};
     picture.decodedUs = base::steadyNowUs();
     bool replaced = false;
     {
         const std::lock_guard guard(m_slotLock);
-        replaced = static_cast<bool>(m_newest);
+        // (The same still made again, larger, is no picture that made way for another.)
+        replaced = static_cast<bool>(m_newest) && !remade;
         m_newest = std::move(picture);
     }
     {
@@ -1084,7 +1341,7 @@ void StreamCore::dropDrawObjects()
             }
         }
         if (again) {
-            m_gpu.decodePool().wake(this);
+            handIn();
         }
     }
     m_drawn = Drawable{};

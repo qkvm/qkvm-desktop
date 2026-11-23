@@ -65,6 +65,15 @@ struct Fixture {
         return QByteArray::fromBase64(secrets[name].toObject()[QStringLiteral("bytes")].toString().toLatin1());
     }
     QString kind() const { return made[QStringLiteral("made_by")][QStringLiteral("kind")].toString(); }
+    // The version the settings say wrote them (from 0.1.2 on); empty where they say none.
+    QString writer() const { return settings[QStringLiteral("written_by")].toString(); }
+    // The version the profile recorded as the one that started with it last (from 0.1.2 on); empty where none.
+    QString recorded() const
+    {
+        return core::profile::recorded(QDir(profileFolder()).filePath(QStringLiteral("settings.json")))
+            .value_or(core::profile::Record{})
+            .version;
+    }
 };
 
 // Puts the fixture where the program keeps a profile (profile_writing.h): into a store in memory, for the tests; the VM
@@ -210,7 +219,16 @@ inline QJsonObject check(const Fixture& fixture, core::SecretStore& store, const
     QStringList lost;
     QStringList moved;
     QStringList later;
-    lostFrom(fixture.settings, jsonIn(settingsFile), {}, lost, moved, later);
+    // (But which version wrote them, from 0.1.2 on: the one before, or this one once it has written them. The copy
+    // kept at the first start holds the old name.)
+    const QJsonObject settingsNow = jsonIn(settingsFile);
+    QJsonObject settingsThen = fixture.settings;
+    settingsThen.remove(QStringLiteral("written_by"));
+    lostFrom(settingsThen, settingsNow, {}, lost, moved, later);
+    if (const QString writtenBy = settingsNow[QStringLiteral("written_by")].toString();
+        !fixture.writer().isEmpty() && writtenBy != fixture.writer() && writtenBy != version) {
+        lost.append(QStringLiteral("written_by"));
+    }
     for (const QString& path : lost) {
         failures.append(QStringLiteral("settings.json lost %1").arg(path));
     }
@@ -268,9 +286,11 @@ inline QJsonObject check(const Fixture& fixture, core::SecretStore& store, const
     {
         const core::SetupOverrides overrides(core::profile::setupOverridesFile(settingsFile));
         for (const QJsonValue one : fixture.made[QStringLiteral("setup_overrides")].toArray()) {
+            // (Marked queued where it was, from 0.1.2 on: then no look lets it go.)
             const bool there = std::ranges::any_of(overrides.all(), [&one](const core::SetupOverrides::Left& left) {
                 return left.address == one[QStringLiteral("address")].toString() &&
-                       left.machine == one[QStringLiteral("machine")].toString();
+                       left.machine == one[QStringLiteral("machine")].toString() &&
+                       left.queued == one[QStringLiteral("queued")].toBool();
             });
             if (!there) {
                 failures.append(
@@ -278,8 +298,12 @@ inline QJsonObject check(const Fixture& fixture, core::SecretStore& store, const
             }
         }
     }
-    // The way back: the settings as they were found, kept at the first start of this version, and the record.
-    const QString keptAs = QStringLiteral("%1.before-%2.bak").arg(settingsFile, version);
+    // The way back: the settings as they were found, kept at the first start of this version (named by the version
+    // that wrote them, where they say one: from 0.1.2 on; else as found before this one), and the record, with the
+    // version recorded before it (none before 0.1.2).
+    const QString writer = fixture.writer();
+    const QString keptAs =
+        QStringLiteral("%1.%2.bak").arg(settingsFile, writer.isEmpty() ? QStringLiteral("before-") + version : writer);
     const bool keptWhole =
         bytesOf(keptAs) == bytesOf(QDir(fixture.profileFolder()).filePath(QStringLiteral("settings.json")));
     if (!QFileInfo::exists(keptAs) || !keptWhole) {
@@ -288,6 +312,11 @@ inline QJsonObject check(const Fixture& fixture, core::SecretStore& store, const
     const std::optional<core::profile::Record> record = core::profile::recorded(settingsFile);
     if (!record || record->version != version) {
         failures.append(QStringLiteral("the version is not recorded"));
+    }
+    const QString recordedBefore = fixture.recorded();
+    if (record && record->previous != recordedBefore) {
+        failures.append(QStringLiteral("the version before is not recorded as %1")
+                            .arg(recordedBefore.isEmpty() ? QStringLiteral("none") : recordedBefore));
     }
     const bool lockedAside = QFileInfo::exists(core::profile::lockFile(settingsFile));
     if (lockedAside) {

@@ -432,6 +432,52 @@ private slots:
         QVERIFY(whatGaveWayIsInMore(window));
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
+
+    void theBarOfThisPcsWallSaysOfKvmsAndVncServersInTheClear()
+    {
+        // Outside review c9a-4, M1: where something of this PC's wall is spoken to unencrypted, the bar's sign says
+        // what and where to see which, of a VNC server over vnc:// as of a KVM over plain HTTP; at a server's wall, of
+        // the server. (Its words are what the sign says to whoever reads the window by its descriptions.)
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        wall.machines()->setTiles(qkvm::ui::pretendWall());
+        qkvm::ui::SessionView session;
+        qkvm::ui::SessionView::Shown own = atItsOwnWall();
+        own.encrypted = false;
+        session.show(own);
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall);
+        QVERIFY(window != nullptr);
+        window->resize(1280, 800);
+        QVERIFY(bringUp(window));
+        QTRY_COMPARE(window->width(), 1280);
+        const auto* notEncrypted = window->findChild<QQuickItem*>(u"barNotEncrypted"_s);
+        QVERIFY(notEncrypted != nullptr);
+        QTRY_VERIFY(notEncrypted->isVisible());
+        // (What QML attaches to an item as its Accessible is a child of it.)
+        const auto described = [notEncrypted] {
+            for (const QObject* one : notEncrypted->children()) {
+                if (qstrcmp(one->metaObject()->className(), "QQuickAccessibleAttached") == 0) {
+                    return one->property("description").toString();
+                }
+            }
+            return u"(no description)"_s;
+        };
+        QCOMPARE(described(),
+                 u"A KVM or VNC server of this wall is spoken to unencrypted: what is seen and typed there "
+                 "can be read on the way, and its password read or worked out from what goes. Its card "
+                 "says which, with http:// or vnc:// before its address."_s);
+        own.encrypted = true;
+        session.show(own);
+        QTRY_VERIFY(!notEncrypted->isVisible());
+        qkvm::ui::SessionView::Shown atAServer = signedIn();
+        atAServer.encrypted = false;
+        session.show(atAServer);
+        QTRY_VERIFY(notEncrypted->isVisible());
+        QCOMPARE(described(), u"What is seen and typed here goes to this qKVM unencrypted: its address is not an "
+                              "https:// one."_s);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
 };
 
 int main(int argc, char* argv[])

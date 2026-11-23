@@ -42,17 +42,66 @@
       "description": "Optimised, with the address sanitizer watching every access to memory.",
       "inherits": "common",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo", "QKVM_ASAN": "ON" }
+    },
+    {
+      "name": "fuzz",
+      "displayName": "Fuzz targets",
+      "description": "libFuzzer's targets of the readers of what devices send, on the address sanitizer's build, and nothing else (tools/fuzz.ps1 builds and runs them).",
+      "inherits": "asan",
+      "cacheVariables": { "QKVM_FUZZ": "ON", "QKVM_FUZZ_CANARY": "OFF" }
+    },
+    {
+      "name": "fuzz-canary",
+      "displayName": "Fuzz targets with their canaries",
+      "description": "The fuzz targets, each of which ends its run where its reader read an input to the deep state its harness names: the proof that each reaches that deep (tools/fuzz.ps1 -Canary). Never the gate's.",
+      "inherits": "fuzz",
+      "cacheVariables": { "QKVM_FUZZ_CANARY": "ON" }
+    },
+    {
+      "name": "arm64",
+      "hidden": true,
+      "description": "For Windows on ARM: ARM64 programs, in the environment Enter-BuildEnvironment -Arch arm64 makes (cross-built on an x64 PC).",
+      "inherits": "common",
+      "architecture": { "value": "arm64", "strategy": "external" },
+      "cacheVariables": { "QKVM_ARCH": "arm64" }
+    },
+    {
+      "name": "arm64-debug",
+      "displayName": "Debug, ARM64",
+      "description": "The debug build for Windows on ARM.",
+      "inherits": "arm64",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "arm64-release",
+      "displayName": "Release, ARM64",
+      "description": "The release build for Windows on ARM, with its debug information kept beside it.",
+      "inherits": "arm64",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "arm64-publish",
+      "displayName": "Publish, ARM64",
+      "description": "The release for Windows on ARM that is handed out (tools/build_release.ps1): the publish preset's update feed and release key, in the ARM64 build.",
+      "inherits": ["publish", "arm64"]
     }
   ],
   "buildPresets": [
     { "name": "debug", "configurePreset": "debug" },
     { "name": "release", "configurePreset": "release" },
     { "name": "publish", "configurePreset": "publish" },
-    { "name": "asan", "configurePreset": "asan" }
+    { "name": "asan", "configurePreset": "asan" },
+    { "name": "fuzz", "configurePreset": "fuzz", "targets": ["fuzz_all"] },
+    { "name": "fuzz-canary", "configurePreset": "fuzz-canary", "targets": ["fuzz_all"] },
+    { "name": "arm64-debug", "configurePreset": "arm64-debug" },
+    { "name": "arm64-release", "configurePreset": "arm64-release" },
+    { "name": "arm64-publish", "configurePreset": "arm64-publish" }
   ],
   "testPresets": [
     { "name": "debug", "configurePreset": "debug", "output": { "outputOnFailure": true } },
     { "name": "release", "configurePreset": "release", "output": { "outputOnFailure": true } },
-    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } }
+    { "name": "asan", "configurePreset": "asan", "output": { "outputOnFailure": true } },
+    { "name": "arm64-debug", "configurePreset": "arm64-debug", "output": { "outputOnFailure": true } },
+    { "name": "arm64-release", "configurePreset": "arm64-release", "output": { "outputOnFailure": true } }
   ]
 }

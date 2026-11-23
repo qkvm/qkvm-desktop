@@ -5,7 +5,8 @@ Checks what is published of a release against what was built: every file, SHA256
 
 .DESCRIPTION
     pwsh -File tools\verify_release.ps1 -Run <Root>\runs\<time> -From <place>[,<place>...]
-        [-Feed <https address or file>] [-SetupFeed <https address or file>] [-RequireSignature]
+        [-Feed <https address or file>] [-SetupFeed <https address or file>]
+        [-Arm64Feed <https address or file>] [-Arm64SetupFeed <https address or file>] [-RequireSignature]
 
 Run by the owner after publishing (release plan B11, B12), from the run folder build_release.ps1 and
 release_files.ps1 wrote (build-record.json, release-files.json), as release_commands.ps1 prints the command.
@@ -16,7 +17,7 @@ folder of them, as https://github.com/qkvm/qkvm-desktop/releases/download/v<vers
 redirect, which is followed) or https://download.qkvm.com/desktop/<version> (the address the program
 downloads from: a redirect there is a failure, as it is to the program). For each:
 - SHA256SUMS is byte for byte the one release_files.ps1 wrote, and names exactly the release files;
-- every release file is there, and is the one written, by SHA-256 (the ZIP and the setup also by the build
+- every release file is there, and is the one written, by SHA-256 (each kind's ZIP and the setup also by the build
   record);
 - SHA256SUMS.sig, where it is there (and it must be, with -RequireSignature), is a signature of SHA256SUMS by
   the key the program pins (from the build record).
@@ -29,6 +30,9 @@ one of the places or the feed's.)
 -SetupFeed (stable-setup.json, installed copies' feed, at https://download.qkvm.com/desktop/stable-setup.json, or a
 file): the same, of windows-x64-setup and the setup built, and the setup at the address it names is fetched and
 must be the one built.
+-Arm64Feed and -Arm64SetupFeed (stable-arm64.json and stable-arm64-setup.json beside them, which every copy on
+Windows on Arm reads, whatever its own kind): the same, of windows-arm64-portable and the ARM64 ZIP built, and of
+windows-arm64-setup and the setup built (the one setup, for both kinds).
 Every check that fails is a "FAIL:" line; the script fails if any did. Nothing is changed or uploaded.
 #>
 param(
@@ -36,6 +40,8 @@ param(
     [string[]] $From = @(),
     [string] $Feed = '',
     [string] $SetupFeed = '',
+    [string] $Arm64Feed = '',
+    [string] $Arm64SetupFeed = '',
     [switch] $RequireSignature
 )
 
@@ -111,8 +117,15 @@ $names = Get-ReleaseFileNames $version
 $expected = @{}
 foreach ($file in $written.files) { $expected[$file.name] = $file.sha256 }
 Check ((@($expected.Keys) | Sort-Object -CaseSensitive) -join '|' -ceq (($names | Sort-Object -CaseSensitive) -join '|')) 'release-files.json names the release files'
-$zipName = "qKVM-Desktop-$version-windows-x64.zip"
-Check ($expected[$zipName] -ceq $record.package.sha256) 'the ZIP written is the ZIP built'
+Check ($record.schema -eq 2) 'the run is of both kinds of Windows (its record is of schema 2)'
+$zipNames = [ordered]@{}
+$builtOf = [ordered]@{}
+foreach ($kind in 'x64', 'arm64') {
+    $zipNames[$kind] = Get-ZipName $version $kind
+    $built = @(if ($record.PSObject.Properties['packages']) { @($record.packages) | Where-Object { [string] $_.architecture -ceq $kind } })
+    $builtOf[$kind] = if ($built.Count -eq 1) { $built[0] } else { $null }
+    Check ($null -ne $builtOf[$kind] -and $builtOf[$kind].archive -ceq $zipNames[$kind] -and $expected[$zipNames[$kind]] -ceq $builtOf[$kind].sha256) "the $kind ZIP written is the ZIP built"
+}
 $setupName = Get-SetupName $version
 $builtSetup = if ($record.PSObject.Properties['setup'] -and $record.setup) { [string] $record.setup.sha256 } else { '' }
 Check ($builtSetup -and $expected[$setupName] -ceq $builtSetup) 'the setup written is the setup built'
@@ -211,16 +224,26 @@ try {
             Check $false "$Label could be read ($($_.Exception.Message))"
         }
     }
-    if ($Feed) {
-        Test-PublishedFeed $Feed 'the feed' 'portable release' 'windows-x64-portable' $zipName 'ZIP' $record.package.bytes $record.package.sha256 'stable.json'
-    }
-    if ($SetupFeed) {
-        $setupBytes = if ($builtSetup) { [long] $record.setup.bytes } else { 0 }
-        Test-PublishedFeed $SetupFeed "installed copies' feed" 'setup' 'windows-x64-setup' $setupName 'setup' $setupBytes $builtSetup 'stable-setup.json'
+    $setupBytes = if ($builtSetup) { [long] $record.setup.bytes } else { 0 }
+    foreach ($kind in 'x64', 'arm64') {
+        $portable = if ($kind -ceq 'x64') { $Feed } else { $Arm64Feed }
+        $installed = if ($kind -ceq 'x64') { $SetupFeed } else { $Arm64SetupFeed }
+        $of = if ($kind -ceq 'x64') { '' } else { 'Windows on Arm''s ' }
+        $feedName = if ($kind -ceq 'x64') { 'stable' } else { 'stable-arm64' }
+        if ($portable) {
+            $built = $builtOf[$kind]
+            $bytes = if ($built) { [long] $built.bytes } else { 0 }
+            $sha256 = if ($built) { [string] $built.sha256 } else { '' }
+            Test-PublishedFeed $portable "$(if ($of) { $of } else { 'the ' })feed" 'portable release' "windows-$kind-portable" $zipNames[$kind] 'ZIP' $bytes $sha256 "$feedName.json"
+        }
+        if ($installed) {
+            Test-PublishedFeed $installed "${of}installed copies' feed" 'setup' "windows-$kind-setup" $setupName 'setup' $setupBytes $builtSetup "$feedName-setup.json"
+        }
     }
 } finally {
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
 if ($failures.Count) { throw "$($failures.Count) check(s) of what is published failed." }
-$feeds = if ($Feed -and $SetupFeed) { ' and both feeds' } elseif ($Feed) { ' and the feed' } elseif ($SetupFeed) { ' and installed copies'' feed' } else { '' }
+$feedCount = @($Feed, $SetupFeed, $Arm64Feed, $Arm64SetupFeed | Where-Object { $_ }).Count
+$feeds = if ($feedCount -eq 4) { ' and the four feeds' } elseif ($feedCount) { " and $feedCount feed(s)" } else { '' }
 Write-Output "What is published is what was built: qKVM Desktop $version, $($places.Count) place(s)$feeds."

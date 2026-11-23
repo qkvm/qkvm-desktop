@@ -16,6 +16,8 @@
 #include <QSet>
 #include <QTimer>
 
+#include "jetkvm_words.h"
+
 #include <qkvm/core/device_line.h>
 #include <qkvm/core/jetkvm_layouts.h>
 #include <qkvm/core/jetkvm_live.h>
@@ -133,6 +135,9 @@ base::Error whyTheLineEnded(DeviceLine::End why)
         return DeviceAsker::tookTooLong();
     case DeviceLine::End::SignedOut:
         return keepsRefusingTheSession();
+    case DeviceLine::End::Refused:
+        // (The web's _signalling: signed in to anew on a 401 alone; the session it holds is not let have the line.)
+        return {"bad_response", "The JetKVM refused (HTTP 403)"};
     case DeviceLine::End::NotLetIn:
         return {"bad_response", "The JetKVM refused"};
     case DeviceLine::End::Fell:
@@ -144,55 +149,7 @@ base::Error whyTheLineEnded(DeviceLine::End why)
     return DeviceAsker::lineFell();
 }
 
-// The pass a sign-in handed over: its cookie, where it is one (the web's TOKEN, kvmd::isToken).
-QByteArray passFrom(const QList<QNetworkCookie>& cookies)
-{
-    // (Two of that name are none, as a kvmd's driver has it: which of them is its session cannot be told.
-    // The web's own cookie jar would take the last of two with one path; refusing both is the safer.)
-    QByteArray pass;
-    for (const QNetworkCookie& one : cookies) {
-        if (one.name() == "authToken") {
-            if (!pass.isEmpty() || !kvmd::isToken(one.value())) {
-                return {};
-            }
-            pass = one.value();
-        }
-    }
-    return pass;
-}
-
-// A 429's Retry-After, as a wait: a number of seconds, or none. As much as `atMostMs` where it says more,
-// "inf" among it.
-qint64 comeBackAfterMs(const QByteArray& said, qint64 atMostMs)
-{
-    bool number = false;
-    const double seconds = QString::fromLatin1(said).trimmed().toDouble(&number);
-    if (!number || std::isnan(seconds) || seconds <= 0) {
-        return 0;
-    }
-    if (std::isinf(seconds) || seconds * 1000 >= static_cast<double>(atMostMs)) {
-        return atMostMs;
-    }
-    return static_cast<qint64>(seconds * 1000);
-}
-
-// Its own number, as a mark to know it by at any address: only ever compared with another, and so kept as
-// a digest (the number itself is nobody's business). None where what it gave is no number fit to be one.
-QString numberFrom(const QByteArray& answer)
-{
-    const QJsonValue number = QJsonDocument::fromJson(answer).object().value("deviceId"_L1);
-    if (!number.isString()) {
-        return {};
-    }
-    const QString text = number.toString();
-    // (Counted in signs, as the web counts them: one beyond the first 65536 is one, not two.)
-    const QList<uint> signs = text.toUcs4();
-    if (signs.size() < 8 || signs.size() > 64 || QSet<uint>(signs.cbegin(), signs.cend()).size() < 4) {
-        return {};
-    }
-    return u"jetkvm:"_s +
-           QString::fromLatin1(QCryptographicHash::hash(text.toUtf8(), QCryptographicHash::Sha256).toHex().first(32));
-}
+// (Its pass, its Retry-After and its own number are read as jetkvm_words.cpp reads them.)
 
 // What GET /device says of which JetKVM it is (the web's _own_number): its mark, or empty where it gives none (none
 // fit to be one, or an older one that has no /device: 404); why not where it could not be told. (401, a session it does
@@ -211,7 +168,7 @@ base::Result<QString> whichItSays(const base::Result<DeviceAsker::Reply>& reply)
     if (status != 200 || error.error != QJsonParseError::NoError || !said.isObject()) {
         return notToldWhichItIs(status);
     }
-    return numberFrom(reply.value().body);
+    return jetkvm_words::numberFrom(reply.value().body);
 }
 
 } // namespace
@@ -645,12 +602,13 @@ JetKvmDevice::SignInCame JetKvmDevice::cameOf(const SignInOut& out, const base::
     if (status == 429) {
         // It shuts this address out after five wrong passwords, and says when to come back: no word on the password.
         // Then, and not sooner than the first wait after a no.
-        const qint64 told = comeBackAfterMs(reply.value().headers.value("retry-after"), out.laterAtMostMs);
+        const qint64 told =
+            jetkvm_words::comeBackAfterMs(reply.value().headers.value("retry-after"), out.laterAtMostMs);
         pacing.later(out.mark, std::max<qint64>(told, out.steps.refusedMs), out.sent);
         came.kind = SignInCame::Kind::Later;
         return came;
     }
-    came.pass = status == 200 ? passFrom(reply.value().cookies) : QByteArray();
+    came.pass = status == 200 ? jetkvm_words::passFrom(reply.value().cookies) : QByteArray();
     if (came.pass.isEmpty()) {
         // Whatever is at that address did not sign this program in, and not because of the password.
         pacing.unanswered(out.mark, out.steps, out.sent);
@@ -728,9 +686,7 @@ void JetKvmDevice::freshFromItsBox(std::function<void(bool fresh)> then)
     status.path = u"/device/status"_s;
     status.largest = largestStatusBytes;
     m_asker.send(status, {}, [then = std::move(then)](const base::Result<Reply>& reply) {
-        const bool fresh =
-            reply && reply.value().status == 200 &&
-            QJsonDocument::fromJson(reply.value().body).object().value("isSetup"_L1) == QJsonValue(false);
+        const bool fresh = reply && reply.value().status == 200 && jetkvm_words::saysNotSetUp(reply.value().body);
         then(fresh);
     });
 }
@@ -789,11 +745,11 @@ void JetKvmDevice::identify(std::function<void(base::Result<Identity>)> done)
             }
         });
         connect(line, &DeviceLine::textCame, this, [this, asking, over](const QByteArray& text) {
-            const QJsonObject heard = QJsonDocument::fromJson(text).object();
-            if (asking->lineOver || heard.value("type"_L1).toString() != "device-metadata"_L1) {
+            std::optional<QString> version = jetkvm_words::metadataVersion(text);
+            if (asking->lineOver || !version) {
                 return;
             }
-            asking->version = kvmd::plain(heard.value("data"_L1).toObject().value("deviceVersion"_L1), 40);
+            asking->version = std::move(*version);
             over();
             said(asking);
         });
@@ -863,33 +819,35 @@ void JetKvmDevice::askWhichItIs(const std::shared_ptr<Road>& road, const QByteAr
             sessionRefused(road, token);
             return;
         }
-        const base::Result<QString> seen = whichItSays(reply);
-        if (!seen) {
-            const base::Error why = meansAway(seen.error().code) ? failed(seen.error()) : seen.error();
-            if (!m_machine.isEmpty()) {
-                // One is known: a question that came to nothing is no pass.
-                arrive(road, why);
-                return;
-            }
-            if (road->taking) {
-                // Which JetKVM that is could not be told, and nothing is taken (taken as "none", the card kept no
-                // number, and took the next JetKVM to answer there at first use).
-                arrive(road,
-                       base::Error{why.code, "Which JetKVM answers at this address could not be told: " + why.message});
-                return;
-            }
-            // None is known: there is nothing to tell it apart from, and it is used as before.
-            road->seen.reset();
-            openTheLine(road, token);
-            return;
-        }
-        road->seen = seen.value();
-        if (std::optional<base::Error> other = judge(seen.value())) {
+        if (const std::optional<base::Error> other = judged(reply, road->taking, road->seen)) {
             arrive(road, *other);
             return;
         }
         openTheLine(road, token);
     });
+}
+
+std::optional<base::Error> JetKvmDevice::judged(const base::Result<Reply>& reply, bool taking,
+                                                std::optional<QString>& seen)
+{
+    const base::Result<QString> said = whichItSays(reply);
+    if (!said) {
+        base::Error why = meansAway(said.error().code) ? failed(said.error()) : said.error();
+        if (!m_machine.isEmpty()) {
+            // One is known: a question that came to nothing is no pass.
+            return why;
+        }
+        if (taking) {
+            // Which JetKVM that is could not be told, and nothing is taken (taken as "none", the card kept no number,
+            // and took the next JetKVM to answer there at first use).
+            return base::Error{why.code, "Which JetKVM answers at this address could not be told: " + why.message};
+        }
+        // None is known: there is nothing to tell it apart from, and it is used as before.
+        seen.reset();
+        return std::nullopt;
+    }
+    seen = said.value();
+    return judge(said.value());
 }
 
 std::optional<base::Error> JetKvmDevice::judge(const QString& seen)
@@ -1109,19 +1067,25 @@ void JetKvmDevice::look()
     // never counts as somebody watching. Where that connection went meanwhile (given back by this program,
     // which tells what waited "may have been done"), nothing was heard of the JetKVM: it is looked at the
     // plain way, as where none is open.
-    const bool overIt = m_viewer->askStatus([this](const std::optional<Status>& heard) {
-        if (!heard) {
-            lookThePlainWay();
-            return;
-        }
-        Status status = *heard;
-        if (status.state == "online"_L1 || status.state == "no_signal"_L1) {
-            answered();
-            m_version = status.version.isEmpty() ? m_version : status.version;
-        }
-        status.version = m_version;
-        lookOver(std::move(status));
-    });
+    const bool overIt = m_viewer->askStatus(
+        [this](const std::optional<Status>& heard, const std::optional<base::Result<json::Value>>& media) {
+            if (!heard) {
+                lookThePlainWay();
+                return;
+            }
+            Status status = *heard;
+            if (status.state == "online"_L1 || status.state == "no_signal"_L1) {
+                answered();
+                m_version = status.version.isEmpty() ? m_version : status.version;
+                // What is in its drive, and whether it has one, asked beside the rest (the web's _read_status:
+                // `media`).
+                if (media) {
+                    vmSaid(*media);
+                }
+            }
+            status.version = m_version;
+            lookOver(std::move(status), true);
+        });
     if (!overIt) {
         lookThePlainWay();
     }
@@ -1284,20 +1248,24 @@ void JetKvmDevice::lookTheOtherWay(bool down)
     });
 }
 
-void JetKvmDevice::lookOver(Status status)
+void JetKvmDevice::lookOver(Status status, bool overItsConnection)
 {
     m_status = std::move(status);
+    m_drivesLook = overItsConnection;
     m_statusAt = now();
     m_looking = false;
     emit looked();
 }
 
-QStringList JetKvmDevice::abilities(bool atx)
+QStringList JetKvmDevice::abilities(bool atx, bool media)
 {
     QStringList can{u"screen"_s, u"keys"_s,   u"text"_s, u"jiggler"_s, u"wol"_s,
                     u"reboot"_s, u"resume"_s, u"live"_s, u"control"_s};
     if (atx) {
         can.append({u"power"_s, u"reset"_s});
+    }
+    if (media) {
+        can.append(u"media"_s);
     }
     return can;
 }
@@ -1305,8 +1273,21 @@ QStringList JetKvmDevice::abilities(bool atx)
 Status JetKvmDevice::status() const
 {
     Status status = m_status.value_or(Status{});
+    // Whether it has virtual media, as it said last (jetkvm_media.cpp), of a JetKVM whose card says nothing amiss; and
+    // what is in its drive only where the last look went over its connection, which asked it (the web's every look
+    // does, and says nothing of it where none is had). A look that went the plain way, its connection given back for
+    // nobody watching, did not ask it: what was in it then is not said as what is in it now (somebody may have
+    // changed it at its own page meanwhile), until a look over its connection asks it again (review c8b-1 L3).
+    const bool answered = m_status && m_status->errorCode.isEmpty();
+    const bool media = answered && mediaOffer().has_value();
+    if (media) {
+        if (m_drivesLook) {
+            status.media = mediaNow();
+        }
+        status.offersMedia = true;
+    }
     // What it can be asked, as the web's says it (jetkvm.py `can`): its menu offers that and nothing else.
-    status.capabilities = abilities(status.powerIsKnown);
+    status.capabilities = abilities(status.powerIsKnown, media);
     if (m_lastOkAt) {
         const qint64 ago = std::clamp<qint64>(QDateTime::currentSecsSinceEpoch() - *m_lastOkAt, 0, 2'000'000'000);
         status.lastSeenSecondsAgo = static_cast<int>(ago);
@@ -1391,9 +1372,20 @@ void JetKvmDevice::act(const Action& what, std::function<void(base::Result<Done>
 void JetKvmDevice::typeOn(std::vector<typed::Report> reports, std::optional<QString> text,
                           std::function<void(base::Result<Done>)> done)
 {
-    // One action that types at a time (two would interleave): the next begins when the one before is over.
-    m_typingWaits.append([this, reports = std::move(reports), text = std::move(text),
-                          done = std::move(done)]() mutable {
+    // One action that types at a time (two would interleave): the next begins when the one before is over. Each goes no
+    // further once whoever had it typed said to stop after it was asked for (stopTyping, review cx6-1, M3): its keys
+    // ask before the first of them and before every other (jetkvm::type), and one that waits is answered there and
+    // then.
+    const auto stopped = [here = QPointer<JetKvmDevice>(this), stops = m_typingStops] {
+        return here == nullptr || here->m_typingStops != stops;
+    };
+    m_typingWaits.append([this, reports = std::move(reports), text = std::move(text), done = std::move(done),
+                          stopped](bool stoppedNow) mutable {
+        if (stoppedNow) {
+            // (Never begun: what types now is not this one, and goes on being the one.)
+            done(jetkvm::stoppedTyping());
+            return;
+        }
         const auto over = [here = QPointer<JetKvmDevice>(this),
                            done = std::move(done)](const base::Result<Done>& what) {
             done(what);
@@ -1407,7 +1399,7 @@ void JetKvmDevice::typeOn(std::vector<typed::Report> reports, std::optional<QStr
         // the connection's keys are ready, and what was owed is let go of first.
         tryNow();
         m_viewer->inputReady([here = QPointer<JetKvmDevice>(this), reports = std::move(reports), text = std::move(text),
-                              over, notDone](const base::Result<QPointer<JetKvmConnection>>& on) mutable {
+                              over, notDone, stopped](const base::Result<QPointer<JetKvmConnection>>& on) mutable {
             if (!on || on.value() == nullptr) {
                 const base::Error why = on ? base::Error{"dropped", "The connection to the JetKVM ended"} : on.error();
                 if (why.code == "in_use" || why.code == "another_machine") {
@@ -1428,12 +1420,12 @@ void JetKvmDevice::typeOn(std::vector<typed::Report> reports, std::optional<QStr
                 }
             };
             if (!text) {
-                jetkvm::type(connection, std::move(reports), false, pace, keyGoes, over);
+                jetkvm::type(connection, std::move(reports), false, pace, keyGoes, stopped, over);
                 return;
             }
             // Which keys type it is known once connected: the JetKVM says which layout its computer uses.
             connection->keyboardLayout(
-                [connection, text = *text, pace, keyGoes, over, notDone](const base::Result<QString>& layout) {
+                [connection, text = *text, pace, keyGoes, over, notDone, stopped](const base::Result<QString>& layout) {
                     if (!layout) {
                         // Only asked, so far: nothing was typed, whatever became of the question.
                         if (layout.error().code == "in_use") {
@@ -1454,7 +1446,7 @@ void JetKvmDevice::typeOn(std::vector<typed::Report> reports, std::optional<QStr
                         over(keys.error());
                         return;
                     }
-                    jetkvm::type(connection, std::move(keys).value(), true, pace, keyGoes, over);
+                    jetkvm::type(connection, std::move(keys).value(), true, pace, keyGoes, stopped, over);
                 });
         });
     });
@@ -1467,7 +1459,18 @@ void JetKvmDevice::typeNext()
         return;
     }
     m_typingNow = true;
-    m_typingWaits.takeFirst()();
+    m_typingWaits.takeFirst()(false);
+}
+
+void JetKvmDevice::stopTyping()
+{
+    // The one under way asks before its next key, and those that wait are answered now, none of them begun. (From a
+    // list of their own: whoever is answered may ask for another, which waits for the one under way.)
+    ++m_typingStops;
+    const QList<std::function<void(bool)>> waiting = std::exchange(m_typingWaits, {});
+    for (const std::function<void(bool)>& one : waiting) {
+        one(true);
+    }
 }
 
 void JetKvmDevice::askWakeTargets(std::function<void(base::Result<QList<WakeTarget>>)> done)

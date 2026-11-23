@@ -2,6 +2,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -9,7 +10,9 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <string>
 #include <thread>
@@ -23,6 +26,7 @@
 #include <wrl/client.h>
 
 #include <QElapsedTimer>
+#include <QScopeGuard>
 #include <QTest>
 
 #include <qkvm/base/clock.h>
@@ -118,13 +122,15 @@ private:
 
     // A device that checks every call where Windows has the tools for that, and one that does not
     // where it has not: the tests of what is drawn hold either way.
-    static std::unique_ptr<engine::Gpu> softwareGpu(int decodeThreads = 0)
+    static std::unique_ptr<engine::Gpu> softwareGpu(int decodeThreads = 0,
+                                                    int stillsAtOnce = engine::Gpu::Options{}.stillsAtOnce)
     {
         for (const bool checked : {true, false}) {
             engine::Gpu::Options options;
             options.software = true;
             options.checked = checked;
             options.decodeThreads = decodeThreads;
+            options.stillsAtOnce = stillsAtOnce;
             if (base::Result<std::unique_ptr<engine::Gpu>> made = engine::Gpu::create(options)) {
                 return std::move(made).value();
             }
@@ -416,6 +422,53 @@ private:
     {
         stream.push({bytes, base::steadyNowUs(), false});
     }
+    // Waits until a card's key frame is being decoded (the stills' line says one began, and none ended since it was
+    // last asked, which the caller did before handing it in), and says whether it saw that; not where one was over
+    // before it looked, or none began within seconds. Asking empties what the line says (Gpu::stillsSeen).
+    static bool aStillIsBeingDecoded(engine::Gpu& gpu)
+    {
+        const std::int64_t until = base::steadyNowUs() + 5'000'000;
+        std::uint64_t ended = 0;
+        while (base::steadyNowUs() < until) {
+            const engine::Gpu::Stills seen = gpu.stillsSeen();
+            ended += seen.decoded;
+            if (ended != 0) {
+                return false;
+            }
+            if (seen.mostAtOnce >= 1) {
+                return true;
+            }
+            std::this_thread::yield();
+        }
+        return false;
+    }
+
+    // Waits until a card's key frame has been decoded, and two milliseconds more, while its picture is not yet told of
+    // (it is being made smaller for the card, which for a 4K one takes tens of milliseconds in the debug build), and
+    // says whether it saw that; not where its picture was there before. (Right as its decoding ended, the size it is
+    // kept at was not chosen yet: a card shown large in that moment kept its picture whole.) The caller asked the
+    // stills' line before handing it in, as for aStillIsBeingDecoded.
+    static bool aStillIsBeingMadeSmaller(engine::Gpu& gpu, const engine::Stream& card)
+    {
+        const std::int64_t until = base::steadyNowUs() + 5'000'000;
+        std::uint64_t ended = 0;
+        std::int64_t endedAt = 0;
+        while (base::steadyNowUs() < until) {
+            ended += gpu.stillsSeen().decoded;
+            if (card.stats().decoded != 0) {
+                return false;
+            }
+            if (ended != 0 && endedAt == 0) {
+                endedAt = base::steadyNowUs();
+            }
+            if (endedAt != 0 && base::steadyNowUs() - endedAt >= 2'000) {
+                return true;
+            }
+            std::this_thread::yield();
+        }
+        return false;
+    }
+
     // What a scene draws of one stream into a canvas of that size: the pixels, or nothing.
     static std::vector<std::uint8_t> drawnInto(engine::Scene& scene, engine::Canvas& canvas)
     {
@@ -1897,6 +1950,813 @@ private slots:
                  qPrintable(QStringLiteral("%1 MB for %2 MB of pictures").arg(grown / 1e6).arg(pictures / 1e6)));
     }
 
+    // PERF-2 (SPEC.md section 9: memory with 64 JetKVM cards, and the card's own memory): a card's still is kept at
+    // the size the card draws it, in the monitor's own pixels, and not at its stream's. A 1080p key frame drawn 240 x
+    // 135 is kept at 240 x 135: that is what waits in this program's memory to be drawn, and what goes to the card's
+    // (3.1 MB of each before, 64 times over, and the graphics driver's memory for copying them grew with them). Its
+    // stream's size is what it was, and so is what is drawn: the picture's colours where they were.
+    void aCardsStillIsKeptAtTheSizeItIsDrawn()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        const engine::SizePx size{480, 270};
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas(size);
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed placed[] = {{1, {0, 0, 240, 135}}};
+        scene->place(placed);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        QCOMPARE(card.stats().picture, (engine::SizePx{1920, 1080}));
+        QVERIFY(scene->draw(canvas.value()->target()));
+        // Its luma at 240 x 135 and its two colour differences at half that, rounded up: 120 x 68 each.
+        QCOMPARE(card.stats().uploadedBytes, std::uint64_t{240 * 135 + 2 * 120 * 68});
+        const base::Result<std::vector<std::uint8_t>> pixels = canvas.value()->pixels();
+        QVERIFY(pixels.ok());
+        COMPARE_COLOUR(colourAt(pixels.value(), size, 200, 100), ground, 8);
+        COMPARE_COLOUR(colourAt(pixels.value(), size, 75, 70), panel, 8);
+        QCOMPARE(card.stats().refused, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // The same still drawn larger than it was kept at (its card enlarged, its window made larger) is decoded again
+    // for that, from the key frame it came as, without anything new being handed in: a still shown large is at the
+    // size it is shown. Drawn at more than half its stream's size, as a machine shown large is, it is kept whole, at
+    // its stream's own size (what a copy of the screen is made from). Nothing of that counts as a picture that made
+    // way for another.
+    void aStillDrawnLargerThanItWasKeptAtIsDecodedAgainForThat()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        const engine::SizePx size{480, 270};
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas(size);
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}};
+        scene->place(asACard);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        std::uint64_t uploaded = card.stats().uploadedBytes;
+        QCOMPARE(uploaded, std::uint64_t{240 * 135 + 2 * 120 * 68});
+        // Twice as large: decoded again, at that size.
+        const engine::Placed larger[] = {{1, {0, 0, 480, 270}}};
+        scene->place(larger);
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{2});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(card.stats().uploadedBytes - uploaded, std::uint64_t{480 * 270 + 2 * 240 * 135});
+        uploaded = card.stats().uploadedBytes;
+        const base::Result<std::vector<std::uint8_t>> pixels = canvas.value()->pixels();
+        QVERIFY(pixels.ok());
+        COMPARE_COLOUR(colourAt(pixels.value(), size, 400, 200), ground, 8);
+        COMPARE_COLOUR(colourAt(pixels.value(), size, 150, 140), panel, 8);
+        // Shown large, at five sixths of its size: kept whole.
+        const engine::Placed large[] = {{1, {0, 0, 1600, 900}}};
+        scene->place(large);
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{3});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(card.stats().uploadedBytes - uploaded, std::uint64_t{1920 * 1080 + 2 * 960 * 540});
+        // Smaller again: what is kept stays as it is until the next still, which is kept at the size drawn then.
+        scene->place(asACard);
+        QTest::qWait(100);
+        QCOMPARE(card.stats().decoded, std::uint64_t{3});
+        QCOMPARE(card.stats().replaced, std::uint64_t{0});
+        QCOMPARE(card.stats().refused, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // In a place of another shape than the picture's, the still keeps its own shape and is kept at the largest size
+    // that fits, as the scene draws it there: a 1080p still in a place 240 wide and 400 high is kept 240 x 135.
+    void aCardsStillIsKeptAtTheSizeItIsDrawnInAPlaceOfAnotherShape()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 400});
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed tall[] = {{1, {0, 0, 240, 400}}};
+        scene->place(tall);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(card.stats().uploadedBytes, std::uint64_t{240 * 135 + 2 * 120 * 68});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // Placed larger while its picture still waits to be drawn: the picture made again, larger, takes that one's place,
+    // and no picture counts as one that made way for another (each still that came is drawn), but for the one drawn.
+    void aStillRemadeLargerWhileItsPictureWaitsCountsAsNoneThatMadeWay()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}};
+        scene->place(asACard);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        // Not drawn yet: placed larger.
+        const engine::Placed larger[] = {{1, {0, 0, 480, 270}}};
+        scene->place(larger);
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{2});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(card.stats().uploadedBytes, std::uint64_t{480 * 270 + 2 * 240 * 135});
+        QCOMPARE(card.stats().replaced, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // A card whose place grows a pixel at a time, as its window's edge is dragged, is not decoded again at every step:
+    // once its place has held still for a moment, its still is decoded again once, at the size it came to, and no more
+    // (the review of f513c8e6, M3: a drag decoded every card's key frame again on most frames).
+    void aCardDraggedLargerIsDecodedAgainOnceItHoldsStill_data()
+    {
+        QTest::addColumn<int>("lateStep");
+        // (And one step 250 ms late, as on a loaded PC: the place held still for longer than 200 ms there.)
+        QTest::newRow("every step in time") << 0;
+        QTest::newRow("the twentieth step late") << 20;
+    }
+
+    void aCardDraggedLargerIsDecodedAgainOnceItHoldsStill()
+    {
+        QFETCH(int, lateStep);
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}};
+        scene->place(asACard);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        // Forty steps of a pixel, 10 ms apart: a drag of 400 ms. A step that comes late (a loaded PC) holds the place
+        // still for that long, and its still may be decoded again for it then: such steps are counted, as the time
+        // between two of them, and so many decoded again are allowed (on a quiet PC none; before, one for every step).
+        QElapsedTimer clock;
+        clock.start();
+        qint64 last = 0;
+        std::uint64_t late = 0;
+        int width = 240;
+        int height = 135;
+        for (int step = 1; step <= 40; ++step) {
+            if (step == lateStep) {
+                QTest::qWait(250);
+            }
+            width = 240 + step;
+            height = 135 + step * 135 / 240;
+            const engine::Placed dragged[] = {{1, {0, 0, width, height}}};
+            scene->place(dragged);
+            const qint64 now = clock.elapsed();
+            late += step > 1 && now - last >= 150 ? 1 : 0;
+            last = now;
+            QVERIFY(scene->draw(canvas.value()->target()));
+            QTest::qWait(10);
+        }
+        const std::uint64_t whileDragged = card.stats().decoded - 1;
+        QVERIFY2(
+            whileDragged <= late,
+            qPrintable(QStringLiteral("%1 decoded again while dragged, %2 steps late").arg(whileDragged).arg(late)));
+        // Held still: decoded again at the size it came to, its picture drawn at that size (after one decoded again
+        // for a late step that was still under way as the drag ended, where there was one), and then no more. (Its size
+        // as the engine works it out: StreamCore::keptSizeFor.)
+        const double scale = std::min(static_cast<double>(width) / 1920, static_cast<double>(height) / 1080);
+        const int keptWidth = std::max(1, static_cast<int>(std::ceil(1920 * scale)));
+        const int keptHeight = std::max(1, static_cast<int>(std::ceil(1080 * scale)));
+        const std::uint64_t keptBytes = std::uint64_t{1} * static_cast<std::uint64_t>(keptWidth) * keptHeight +
+                                        std::uint64_t{2} * static_cast<std::uint64_t>((keptWidth + 1) / 2) *
+                                            static_cast<std::uint64_t>((keptHeight + 1) / 2);
+        std::uint64_t lastCopied = 0;
+        const auto drawnAtTheSizeItCameTo = [&] {
+            const std::uint64_t before = card.stats().uploadedBytes;
+            if (scene->draw(canvas.value()->target()) && card.stats().uploadedBytes != before) {
+                lastCopied = card.stats().uploadedBytes - before;
+            }
+            return lastCopied == keptBytes;
+        };
+        QTRY_VERIFY(drawnAtTheSizeItCameTo());
+        const std::uint64_t settled = card.stats().decoded;
+        QVERIFY2(settled - 1 - whileDragged <= 2,
+                 qPrintable(QStringLiteral("%1 decoded after the drag").arg(settled - 1 - whileDragged)));
+        QTest::qWait(500);
+        QCOMPARE(card.stats().decoded, settled);
+        QCOMPARE(card.stats().replaced, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // Only a card of a wall is kept at the size drawn (the review of f513c8e6, M1): a stream that is no card (a machine
+    // shown large, at any scale, its window half the screen) keeps its still whole however small it is drawn, at a
+    // quarter and at exactly half, and a copy of its screen is the machine's whole picture.
+    void aStreamThatIsNoCardKeepsItsStillWholeAndIsCopiedWhole()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({960, 540});
+        QVERIFY(canvas.ok());
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        engine::StreamId id = 1;
+        for (const engine::SizePx drawn : {engine::SizePx{240, 135}, engine::SizePx{960, 540}}) {
+            engine::Stream& large = scene->add(id, engine::Codec::KeyFrameStill);
+            const engine::Placed placed[] = {{id, {0, 0, drawn.width, drawn.height}}};
+            scene->place(placed);
+            large.push({key, base::steadyNowUs(), true});
+            QTRY_COMPARE(large.stats().decoded, std::uint64_t{1});
+            QVERIFY(scene->draw(canvas.value()->target()));
+            QCOMPARE(large.stats().uploadedBytes, std::uint64_t{1920 * 1080 + 2 * 960 * 540});
+            const base::Result<engine::Screenshot> shot = scene->screenshot(id);
+            QVERIFY(shot.ok());
+            QCOMPARE(shot.value().size, (engine::SizePx{1920, 1080}));
+            scene->remove(id);
+            ++id;
+        }
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // A card that is shown large (its window's machine shown large) is no card any more: its still, kept at a card's
+    // size, is decoded again whole at once, and a copy of its screen is the whole picture.
+    void aCardShownLargeIsDecodedWholeAgainAndCopiedWhole()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}};
+        scene->place(asACard);
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        card.push({key, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        const std::uint64_t asSmall = card.stats().uploadedBytes;
+        QCOMPARE(asSmall, std::uint64_t{240 * 135 + 2 * 120 * 68});
+        // Shown large where it is drawn: as small as it was (half its window, at a scale).
+        card.shownAsACard(false);
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{2});
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(card.stats().uploadedBytes - asSmall, std::uint64_t{1920 * 1080 + 2 * 960 * 540});
+        const base::Result<engine::Screenshot> shot = scene->screenshot(1);
+        QVERIFY(shot.ok());
+        QCOMPARE(shot.value().size, (engine::SizePx{1920, 1080}));
+        QCOMPARE(card.stats().replaced, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // A picture live that comes as stills (a kvmd's "mjpeg" or "snapshots", a server's JPEG live) is no card: each of
+    // its pictures is kept whole, also drawn at less than half its size (the review of f513c8e6, M2).
+    void aPictureLiveThatComesAsStillsKeepsEveryPictureWhole()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        engine::Stream& live = scene->add(1, engine::Codec::Still);
+        live.shownAt({200, 112}, engine::Importance::ShownLarge);
+        const engine::Placed asTheWindowHasIt[] = {{1, {0, 0, 200, 112}}};
+        scene->place(asTheWindowHasIt);
+        std::uint64_t uploaded = 0;
+        // (A PNG and a JPEG by turns, each the size of the picture, 480 x 270: no picture byte for byte the last.)
+        for (int picture = 1; picture <= 6; ++picture) {
+            pushFile(live, made(picture % 2 == 1 ? "desktop-stills-png/grey-16.png" : "desktop-preview-480/001.jpg"));
+            QTRY_COMPARE(live.stats().decoded, std::uint64_t(picture));
+            QVERIFY(scene->draw(canvas.value()->target()));
+            // Each copied to the card whole: its luma alone is 480 x 270.
+            QVERIFY2(live.stats().uploadedBytes - uploaded >= std::uint64_t{480} * 270,
+                     qPrintable(QString::number(live.stats().uploadedBytes - uploaded)));
+            uploaded = live.stats().uploadedBytes;
+        }
+        const base::Result<engine::Screenshot> shot = scene->screenshot(1);
+        QVERIFY(shot.ok());
+        QCOMPARE(shot.value().size.width, 480);
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // What that saves in this program's own memory: thirty-two cards placed as a wall of them is, each given a 1080p
+    // key frame and holding its picture, undrawn, grow what is committed by their pictures at the size drawn (1.6 MB,
+    // a sixty-fourth of theirs at their stream's size, which they held before: some 110 MB here) and what the
+    // decoders leave behind.
+    void cardsThatHoldTheirStillsHoldThemAtTheSizeDrawn()
+    {
+#if defined(__SANITIZE_ADDRESS__)
+        QSKIP("The address sanitizer keeps freed memory for a while: what is committed says nothing here.");
+#endif
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu();
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        std::vector<std::vector<std::byte>> keys;
+        for (std::size_t nth = 0; nth < 5; ++nth) {
+            keys.push_back(keyFrameOf("desktop-1080p30.h264", nth));
+            QVERIFY2(!keys.back().empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        }
+        engine::Stream& first = scene->add(100, engine::Codec::KeyFrameStill);
+        first.push({keys[0], base::steadyNowUs(), true});
+        QTRY_COMPARE(first.stats().decoded, std::uint64_t{1});
+        const auto committed = [] {
+            PROCESS_MEMORY_COUNTERS counters{};
+            counters.cb = sizeof(counters);
+            return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) != 0
+                       ? static_cast<double>(counters.PagefileUsage)
+                       : 0.0;
+        };
+        constexpr int cards = 32;
+        std::vector<engine::Placed> placed;
+        placed.reserve(cards);
+        for (int card = 0; card < cards; ++card) {
+            placed.push_back({static_cast<engine::StreamId>(card + 1), {(card % 8) * 240, (card / 8) * 135, 240, 135}});
+        }
+        const double before = committed();
+        std::vector<engine::Stream*> streams;
+        streams.reserve(cards);
+        for (int card = 0; card < cards; ++card) {
+            streams.push_back(&scene->add(static_cast<engine::StreamId>(card + 1), engine::Codec::KeyFrameStill));
+            streams.back()->shownAsACard(true);
+        }
+        scene->place(placed);
+        for (int card = 0; card < cards; ++card) {
+            streams.at(static_cast<std::size_t>(card))
+                ->push({keys[static_cast<std::size_t>(card) % keys.size()], base::steadyNowUs(), true});
+        }
+        for (engine::Stream* stream : streams) {
+            QTRY_COMPARE(stream->stats().decoded, std::uint64_t{1});
+        }
+        QTest::qWait(100);
+        const double grown = committed() - before;
+        const double whole = 1920.0 * 1080 * 1.5 * cards;
+        qInfo() << "grown:" << grown / 1e6 << "MB, the pictures at their stream's size:" << whole / 1e6 << "MB";
+        // (A quarter of the whole, with room for what the decoders leave behind in the heap: before, more than the
+        // whole.)
+        QVERIFY2(grown < whole / 4,
+                 qPrintable(QStringLiteral("%1 MB, for pictures of %2 MB whole").arg(grown / 1e6).arg(whole / 1e6)));
+    }
+
+    // PERF-2: card stills that are key frames are decoded no more than Gpu::Options::stillsAtOnce at once; the others
+    // wait their turn where they are handed in, and each is decoded in turn, none lost. (Sixteen handed in at once on
+    // eight threads were decoded up to seven at once, and each of those a decoder of some megabytes.)
+    void keyFrameStillsAreDecodedNoMoreThanAFewAtOnce()
+    {
+        constexpr int atOnce = 2;
+        QCOMPARE(engine::Gpu::Options{}.stillsAtOnce, 2);
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(8, atOnce);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        const std::vector<std::byte> key = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        constexpr int cards = 16;
+        std::vector<engine::Stream*> streams;
+        streams.reserve(cards);
+        for (int card = 0; card < cards; ++card) {
+            streams.push_back(&scene->add(static_cast<engine::StreamId>(card + 1), engine::Codec::KeyFrameStill));
+            streams.back()->shownAsACard(true);
+        }
+        static_cast<void>(gpu->stillsSeen());
+        for (engine::Stream* stream : streams) {
+            stream->push({key, base::steadyNowUs(), true});
+        }
+        for (engine::Stream* stream : streams) {
+            QTRY_COMPARE(stream->stats().decoded, std::uint64_t{1});
+            QCOMPARE(stream->stats().droppedBehind, std::uint64_t{0});
+            QCOMPARE(stream->stats().refused, std::uint64_t{0});
+        }
+        const engine::Gpu::Stills seen = gpu->stillsSeen();
+        QVERIFY2(seen.mostAtOnce == atOnce, qPrintable(QStringLiteral("%1 at once").arg(seen.mostAtOnce)));
+        QVERIFY2(seen.waited >= cards / 2, qPrintable(QStringLiteral("%1 waited").arg(seen.waited)));
+        // (A key frame of 1080p takes milliseconds to decode in software: none waits long.)
+        QVERIFY2(seen.longestWaitMs > 0, qPrintable(QString::number(seen.longestWaitMs)));
+    }
+
+    // And a machine live, shown large, never waits behind that line, nor a stream of stills that is no card (a JetKVM
+    // shown large as its key frames, whatever its kind: the review of f513c8e6, M2): their pictures are decoded as they
+    // come, while the stills of sixteen cards, each a key frame of 4K (three of them in turn, so that none is the same
+    // as the card's last, which would be let go), keep the one place there is for them busy all along. The line is
+    // handed the cards' stills and nothing else, every one of them, sixteen a round: by its own count, whatever the
+    // load (handed in through the line, the others' pictures waited behind the cards' stills, and newer ones took their
+    // place). The machine live has none of its pictures thrown away; the stream that is no card is handed its next
+    // picture once the one before is decoded, and each is. (Counted before as none of its pictures thrown away, at one
+    // every 66 ms, which a loaded PC also does by itself where a key frame takes longer than two of those: the review
+    // of abb20deb, L4.)
+    void aLiveMachinesPicturesNeverWaitBehindTheStillsLine()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        const std::array<std::vector<std::byte>, 3> keys = {keyFrameOf("pattern-2160p60.h264", 0),
+                                                            keyFrameOf("pattern-2160p60.h264", 1),
+                                                            keyFrameOf("pattern-2160p60.h264", 2)};
+        const std::array<std::vector<std::byte>, 2> largeKeys = {keyFrameOf("desktop-1080p30.h264", 0),
+                                                                 keyFrameOf("desktop-1080p30.h264", 1)};
+        const base::Result<std::vector<std::byte>> clip = bench::readFile(made("desktop-720p15.h264"));
+        QVERIFY2(!keys[0].empty() && !keys[1].empty() && !keys[2].empty() && !largeKeys[0].empty() &&
+                     !largeKeys[1].empty() && clip.ok(),
+                 "tools\\make_testdata.ps1 makes the pictures this test needs");
+        const std::vector<bench::Cut> cuts = bench::cutIntoPictures(clip.value());
+        const std::span<const std::byte> bytes(clip.value());
+        constexpr int cards = 16;
+        std::vector<engine::Stream*> stills;
+        stills.reserve(cards);
+        for (int card = 0; card < cards; ++card) {
+            stills.push_back(&scene->add(static_cast<engine::StreamId>(card + 100), engine::Codec::KeyFrameStill));
+            stills.back()->shownAsACard(true);
+        }
+        engine::Stream& live = scene->add(1, engine::Codec::H264);
+        live.shownAt({1280, 720}, engine::Importance::ShownLarge);
+        // (No card: as a stream is made, and as a card shown large is told.)
+        engine::Stream& large = scene->add(2, engine::Codec::KeyFrameStill);
+        large.shownAt({1920, 1080}, engine::Importance::ShownLarge);
+        large.shownAsACard(false);
+        constexpr std::size_t pictures = 30;
+        QVERIFY(cuts.size() >= pictures);
+        static_cast<void>(gpu->stillsSeen());
+        // What the line says, kept across askings (each asking empties it).
+        engine::Gpu::Stills line{};
+        const auto look = [&] {
+            const engine::Gpu::Stills seen = gpu->stillsSeen();
+            line.mostAtOnce = std::max(line.mostAtOnce, seen.mostAtOnce);
+            line.waited += seen.waited;
+            line.replacedWaiting += seen.replacedWaiting;
+            line.handedIn += seen.handedIn;
+        };
+        std::size_t largeHanded = 0;
+        const auto handLargeItsNext = [&] {
+            look();
+            if (large.stats().decoded != largeHanded) {
+                return;
+            }
+            if (largeHanded < pictures) {
+                large.push({largeKeys.at(largeHanded % largeKeys.size()), base::steadyNowUs(), true});
+                ++largeHanded;
+            }
+        };
+        QElapsedTimer clock;
+        clock.start();
+        for (std::size_t at = 0; at < pictures; ++at) {
+            // Every card has a still waiting all along (each one handed in takes the place of the one that waits).
+            for (std::size_t card = 0; card < stills.size(); ++card) {
+                stills[card]->push({keys.at((at + card) % keys.size()), base::steadyNowUs(), true});
+            }
+            live.push({bytes.subspan(cuts[at].from, cuts[at].size), base::steadyNowUs(), cuts[at].keyFrame});
+            // (Looked at every millisecond or so until the next round: the stream that is no card is handed its next
+            // picture within that of the one before being decoded.)
+            do {
+                handLargeItsNext();
+                QTest::qWait(1);
+            } while (clock.elapsed() < static_cast<qint64>(at + 1) * 66);
+        }
+        const qint64 until = clock.elapsed() + 20'000;
+        while ((largeHanded < pictures || large.stats().decoded < pictures) && clock.elapsed() < until) {
+            handLargeItsNext();
+            QTest::qWait(1);
+        }
+        handLargeItsNext();
+        QTRY_COMPARE(live.stats().decoded, std::uint64_t{pictures});
+        QCOMPARE(live.stats().droppedBehind, std::uint64_t{0});
+        QCOMPARE(large.stats().decoded, std::uint64_t{pictures});
+        QCOMPARE(large.stats().droppedBehind, std::uint64_t{0});
+        // Every card's still handed in to the line, and nothing else: the machine live's pictures and those of the
+        // stream that is no card went to the pool by themselves.
+        QCOMPARE(line.handedIn, std::uint64_t{cards} * pictures);
+        // The line was busy meanwhile: one still at a time, the others waiting, and newer ones taking their place.
+        QCOMPARE(line.mostAtOnce, 1);
+        QVERIFY(line.waited > 0);
+        QVERIFY(line.replacedWaiting > 0);
+    }
+
+    // A still handed in while its own card's last one is being decoded wakes that card at once (it holds the place);
+    // its place goes to the next in line as that decoding ends, and the card, woken for it all the same, decodes
+    // nothing until its turn has come again. Two cards of 4K key frames, one place, each card handed a still again
+    // while it decodes, many times over: never two decoded at once.
+    void aStillHandedInWhileItsCardDecodesWaitsForItsTurnAgain()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        std::vector<std::vector<std::byte>> keys;
+        for (std::size_t nth = 0; nth < 3; ++nth) {
+            keys.push_back(keyFrameOf("pattern-2160p60.h264", nth));
+            QVERIFY2(!keys.back().empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        }
+        engine::Stream& one = scene->add(1, engine::Codec::KeyFrameStill);
+        engine::Stream& other = scene->add(2, engine::Codec::KeyFrameStill);
+        one.shownAsACard(true);
+        other.shownAsACard(true);
+        static_cast<void>(gpu->stillsSeen());
+        for (std::size_t round = 0; round < 40; ++round) {
+            one.push({keys[round % keys.size()], base::steadyNowUs(), true});
+            other.push({keys[(round + 1) % keys.size()], base::steadyNowUs(), true});
+            // (While the first is decoded, most likely: a key frame of 4K takes milliseconds.)
+            QTest::qWait(1);
+            one.push({keys[(round + 2) % keys.size()], base::steadyNowUs(), true});
+            QTest::qWait(25);
+        }
+        // (What is still in line or being decoded, done.)
+        QTest::qWait(500);
+        QVERIFY(one.stats().decoded > 0 && other.stats().decoded > 0);
+        const engine::Gpu::Stills seen = gpu->stillsSeen();
+        QVERIFY2(seen.mostAtOnce == 1, qPrintable(QStringLiteral("%1 at once").arg(seen.mostAtOnce)));
+        QCOMPARE(one.stats().refused + other.stats().refused, std::uint64_t{0});
+    }
+
+    // A card drawn larger is woken by itself once its place has held still (b4d9ead5), and not by the stills' line:
+    // it decodes its still again only in a place of the line, and waits its turn behind a card that holds the place
+    // meanwhile. One place; one card kept decoding 4K key frames all along, the other drawn larger in the middle of
+    // that: never two decoded at once, and the larger one decoded again all the same.
+    void aCardDecodedAgainOnceItHoldsStillWaitsForItsTurnInTheLine()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        const std::vector<std::byte> itsOwn = keyFrameOf("desktop-1080p30.h264", 0);
+        std::vector<std::vector<std::byte>> keys;
+        for (std::size_t nth = 0; nth < 3; ++nth) {
+            keys.push_back(keyFrameOf("pattern-2160p60.h264", nth));
+            QVERIFY2(!keys.back().empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        }
+        QVERIFY2(!itsOwn.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+        engine::Stream& busy = scene->add(2, engine::Codec::KeyFrameStill);
+        card.shownAsACard(true);
+        busy.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}, {2, {240, 135, 240, 135}}};
+        scene->place(asACard);
+        card.push({itsOwn, base::steadyNowUs(), true});
+        QTRY_COMPARE(card.stats().decoded, std::uint64_t{1});
+        static_cast<void>(gpu->stillsSeen());
+        // Drawn larger: decoded again 200 ms later, while the other card decodes one 4K key frame after another.
+        const engine::Placed larger[] = {{1, {0, 0, 480, 270}}, {2, {240, 135, 240, 135}}};
+        scene->place(larger);
+        QVERIFY(scene->draw(canvas.value()->target()));
+        // How many of the busy card's stills were decoded as the larger card's came to be decoded again, and how long
+        // the busy card's slowest decoding took meanwhile (from one decoded to the next): whatever a key frame takes to
+        // decode here (ARM64's debug build, beside three other programs, decoded two or fewer of these in a second),
+        // the busy card goes on after the larger card's turn within ten times that, the line never stalling longer.
+        // (That it decoded one before is no proof of the turn: it does with the line or without. The proof that the
+        // larger card waited its turn is the line's own count, `waited`, below.) Never two at once all the while.
+        std::optional<std::uint64_t> busyBefore;
+        std::uint64_t busySeen = busy.stats().decoded;
+        qint64 busyLastMs = 0;
+        qint64 busySlowestMs = 0;
+        QElapsedTimer clock;
+        clock.start();
+        for (std::size_t at = 0; clock.elapsed() < 700 || !busyBefore.has_value(); ++at) {
+            busy.push({keys[at % keys.size()], base::steadyNowUs(), true});
+            QTest::qWait(2);
+            if (const std::uint64_t now = busy.stats().decoded; now != busySeen) {
+                busySlowestMs = std::max(busySlowestMs, clock.elapsed() - busyLastMs);
+                busyLastMs = clock.elapsed();
+                busySeen = now;
+            }
+            if (!busyBefore.has_value() && card.stats().decoded == 2) {
+                busyBefore = busy.stats().decoded;
+            }
+            QVERIFY2(clock.elapsed() < 30'000, "the larger card was not decoded again in 30 s");
+        }
+        QVERIFY2(*busyBefore >= 1, qPrintable(QString::number(*busyBefore)));
+        const int busyBoundMs = static_cast<int>(std::max<qint64>(10 * busySlowestMs, 1'000));
+        QTRY_VERIFY2_WITH_TIMEOUT(
+            busy.stats().decoded > *busyBefore,
+            qPrintable(QStringLiteral("the busy card decoded nothing more within %1 ms, ten times "
+                                      "its slowest decoding before (%2 ms; %3 decoded)")
+                           .arg(busyBoundMs)
+                           .arg(busySlowestMs)
+                           .arg(*busyBefore)),
+            busyBoundMs);
+        QCOMPARE(card.stats().decoded, std::uint64_t{2});
+        QTest::qWait(300);
+        const engine::Gpu::Stills seen = gpu->stillsSeen();
+        QVERIFY2(seen.mostAtOnce == 1, qPrintable(QStringLiteral("%1 at once").arg(seen.mostAtOnce)));
+        // And the line was used: a still waited in it, the larger card's behind the busy card's. (With the line taken
+        // away nothing waits, and two are decoded at once only where they happen to meet: 3 runs of 5 on x64. This is
+        // red for a card that jumps the line every time.)
+        QVERIFY2(seen.waited >= 1, qPrintable(QString::number(seen.waited)));
+        QCOMPARE(card.stats().refused + busy.stats().refused, std::uint64_t{0});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // A card that goes while its key frame is being decoded, with a newer still handed in meanwhile, holds no place of
+    // the stills' line after it, however it goes: its scene ended with it (as every test here ends), taken away, or
+    // another put in its place. And the next card's still is decoded. (Its last decoding handed in the newer one as it
+    // ended, after the card was out of the line: the card that went was put back in it, and held the one place there is
+    // for good, or waited in line once freed, the review of abb20deb, M2.) Two decoding threads: previews have one, so
+    // the newer still's wake waits in the pool's line while the card decodes, as it does wherever the threads are busy.
+    void aCardThatGoesWhileItDecodesHoldsNoPlaceInTheLineAfter()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(2, 1);
+        QVERIFY(gpu != nullptr);
+        const std::array<std::vector<std::byte>, 2> keys = {keyFrameOf("pattern-2160p60.h264", 0),
+                                                            keyFrameOf("pattern-2160p60.h264", 1)};
+        const std::vector<std::byte> next = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!keys[0].empty() && !keys[1].empty() && !next.empty(),
+                 "tools\\make_testdata.ps1 makes the pictures this test needs");
+        enum class Goes { WithItsScene, TakenAway, ItsPlaceTaken };
+        int caught = 0;
+        for (const Goes goes : {Goes::WithItsScene, Goes::TakenAway, Goes::ItsPlaceTaken, Goes::WithItsScene}) {
+            std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+            engine::Stream& card = scene->add(1, engine::Codec::KeyFrameStill);
+            card.shownAsACard(true);
+            static_cast<void>(gpu->stillsSeen());
+            card.push({keys[0], base::steadyNowUs(), true});
+            caught += aStillIsBeingDecoded(*gpu) ? 1 : 0;
+            card.push({keys[1], base::steadyNowUs(), true});
+            switch (goes) {
+            case Goes::WithItsScene:
+                scene.reset();
+                break;
+            case Goes::TakenAway:
+                scene->remove(1);
+                break;
+            case Goes::ItsPlaceTaken:
+                static_cast<void>(scene->add(1, engine::Codec::KeyFrameStill));
+                break;
+            }
+            QTRY_COMPARE(gpu->stillsSeen().holdingNow, 0);
+            QCOMPARE(gpu->stillsSeen().inLineNow, 0);
+            // The next card's still is decoded: the place is free for it.
+            if (scene == nullptr) {
+                scene = gpu->makeScene({});
+            }
+            engine::Stream& after = scene->add(2, engine::Codec::KeyFrameStill);
+            after.shownAsACard(true);
+            after.push({next, base::steadyNowUs(), true});
+            QTRY_COMPARE(after.stats().decoded, std::uint64_t{1});
+            scene->remove(2);
+            QTRY_COMPARE(gpu->stillsSeen().holdingNow, 0);
+        }
+        // (How many of the four went while their decoding was under way, as meant: where one ended first, that one
+        // proves less, and nothing else.)
+        qInfo() << caught << "of 4 cards went while their key frame was being decoded";
+    }
+
+    // ... and the line never wakes a card that went: the card of another scene waits in line for the one place while
+    // the card that holds it is decoded, a newer still comes for that one, and its scene ends; the waiting card has the
+    // place, decodes and gives it back, to nobody, five times over. (Before: the card that went waited in line behind
+    // it, freed, and was woken there: a use of freed memory, which the address sanitizer preset says.)
+    void aCardWhoseSceneEndsWhileItDecodesIsNeverWokenByTheLineAfter()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        std::vector<std::vector<std::byte>> keys;
+        for (std::size_t nth = 0; nth < 3; ++nth) {
+            keys.push_back(keyFrameOf("pattern-2160p60.h264", nth));
+            QVERIFY2(!keys.back().empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        }
+        const std::unique_ptr<engine::Scene> stays = gpu->makeScene({});
+        engine::Stream& waits = stays->add(1, engine::Codec::KeyFrameStill);
+        waits.shownAsACard(true);
+        int caught = 0;
+        for (std::size_t round = 0; round < 5; ++round) {
+            std::unique_ptr<engine::Scene> goes = gpu->makeScene({});
+            engine::Stream& card = goes->add(1, engine::Codec::KeyFrameStill);
+            card.shownAsACard(true);
+            static_cast<void>(gpu->stillsSeen());
+            card.push({keys[0], base::steadyNowUs(), true});
+            caught += aStillIsBeingDecoded(*gpu) ? 1 : 0;
+            // (Another still each round: the same as its last would be let go.)
+            waits.push({keys[round % keys.size()], base::steadyNowUs(), true});
+            card.push({keys[1], base::steadyNowUs(), true});
+            goes.reset();
+            QTRY_COMPARE(waits.stats().decoded, std::uint64_t{round + 1});
+            QTRY_COMPARE(gpu->stillsSeen().holdingNow, 0);
+            QCOMPARE(gpu->stillsSeen().inLineNow, 0);
+        }
+        engine::Stream& after = stays->add(2, engine::Codec::KeyFrameStill);
+        after.shownAsACard(true);
+        after.push({keys[2], base::steadyNowUs(), true});
+        QTRY_COMPARE(after.stats().decoded, std::uint64_t{1});
+        qInfo() << caught << "of 5 cards went while their key frame was being decoded";
+    }
+
+    // A card that waits in the stills' line when its machine comes to be shown large in its window (no card any more,
+    // shownAsACard) is out of the line in that step, and the still it waited with is decoded at once, whole: not when
+    // the line's turn would have come to it, while the machine shown large is drawn from that card's small still and a
+    // copy of its screen is that still (the review of abb20deb, M1). One place; twelve cards with a 4K key frame each
+    // ahead of it in line: it leaves the line at once, its still is decoded before half of those ahead of it are, kept
+    // whole and copied whole, and a copy of its screen is 1920 x 1080; and when the line is done, every card ahead was
+    // decoded in its turn, and no place is held and none waits.
+    void aCardThatWaitsInTheLineWhenItIsShownLargeIsDecodedWholeAtOnce()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        std::vector<std::vector<std::byte>> keys;
+        for (std::size_t nth = 0; nth < 3; ++nth) {
+            keys.push_back(keyFrameOf("pattern-2160p60.h264", nth));
+            QVERIFY2(!keys.back().empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        }
+        const std::vector<std::byte> itsOwn = keyFrameOf("desktop-1080p30.h264", 0);
+        QVERIFY2(!itsOwn.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        constexpr int ahead = 12;
+        std::vector<engine::Stream*> cards;
+        cards.reserve(ahead);
+        for (int card = 0; card < ahead; ++card) {
+            cards.push_back(&scene->add(static_cast<engine::StreamId>(card + 10), engine::Codec::KeyFrameStill));
+            cards.back()->shownAsACard(true);
+        }
+        engine::Stream& large = scene->add(1, engine::Codec::KeyFrameStill);
+        large.shownAsACard(true);
+        const engine::Placed asACard[] = {{1, {0, 0, 240, 135}}};
+        scene->place(asACard);
+        for (std::size_t card = 0; card < cards.size(); ++card) {
+            cards[card]->push({keys[card % keys.size()], base::steadyNowUs(), true});
+        }
+        large.push({itsOwn, base::steadyNowUs(), true});
+        // (All but the one being decoded wait, it among them; on a loaded PC a few may have had their turn already.)
+        const int before = gpu->stillsSeen().inLineNow;
+        QVERIFY2(before >= ahead / 2, qPrintable(QStringLiteral("%1 in line").arg(before)));
+        // Shown large: no card any more, and out of the line in the same step (the line only grows shorter meanwhile).
+        large.shownAsACard(false);
+        const int after = gpu->stillsSeen().inLineNow;
+        QVERIFY2(after < before, qPrintable(QStringLiteral("%1 in line before, %2 after").arg(before).arg(after)));
+        QTRY_COMPARE(large.stats().decoded, std::uint64_t{1});
+        const auto decodedAhead =
+            std::ranges::count_if(cards, [](const engine::Stream* card) { return card->stats().decoded > 0; });
+        QVERIFY2(decodedAhead < ahead / 2,
+                 qPrintable(QStringLiteral("%1 of the %2 ahead of it decoded first").arg(decodedAhead).arg(ahead)));
+        QVERIFY(scene->draw(canvas.value()->target()));
+        QCOMPARE(large.stats().uploadedBytes, std::uint64_t{1920 * 1080 + 2 * 960 * 540});
+        const base::Result<engine::Screenshot> shot = scene->screenshot(1);
+        QVERIFY(shot.ok());
+        QCOMPARE(shot.value().size, (engine::SizePx{1920, 1080}));
+        for (const engine::Stream* card : cards) {
+            QTRY_COMPARE(card->stats().decoded, std::uint64_t{1});
+        }
+        QTRY_COMPARE(gpu->stillsSeen().holdingNow, 0);
+        QCOMPARE(gpu->stillsSeen().inLineNow, 0);
+        QCOMPARE(large.stats().decoded, std::uint64_t{1});
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
+    // ... and a card shown large in the moment its still is being made a card's size (decoded, not yet kept) has it so
+    // only until then: its whole picture is decoded again at once, also while its place is still changing, and does not
+    // wait until its place has held still (b4d9ead5's 200 ms, which is a card's: the review of abb20deb, M1, its second
+    // path). A 4K key frame made smaller for 240 x 135; shown large while that is done, and its place grown every 10 ms
+    // for 1.5 s, as a window's edge is dragged: its whole picture is drawn within that time. Three cards in turn.
+    void aCardShownLargeAsItsStillIsMadeSmallerIsDecodedWholeAtOnce()
+    {
+        const std::unique_ptr<engine::Gpu> gpu = softwareGpu(4, 1);
+        QVERIFY(gpu != nullptr);
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas({480, 270});
+        QVERIFY(canvas.ok());
+        const std::vector<std::byte> key = keyFrameOf("pattern-2160p60.h264", 0);
+        QVERIFY2(!key.empty(), "tools\\make_testdata.ps1 makes the pictures this test needs");
+        constexpr std::uint64_t whole = std::uint64_t{3840} * 2160 + std::uint64_t{2} * 1920 * 1080;
+        int caught = 0;
+        for (engine::StreamId id = 1; id <= 3; ++id) {
+            engine::Stream& card = scene->add(id, engine::Codec::KeyFrameStill);
+            card.shownAsACard(true);
+            const engine::Placed asACard[] = {{id, {0, 0, 240, 135}}};
+            scene->place(asACard);
+            static_cast<void>(gpu->stillsSeen());
+            card.push({key, base::steadyNowUs(), true});
+            caught += aStillIsBeingMadeSmaller(*gpu, card) ? 1 : 0;
+            card.shownAsACard(false);
+            QElapsedTimer clock;
+            clock.start();
+            bool drawnWhole = false;
+            for (int step = 1; clock.elapsed() < 1500 && !drawnWhole; ++step) {
+                const engine::Placed dragged[] = {{id, {0, 0, 1600 + step, 900 + step}}};
+                scene->place(dragged);
+                static_cast<void>(scene->draw(canvas.value()->target()));
+                drawnWhole = card.stats().uploadedBytes >= whole;
+                QTest::qWait(10);
+            }
+            QVERIFY2(drawnWhole, qPrintable(QStringLiteral("card %1: %2 bytes copied, %3 decoded")
+                                                .arg(id)
+                                                .arg(card.stats().uploadedBytes)
+                                                .arg(card.stats().decoded)));
+            scene->remove(id);
+        }
+        qInfo() << caught << "of 3 cards were shown large while their still was being made smaller";
+        VERIFY_NO_OBJECTIONS(*gpu);
+    }
+
     // A key frame that cannot be decoded (its SPS and PPS and no picture) breaks that one picture of
     // that one card: the card's next key frame decodes, and the other card never noticed.
     void aBrokenKeyFrameBreaksThatPictureOnly()
@@ -2520,9 +3380,30 @@ private slots:
     {
         // (M7 3d.) Changes that come faster than they are applied: a few wait; beyond that, what waits goes (none of
         // it is the whole screen), the stream waits for a whole screen and wishes for one, and is right after it.
+        // (Faster than they are applied on any machine: the decoding's one thread is held while they are handed in,
+        // in the host's call that tells of the whole screen before them, which it makes on that thread with the
+        // stream's decoding in hand. Left to a thread that was free, two hundred handed in at once were applied as
+        // fast as they came in debug on a fast, quiet machine, and none was let go of: gate box08.)
+        struct Held {
+            std::mutex lock;
+            std::condition_variable changed;
+            bool holding = false;
+        };
+        Held held;
+        const auto holdOrLetGo = [&held](bool hold) {
+            {
+                const std::lock_guard guard(held.lock);
+                held.holding = hold;
+            }
+            held.changed.notify_all();
+        };
         const std::unique_ptr<engine::Gpu> gpu = softwareGpu(1);
         QVERIFY(gpu != nullptr);
-        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({});
+        const auto told = [&held] {
+            std::unique_lock guard(held.lock);
+            held.changed.wait(guard, [&held] { return !held.holding; });
+        };
+        const std::unique_ptr<engine::Scene> scene = gpu->makeScene({told, {}, {}});
         const engine::SizePx size{64, 32};
         base::Result<std::unique_ptr<engine::Canvas>> canvas = gpu->makeCanvas(size);
         QVERIFY(canvas.ok());
@@ -2530,21 +3411,25 @@ private slots:
         const engine::Placed whole[] = {{1, {0, 0, size.width, size.height}}};
         scene->place(whole);
         std::vector<std::uint8_t> rgb = halves(size.width, size.height, black, black);
+        holdOrLetGo(true);
+        // (However the test ends, the thread is let go of before the scene and the device end it.)
+        const auto letGoAtTheEnd = qScopeGuard([&holdOrLetGo] { holdOrLetGo(false); });
         pushBytes(stream, base::screen::whole(size.width, size.height, rgb));
+        // (Counted before the host is told of it: from here on, until it is let go of, the decoding applies nothing.)
         QTRY_COMPARE(stream.stats().decoded, std::uint64_t{1});
-        // (Made first, and handed in at once: faster than they are applied, also where the test runs slow.)
-        std::vector<std::vector<std::byte>> changes;
-        changes.reserve(200);
-        for (int one = 0; one < 200; ++one) {
-            changes.push_back(painted(rgb, size.width, size.height, {{one % 64, one / 64, 1, 1}}, red));
+        // The first change waits...
+        pushBytes(stream, painted(rgb, size.width, size.height, {{0, 0, 1, 1}}, red));
+        QCOMPARE(stream.stats().droppedBehind, std::uint64_t{0});
+        QVERIFY(!stream.takeKeyFrameWish());
+        // ...and beyond a few, what waits goes, and each after it: of two hundred, none was applied, all are let go of
+        // (counted as they are handed in, as is the wish).
+        for (int one = 1; one < 200; ++one) {
+            pushBytes(stream, painted(rgb, size.width, size.height, {{one % 64, one / 64, 1, 1}}, red));
         }
-        for (const std::vector<std::byte>& change : changes) {
-            pushBytes(stream, change);
-        }
-        QTRY_VERIFY(stream.stats().droppedBehind > 0);
-        // (The decoding counts what it let go of before it wishes for a whole one, on its own thread: the wish is
-        // waited for too, by qWaitFor, which asks no more once it holds: the wish is taken by asking.)
-        QVERIFY(QTest::qWaitFor([&stream] { return stream.takeKeyFrameWish(); }, 5000));
+        QCOMPARE(stream.stats().droppedBehind, std::uint64_t{200});
+        QCOMPARE(stream.stats().decoded, std::uint64_t{1});
+        QVERIFY(stream.takeKeyFrameWish());
+        holdOrLetGo(false);
         const std::uint64_t decoded = stream.stats().decoded;
         pushBytes(stream, painted(rgb, size.width, size.height, {{10, 20, 1, 1}}, red)); // (not after what was lost)
         QTest::qWait(100);

@@ -87,6 +87,12 @@ public:
         // How many threads decode in software; 0: as many as this PC's processors are worth, from 2 to
         // 12. Previews have all of them but one (DESIGN.md section 3.3). For tests and the measuring rig.
         int decodeThreads = 0;
+        // How many card stills that are key frames of H.264 (a JetKVM's card, Codec::KeyFrameStill) are decoded at
+        // once, each with a decoder of its own: the others wait in line where they are handed in, and nothing else
+        // waits for them (PERF-2: a wall of 64 decoded up to eleven at once, all in the same moment of each round of
+        // pictures; two keep up with 64 cards at a picture every 500 ms, none waiting longer than 99 ms, SPEC.md
+        // section 9). 0: no limit. For tests and the measuring rig to choose; the program has this.
+        int stillsAtOnce = 2;
     };
 
     // The adapters this PC has, as Windows lists them, by what they call themselves.
@@ -144,6 +150,21 @@ public:
     virtual void slowApplying(int ms) = 0;
     // How often the device was lost and made anew since this Gpu exists. Any thread.
     virtual std::uint64_t timesRecovered() const = 0;
+    // Of the card stills that are key frames (Options::stillsAtOnce), since this was last asked: the most decoded at
+    // once, the longest one waited for its turn, in milliseconds, how many waited at all, and how many a newer still
+    // of the same card took the place of while they waited; how many were handed in, and decoded. And as it is asked:
+    // how many places are held, and how many cards wait in line. For tests and the measuring rig. Any thread.
+    struct Stills {
+        int mostAtOnce = 0;
+        double longestWaitMs = 0;
+        std::uint64_t waited = 0;
+        std::uint64_t replacedWaiting = 0;
+        std::uint64_t handedIn = 0;
+        std::uint64_t decoded = 0;
+        int holdingNow = 0;
+        int inLineNow = 0;
+    };
+    virtual Stills stillsSeen() = 0;
 
     // What Direct3D's checking has objected to since this was last asked, when it is switched on.
     // A test ends by asking, and a single objection fails it. On the drawing thread.

@@ -485,6 +485,242 @@ private slots:
         QCOMPARE(sealedActions.first().danger, true);
     }
 
+    void vncServersGoIntoAFileAsTheWebHasThemAndComeBackWhole()
+    {
+        // Outside review M2: a VNC server in the wall's file as the web's export has one (url, kind "vnc", tls,
+        // cert_pem: exchange.py), a vncs:// one known by its certificate with that certificate and "pinned", one on
+        // Windows' word "system", and a vnc:// one "pinned" as every address in the clear is written; and the file read
+        // back by this program, every one of them taken whole, its password with it.
+        const std::optional<core::exchange::KeptCertificate> kept = core::exchange::certificateOf(exampleCertificate());
+        QVERIFY(kept.has_value());
+        const QString pem = kept ? kept->pem : QString();
+        const QByteArray sha256 = kept ? kept->sha256 : QByteArray();
+        // (At ports where nothing listens, which Windows gives nobody else meanwhile, and not at 5902 to 5904, where
+        // a VNC server of this PC's own may be: outside review c9a-3, L3.)
+        const core::testing::NobodyThere plainsPlace;
+        const core::testing::NobodyThere pinnedsPlace;
+        const core::testing::NobodyThere trustedsPlace;
+        const QString plainAt = u"vnc://127.0.0.1:%1"_s.arg(plainsPlace.port());
+        const QString pinnedAt = u"vncs://127.0.0.1:%1"_s.arg(pinnedsPlace.port());
+        const QString trustedAt = u"vncs://127.0.0.1:%1"_s.arg(trustedsPlace.port());
+        const auto entry = [](const char* id, const char* name, const QString& address, bool known,
+                              const QByteArray& certificate) {
+            return QJsonObject{{u"id"_s, QLatin1StringView(id)},
+                               {u"kind"_s, u"vnc"_s},
+                               {u"name"_s, QLatin1StringView(name)},
+                               {u"address"_s, address},
+                               {u"user"_s, u"admin"_s},
+                               {u"group"_s, u"Lab"_s},
+                               {u"known_by_certificate"_s, known},
+                               {u"certificate"_s, QString::fromLatin1(certificate.toHex())},
+                               {u"asked"_s, false},
+                               {u"number"_s, u""_s},
+                               {u"machine"_s, u""_s},
+                               {u"secret_kept"_s, true}};
+        };
+        QJsonObject pinned = entry("5c0ffee2", "Pinned", pinnedAt, true, sha256);
+        pinned.insert(u"certificate_pem"_s, pem);
+        const QJsonArray kvms{entry("5c0ffee1", "Plain", plainAt, false, {}), pinned,
+                              entry("5c0ffee3", "Trusted", trustedAt, false, {})};
+        OwnWall own(QJsonDocument(QJsonObject{{u"kvms"_s, kvms}}).toJson());
+        QCOMPARE(own.wall.kvms().size(), 3);
+        const auto keep = [&own](const char* id, const QString& address, const QByteArray& certificate,
+                                 const char* password) {
+            const QByteArray lines = "QKVM-KVM-2\n" + address.toUtf8().toPercentEncoding(":/[]") + '\n' +
+                                     (certificate.isEmpty() ? QByteArray("none") : "sha256:" + certificate.toHex()) +
+                                     '\n' + password;
+            QVERIFY(own.secrets.keep(u"kvm:"_s + QLatin1StringView(id), lines).ok());
+        };
+        keep("5c0ffee1", plainAt, {}, "pw-one");
+        keep("5c0ffee2", pinnedAt, sha256, "pw-two");
+        keep("5c0ffee3", trustedAt, {}, "pw-three");
+        WallExchange exchange(own.wall, quickly());
+        const auto sealed = writtenBy(exchange, thePassphrase());
+        QVERIFY2(sealed.ok(), sealed.ok() ? "" : sealed.error().message.c_str());
+        // (Nothing said beside it of any of them: of a vncs:// one, its certificate itself is in it.)
+        for (const QString& line : sealed.value().notInIt()) {
+            QVERIFY2(!line.contains(u"Plain"_s) && !line.contains(u"Pinned"_s) && !line.contains(u"Trusted"_s),
+                     qPrintable(line));
+        }
+        const auto opened = core::exchange::read(textOf(sealed.value()), thePassphrase());
+        QVERIFY2(opened.ok(), opened.ok() ? "" : opened.error().message.c_str());
+        const QList<Device> devices = opened.value().devices.value_or(QList<Device>());
+        QCOMPARE(devices.size(), 3);
+        QCOMPARE(devices.at(0).address, plainAt);
+        QCOMPARE(devices.at(0).kind, u"vnc"_s);
+        QCOMPARE(devices.at(0).tls, u"pinned"_s);
+        QVERIFY(devices.at(0).certificatePem.isEmpty());
+        QCOMPARE(devices.at(0).password, u"pw-one"_s);
+        QCOMPARE(devices.at(1).address, pinnedAt);
+        QCOMPARE(devices.at(1).tls, u"pinned"_s);
+        QCOMPARE(devices.at(1).certificatePem, pem);
+        QCOMPARE(devices.at(1).certificate, sha256);
+        QCOMPARE(devices.at(1).password, u"pw-two"_s);
+        QCOMPARE(devices.at(2).address, trustedAt);
+        QCOMPARE(devices.at(2).tls, u"system"_s);
+        QVERIFY(devices.at(2).certificatePem.isEmpty());
+        // Read back by this program into another wall: every one, whole.
+        OwnWall other;
+        WallExchange into(other.wall, quickly());
+        const base::Result<WallExchange::LaidOut> laidOut = laidOutBy(into, textOf(sealed.value()));
+        QVERIFY2(laidOut.ok(), laidOut.ok() ? "" : laidOut.error().message.c_str());
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 3);
+        for (const WallExchange::Offered& row : rows) {
+            QVERIFY2(row.canBeTaken, qPrintable(QString(row.whyNot)));
+            // As the family it is of, in its words (outside review c9a-2, L4).
+            QCOMPARE(row.verdict, u"It can be taken, as a VNC server."_s);
+        }
+        const QList<WallExchange::Took> took = into.take(laidOut.value().number(), placesOf(rows));
+        QCOMPARE(took.size(), 3);
+        for (const WallExchange::Took& one : took) {
+            QVERIFY2(one.came.ok(), one.came.ok() ? "" : one.came.error().message.c_str());
+        }
+        const QList<core::OwnKvm> taken = other.wall.kvms();
+        QCOMPARE(taken.size(), 3);
+        QCOMPARE(taken.at(0).kind, u"vnc"_s);
+        QCOMPARE(taken.at(0).address, plainAt);
+        QVERIFY(!taken.at(0).knownByCertificate);
+        QCOMPARE(taken.at(1).address, pinnedAt);
+        QVERIFY(taken.at(1).knownByCertificate);
+        QCOMPARE(taken.at(1).certificate, sha256);
+        QCOMPARE(taken.at(2).address, trustedAt);
+        QVERIFY(!taken.at(2).knownByCertificate);
+        for (const core::OwnKvm& kvm : taken) {
+            QVERIFY(other.secrets.inner.all.value(u"kvm:"_s + kvm.id)
+                        .endsWith("\npw-" + QByteArray(kvm.address == plainAt    ? "one"
+                                                       : kvm.address == pinnedAt ? "two"
+                                                                                 : "three")));
+        }
+        // ...and the certificate itself with the one known by it, for the next file.
+        QCOMPARE(other.settings.remembered().kvmCertificates.value(taken.at(1).id), pem);
+    }
+
+    // Review cx3-2, M1: a sealed file with two guests of one Proxmox (one address, two numbers there), as the web
+    // writes one, has both laid out and taken, each at a place of its own, with its node, its number, the number it
+    // gives for itself, and its token's secret in a record of its own; one of the two again under another node is that
+    // guest, and left out by the reader.
+    void twoGuestsOfOneProxmoxOfAFileAreBothLaidOutAndTaken()
+    {
+        const QString secret = u"0b9e4f2a-5c1d-4e8f-9a3b-7d6c5e4f3a2b"_s;
+        const auto guest = [&secret](const char* url, const char* name, char number) {
+            return QJsonObject{{u"name"_s, QLatin1StringView(name)},
+                               {u"url"_s, QLatin1StringView(url)},
+                               {u"username"_s, u"wall@pve!qkvm"_s},
+                               {u"password"_s, secret},
+                               {u"kind"_s, u"proxmox"_s},
+                               {u"group"_s, u"Lab"_s},
+                               {u"tls"_s, u"system"_s},
+                               {u"machine"_s, u"proxmox:"_s + QString(32, QLatin1Char(number))}};
+        };
+        const QJsonArray devices{guest("https://192.0.2.50:8006/nodes/pve1/qemu/100", "web", 'a'),
+                                 guest("https://192.0.2.50:8006/nodes/pve1/qemu/101", "db", 'b'),
+                                 guest("https://192.0.2.50:8006/nodes/pve2/qemu/100", "web again", 'a')};
+        const QByteArray file =
+            core::testing::sealedByHand(QJsonDocument(QJsonObject{{u"devices"_s, devices}}).toJson()).text();
+        OwnWall own;
+        WallExchange exchange(own.wall, quickly());
+        const base::Result<WallExchange::LaidOut> laidOut = laidOutBy(exchange, file);
+        QCOMPARE(saidOf(laidOut), u"read"_s);
+        QCOMPARE(laidOut.value().besideTheList(),
+                 QStringList{u"Device 3 (\"web again\"): the file has that guest twice"_s});
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 2);
+        for (const WallExchange::Offered& row : rows) {
+            QVERIFY2(row.canBeTaken, qPrintable(QString(row.whyNot)));
+            QCOMPARE(row.verdict, u"It can be taken, as a virtual machine on Proxmox VE."_s);
+        }
+        QCOMPARE(placesOf(rows), (QList<qsizetype>{1, 2}));
+        const QList<WallExchange::Took> took = exchange.take(laidOut.value().number(), placesOf(rows));
+        QCOMPARE(took.size(), 2);
+        for (const WallExchange::Took& one : took) {
+            QCOMPARE(codeOf(one), u"taken"_s);
+        }
+        const QList<OwnKvm> taken = own.wall.kvms();
+        QCOMPARE(taken.size(), 2);
+        for (qsizetype at = 0; at < 2; ++at) {
+            const OwnKvm& kvm = taken.at(at);
+            QCOMPARE(kvm.kind, u"proxmox"_s);
+            QCOMPARE(kvm.address, u"https://192.0.2.50:8006"_s);
+            QCOMPARE(kvm.node, u"pve1"_s);
+            QCOMPARE(kvm.vmid, qint64{100 + at});
+            QCOMPARE(kvm.user, u"wall@pve!qkvm"_s);
+            QCOMPARE(kvm.machine, u"proxmox:"_s + QString(32, at == 0 ? u'a' : u'b'));
+            QVERIFY(!kvm.knownByCertificate);
+            QVERIFY(own.secrets.inner.all.value(u"kvm:"_s + kvm.id).endsWith('\n' + secret.toUtf8()));
+        }
+        QCOMPARE(taken.at(0).name, u"web"_s);
+        QCOMPARE(taken.at(1).name, u"db"_s);
+        QCOMPARE(own.secrets.inner.all.size(), 2);
+    }
+
+    // Review cx3-3, M1: a sealed file as the web writes one, with a guest of a Proxmox at 443 (a Proxmox behind a
+    // proxy: its url without a port, as the web's device_url keeps 443 unwritten) beside one of the Proxmox at 8006 of
+    // that host, has both laid out and taken, each at its own port. And the wall that took them is written to a file,
+    // sealed and plain, and both are taken from it on another wall at their ports again: nothing of the wall is refused
+    // for the one at 443, and neither comes back at the other's port.
+    void aGuestOfAProxmoxAt443GoesIntoAFileAndComesOutAtItsPort()
+    {
+        const QString secret = u"0b9e4f2a-5c1d-4e8f-9a3b-7d6c5e4f3a2b"_s;
+        const auto guest = [&secret](const char* url, const char* name, char number) {
+            return QJsonObject{{u"name"_s, QLatin1StringView(name)},
+                               {u"url"_s, QLatin1StringView(url)},
+                               {u"username"_s, u"wall@pve!qkvm"_s},
+                               {u"password"_s, secret},
+                               {u"kind"_s, u"proxmox"_s},
+                               {u"group"_s, u"Lab"_s},
+                               {u"tls"_s, u"system"_s},
+                               {u"machine"_s, u"proxmox:"_s + QString(32, QLatin1Char(number))}};
+        };
+        const QJsonArray devices{guest("https://192.0.2.50/nodes/pve1/qemu/100", "behind a proxy", 'a'),
+                                 guest("https://192.0.2.50:8006/nodes/pve1/qemu/100", "at 8006", 'b')};
+        const QByteArray file =
+            core::testing::sealedByHand(QJsonDocument(QJsonObject{{u"devices"_s, devices}}).toJson()).text();
+        // Where each guest of a wall is: its Proxmox's address, its node and its number.
+        const auto whereOnTheWall = [](const LocalWall& wall) {
+            QStringList at;
+            for (const OwnKvm& kvm : wall.kvms()) {
+                at.append(kvm.kind + u' ' + kvm.address + u' ' + kvm.node + u' ' + QString::number(kvm.vmid));
+            }
+            return at;
+        };
+        const QStringList bothAtTheirPorts{u"proxmox https://192.0.2.50 pve1 100"_s,
+                                           u"proxmox https://192.0.2.50:8006 pve1 100"_s};
+        OwnWall own;
+        WallExchange exchange(own.wall, quickly());
+        const base::Result<WallExchange::LaidOut> laidOut = laidOutBy(exchange, file);
+        QCOMPARE(saidOf(laidOut), u"read"_s);
+        QCOMPARE(laidOut.value().besideTheList(), QStringList());
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 2);
+        for (const WallExchange::Offered& row : rows) {
+            QVERIFY2(row.canBeTaken, qPrintable(QString(row.whyNot)));
+        }
+        for (const WallExchange::Took& one : exchange.take(laidOut.value().number(), placesOf(rows))) {
+            QCOMPARE(codeOf(one), u"taken"_s);
+        }
+        QCOMPARE(whereOnTheWall(own.wall), bothAtTheirPorts);
+        for (const bool sealed : {true, false}) {
+            const base::Result<Written> written = writtenBy(exchange, sealed ? thePassphrase() : QString());
+            QVERIFY2(written, written ? "" : written.error().message.c_str());
+            if (!sealed) {
+                QVERIFY(textOf(written.value()).contains("\"url\": \"https://192.0.2.50/nodes/pve1/qemu/100\""));
+                QVERIFY(textOf(written.value()).contains("\"url\": \"https://192.0.2.50:8006/nodes/pve1/qemu/100\""));
+            }
+            OwnWall other;
+            WallExchange into(other.wall, quickly());
+            const base::Result<WallExchange::LaidOut> again =
+                laidOutBy(into, textOf(written.value()), sealed ? thePassphrase() : QString());
+            QCOMPARE(saidOf(again), u"read"_s);
+            const QList<WallExchange::Offered> rowsAgain = rowsOf(again);
+            QCOMPARE(rowsAgain.size(), 2);
+            for (const WallExchange::Took& one : into.take(again.value().number(), placesOf(rowsAgain))) {
+                QCOMPARE(codeOf(one), u"taken"_s);
+            }
+            QCOMPARE(whereOnTheWall(other.wall), bothAtTheirPorts);
+        }
+    }
+
     void actionImportPreviewsMergesAndKeepsSettingsOptIn()
     {
         OwnWall own;
@@ -887,6 +1123,90 @@ private slots:
         QCOMPARE(codeOf(took.at(0)), u"same_device"_s);
         QCOMPARE(codeOf(took.at(1)), u"taken"_s);
         QCOMPARE(own.wall.kvms().size(), 2);
+    }
+
+    void aVncServerBehindTheCertificateOfOneOfTheWallIsTakenWhereItsFileKeptBoth()
+    {
+        // The outside review of the wave 2 desktop, 6.5: displays behind one TLS proxy show one certificate. As the
+        // web: the same device by what that certificate says, asked in its row's few words, and taken where the file's
+        // wall kept both (keep_both); never proven, as a KVM's own certificate is.
+        OwnWall own;
+        OwnKvm display;
+        display.kind = u"vnc"_s;
+        display.address = u"vncs://127.0.0.1:20590"_s;
+        display.name = u"Display one"_s;
+        display.knownByCertificate = true;
+        display.certificate = sha256Of("first");
+        QVERIFY(own.wall.add(display, u"secret"_s).ok());
+        WallExchange exchange(own.wall, quickly());
+        const auto displayAt = [](const QString& address, const QString& name, bool keepBoth) {
+            Device device = knownBy(kvmAt(address, name), "first");
+            device.kind = u"vnc"_s;
+            device.keepBoth = keepBoth;
+            return device;
+        };
+        const QByteArray file = fileOf({displayAt(u"vncs://127.0.0.1:20591"_s, u"Display two"_s, false),
+                                        displayAt(u"vncs://127.0.0.1:20592"_s, u"Display three"_s, true),
+                                        displayAt(u"vncs://127.0.0.1:20593"_s, u"Display four"_s, false)});
+        const base::Result<WallExchange::LaidOut> laidOut = laidOutBy(exchange, file);
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 3);
+        QVERIFY(!rows.at(0).canBeTaken);
+        QCOMPARE(rows.at(0).whyNot, u"same_device"_s);
+        QVERIFY(rows.at(0).saysItIsTheSame);
+        QCOMPARE(rows.at(0).verdict,
+                 u"It cannot be taken: it says it is the same device as one that is on the wall already at another "
+                 "address (\"Display one\" at vncs://127.0.0.1:20590): the file names the certificate that one is "
+                 "known by. Where they are two VNC servers behind one certificate, the file of a wall that keeps both "
+                 "says so."_s);
+        QVERIFY2(rows.at(1).canBeTaken, qPrintable(rows.at(1).verdict));
+        QVERIFY(!rows.at(2).canBeTaken);
+        QVERIFY(rows.at(2).saysItIsTheSame);
+        const QList<WallExchange::Took> took = exchange.take(laidOut.value().number(), placesOf(rows));
+        QCOMPARE(codeOf(took.at(0)), u"same_device"_s);
+        QCOMPARE(codeOf(took.at(1)), u"taken"_s);
+        QCOMPARE(codeOf(took.at(2)), u"same_device"_s);
+        QCOMPARE(own.wall.kvms().size(), 2);
+    }
+
+    void aVncServerAtACertificateOnlyACardKeptBesideItsTwinHoldsIsAskedOfAsATwinIs()
+    {
+        // Review cx6-2, L1: the only card of the wall known by a certificate was kept beside its twin (removed since).
+        // A file's VNC server known by that certificate was taken onto it, unnamed and unasked, with the file's
+        // password: now it is said to be the same device, as a twin is, and taken where the file's wall kept both.
+        OwnWall own;
+        OwnKvm display;
+        display.kind = u"vnc"_s;
+        display.address = u"vncs://127.0.0.1:20590"_s;
+        display.name = u"Display one"_s;
+        display.knownByCertificate = true;
+        display.certificate = sha256Of("first");
+        display.keptBesideItsTwin = true;
+        QVERIFY(own.wall.add(display, u"secret"_s).ok());
+        QVERIFY(own.wall.kvms().constFirst().keptBesideItsTwin);
+        WallExchange exchange(own.wall, quickly());
+        const auto displayAt = [](const QString& address, const QString& name, bool keepBoth) {
+            Device device = knownBy(kvmAt(address, name), "first");
+            device.kind = u"vnc"_s;
+            device.keepBoth = keepBoth;
+            return device;
+        };
+        const QByteArray file = fileOf({displayAt(u"vncs://127.0.0.1:20591"_s, u"Display two"_s, false),
+                                        displayAt(u"vncs://127.0.0.1:20592"_s, u"Display three"_s, true)});
+        const base::Result<WallExchange::LaidOut> laidOut = laidOutBy(exchange, file);
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 2);
+        QVERIFY(!rows.at(0).canBeTaken);
+        QCOMPARE(rows.at(0).whyNot, u"same_device"_s);
+        QVERIFY(rows.at(0).saysItIsTheSame);
+        QVERIFY2(rows.at(0).verdict.contains(u"(\"Display one\" at vncs://127.0.0.1:20590)"_s),
+                 qPrintable(rows.at(0).verdict));
+        QVERIFY2(rows.at(1).canBeTaken, qPrintable(rows.at(1).verdict));
+        const QList<WallExchange::Took> took = exchange.take(laidOut.value().number(), placesOf(rows));
+        QCOMPARE(codeOf(took.at(0)), u"same_device"_s);
+        QCOMPARE(codeOf(took.at(1)), u"taken"_s);
+        QCOMPARE(own.wall.kvms().size(), 2);
+        QVERIFY(own.wall.kvms().constLast().keptBesideItsTwin);
     }
 
     void aJetKvmThatGivesTheNumberOfOneOfTheWallIsThatKvmAndIsNotTaken()
@@ -1409,11 +1729,15 @@ private slots:
         const int readBefore = secrets.reads;
         WallOfATest wall(settings, secrets, quickDriver());
         QVERIFY(!wall.wasAskedWhatItIs(id));
-        // (Nothing is read from the store for a KVM that was not asked.)
-        QCOMPARE(secrets.reads, readBefore);
+        // (Its record is read once at the start, and only so that a record of two a cut change left is made one before
+        // anything else reads it: SPEC.md section 11.4, review cx6-1, M2. Nothing of it goes to its driver, which has
+        // no password until the asking has found the KVM: nothing is asked at its address before that, and its
+        // password is read anew for its driver then.)
+        QCOMPARE(secrets.reads, readBefore + 1);
         QVERIFY(kvm.stand->asked.isEmpty());
         QCOMPARE(settled(wall, id).state, u"online"_s);
         QCOMPARE(kvm.stand->asked.value(4).path, QByteArray(signInQuestion)); // (after the question asked first)
+        QVERIFY(secrets.reads > readBefore + 1);
         QCOMPARE(kvm.stand->count(jetKvmsQuestion), 1);
     }
 
@@ -1823,6 +2147,77 @@ private slots:
     }
 
     // --- what is laid out ----------------------------------------------------------------------------
+
+    void aVncServerOfAFileIsSaidOfInItsFamilysWords()
+    {
+        // Outside review c9a-3, L3 (c9a-4, L3): a vncs:// server of a file that names no certificate for it, or says
+        // its certificate is not checked, was said to be "a KVM" whose own certificate Windows does not vouch for, and
+        // to be "asked what it is" where Windows does; and its password kept "for what the KVM is known by". In its
+        // family's words, as what is said of one in the clear is; and a KVM's as they were.
+        OwnWall own;
+        WallExchange exchange(own.wall, quickly());
+        const auto entry = [](const QString& address, const QString& kind, const QString& tlsWord) {
+            QJsonObject device{{u"url"_s, address}, {u"kind"_s, kind}, {u"password"_s, u"secret"_s}};
+            if (!tlsWord.isEmpty()) {
+                device.insert(u"tls"_s, tlsWord);
+            }
+            return device;
+        };
+        QJsonObject pinned = entry(u"vncs://192.0.2.74:5901"_s, u"vnc"_s, u"pinned"_s);
+        pinned.insert(u"cert_pem"_s, pemOf("first"));
+        const QJsonArray devices{entry(u"vncs://192.0.2.71:5901"_s, u"vnc"_s, u"insecure"_s),
+                                 entry(u"vncs://192.0.2.72:5901"_s, u"vnc"_s, u"pinned"_s),
+                                 entry(u"vnc://192.0.2.73:5901"_s, u"vnc"_s, {}), pinned,
+                                 entry(u"https://192.0.2.75"_s, u"kvmd"_s, u"insecure"_s)};
+        const base::Result<WallExchange::LaidOut> laidOut =
+            laidOutBy(exchange, plainFile({{u"devices"_s, devices}}), QString());
+        QCOMPARE(saidOf(laidOut), u"read"_s);
+        const QList<WallExchange::Offered> rows = rowsOf(laidOut);
+        QCOMPARE(rows.size(), 5);
+        for (const WallExchange::Offered& row : rows) {
+            QVERIFY2(row.canBeTaken, qPrintable(row.verdict));
+        }
+        const QString onWindowsWord =
+            u"This program does not take the first certificate a device from a file shows. It will be known by "
+            "Windows' word. A VNC server's own certificate does not have that: then its tile says that its "
+            "certificate is not trusted, and nothing is sent to it before somebody has looked at that certificate "
+            "and trusted it. Where Windows does trust the certificate it shows, it is signed in to on Windows' word, "
+            "with nobody having looked at that certificate."_s;
+        const QString itsPassword = u"The file has its password. It is kept with Windows, for this address and for "
+                                    "what the VNC server is known by."_s;
+        QCOMPARE(rows.at(0).says,
+                 (QStringList{u"The file says that its certificate is not checked. "_s + onWindowsWord, itsPassword}));
+        QCOMPARE(rows.at(1).says, (QStringList{u"The file names no certificate for it: a qKVM server would know it by "
+                                               "the first certificate it shows. "_s +
+                                                   onWindowsWord,
+                                               itsPassword}));
+        QCOMPARE(
+            rows.at(2).says,
+            (QStringList{u"It is a VNC server spoken to in the clear: everything that is seen and typed there goes "
+                         "unencrypted, and nothing shows who answers at that address."_s,
+                         itsPassword}));
+        QCOMPARE(rows.at(3).says,
+                 (QStringList{u"The file names its certificate. It will be known by that certificate and by no "
+                              "other."_s,
+                              itsPassword}));
+        QCOMPARE(
+            rows.at(4).says,
+            (QStringList{u"The file says that its certificate is not checked. This program does not take the first "
+                         "certificate a device from a file shows. It will be known by Windows' word. A KVM's own "
+                         "certificate does not have that: then its tile says that its certificate is not "
+                         "trusted, and nothing is sent to it before somebody has looked at that certificate and "
+                         "trusted it. Where Windows does trust the certificate it shows, it is asked what it is "
+                         "and signed in to on Windows' word, with nobody having looked at that certificate."_s,
+                         u"The file has its password. It is kept with Windows, for this address and for what the "
+                         "KVM is known by."_s}));
+        // (The qKVM server that the sentence of a file naming no certificate names, for any device, is no KVM.)
+        for (const WallExchange::Offered& row : rows.mid(0, 4)) {
+            for (const QString& said : row.says) {
+                QVERIFY2(!QString(said).remove(u"qKVM"_s).contains(u"KVM"_s) && !said.contains(u"asked what it is"_s),
+                         qPrintable(said));
+            }
+        }
+    }
 
     void everythingAPersonHasToBeShownIsLaidOutForEachDevice()
     {

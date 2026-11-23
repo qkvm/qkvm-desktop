@@ -17,10 +17,13 @@
 #include <QSet>
 #include <QSignalSpy>
 #include <QSslConfiguration>
+#include <QStringList>
 #include <QTcpServer>
+#include <QTcpSocket>
 #include <QTest>
 #include <QWebSocket>
 
+#include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/kvmd_device.h>
 
 #include "made_up_kvm.h"
@@ -30,13 +33,21 @@ using namespace Qt::StringLiterals;
 using namespace qkvm;
 using core::KvmdDevice;
 using core::testing::Answered;
+using core::testing::aPictureOf;
 using core::testing::Asked;
+using core::testing::askedAgainUntil;
+using core::testing::FirstPicture;
+using core::testing::firstPictureOf;
 using core::testing::good;
 using core::testing::jpeg;
 using core::testing::MadeUpKvm;
+using core::testing::oneLineAWaking;
 using core::testing::refusal;
 using core::testing::sign;
 using core::testing::StandIn;
+using core::testing::theDriversOwnLine;
+using core::testing::Waited;
+using core::testing::Woke;
 
 namespace {
 
@@ -165,7 +176,9 @@ private:
     {
         QSignalSpy over(&device, &KvmdDevice::looked);
         device.look();
-        if (!over.wait(20000)) {
+        // (And the question of its drive that it asks beside the look: what the KVM is changed to after this is
+        // asked nothing of the look's.)
+        if (!over.wait(20000) || !QTest::qWaitFor([&device] { return !device.asksItsDrive(); }, 20000)) {
             core::Status never;
             never.state = u"the look never ended"_s;
             return never;
@@ -245,6 +258,7 @@ private slots:
         QCOMPARE(lookedAt(device).state, u"online"_s);
         QCOMPARE(lookedAt(device).state, u"online"_s);
         const int lines = kvm.stand->lines;
+        const qsizetype askedBefore = kvm.stand->asked.size();
         Answered late = good({{u"streamer"_s, QJsonObject{}}});
         late.afterMs = 1200;
         kvm.first["/api/hid/print"_ba].append(late);
@@ -252,8 +266,26 @@ private slots:
         QVERIFY(doneBy(device, core::Action::type(u"a long text"_s, false)).ok());
         QCOMPARE(lookedAt(device).state, u"online"_s);
         QCOMPARE(kvm.asked("/api/hid/print"), 1);
-        // (They did go out on lines that were there.)
-        QCOMPARE(kvm.stand->lines, lines);
+        // (The two late ones did go out on lines that were there: the first of each asked from here on, which the two
+        // late answers answered. Another question of the look may go out on a line of its own meanwhile, where every
+        // line Qt kept was busy as it went: Qt's choice, and nothing this case is about. All were held to be on lines
+        // that were there, and one of the look's went on a twelfth line once in a gate on the loaded build box.)
+        QStringList lateOnes;
+        bool printSeen = false;
+        bool streamerSeen = false;
+        for (qsizetype at = askedBefore; at < kvm.stand->asked.size(); ++at) {
+            const Asked& one = kvm.stand->asked.at(at);
+            const QByteArray path = one.path.split('?').value(0);
+            if ((path == "/api/hid/print" && !std::exchange(printSeen, true)) ||
+                (path == "/api/streamer" && !std::exchange(streamerSeen, true))) {
+                lateOnes.append(u"%1 on line %2"_s.arg(QString::fromLatin1(path)).arg(one.line));
+                QVERIFY2(one.line >= 1 && one.line <= lines,
+                         qPrintable(u"%1 went on line %2 of %3 there were before it"_s.arg(QString::fromLatin1(path))
+                                        .arg(one.line)
+                                        .arg(lines)));
+            }
+        }
+        QVERIFY2(printSeen && streamerSeen, qPrintable(lateOnes.join(u", "_s)));
     }
 
     void anAnswerThatTakesLongerThanBeingLetInIsWaitedFor()
@@ -430,6 +462,152 @@ private slots:
         QTest::qWait(pace.signInRetryMs + 200);
         static_cast<void>(doneBy(device, core::Action::plain(u"reboot"_s)));
         QCOMPARE(kvm.asked("/api/auth/login"_ba), 2);
+    }
+
+    // (Web 0.3.2: a GL.iNet firmware's nginx answers the KVM's plain address with 301 to HTTPS at the same host, once
+    // HTTPS is its only way in. Said with that address, which the boxes offer; never followed.)
+    void aKvmWhosePlainAddressSendsEverybodyOnToHttpsIsSaidSoAndHearsNoPassword()
+    {
+        MadeUpKvm kvm;
+        kvm.httpsAt = u"https://127.0.0.1:8443"_s;
+        KvmdDevice::Pace pace = quick();
+        pace.pacing = std::make_shared<core::SignInPacing>();
+        pace.signInRetryMs = 60'000; // (held for all of it)
+        KvmdDevice device(kvm.where(), u"secret"_s, pace);
+        const QString said = QString::fromStdString(core::kvm::httpsOnly(QUrl(u"https://127.0.0.1:8443"_s)).message);
+        for (int look = 0; look < 3; ++look) {
+            const core::Status status = lookedAt(device);
+            QCOMPARE(status.state, u"error"_s); // (there, and wants HTTPS: no machine gone)
+            QCOMPARE(status.errorCode, u"https_only"_s);
+            QCOMPARE(status.errorMessage, said);
+        }
+        // Said before the password went the plain way to be sent on: its question asked first with none tells it,
+        // once, and nothing is asked at every look after it.
+        QCOMPARE(kvm.asked("/api/auth/login"_ba), 0);
+        QCOMPARE(kvm.asked("/api/auth/check"_ba), 1);
+        QVERIFY(std::ranges::none_of(kvm.stand->asked, [](const Asked& one) {
+            return one.body.contains("secret") || one.headers.contains("cookie");
+        }));
+        // What is asked of it is refused in the same words, and nothing is sent.
+        const auto done = doneBy(device, core::Action::plain(u"reboot"_s));
+        QVERIFY(!done.ok());
+        QCOMPARE(done.error().code, std::string("https_only"));
+        QVERIFY(kvm.did.isEmpty());
+        // A redirect elsewhere (another host) is no such word: the sign-in says only that it was not let in.
+        MadeUpKvm elsewhere;
+        elsewhere.httpsAt = u"https://localhost:8443"_s;
+        KvmdDevice other(elsewhere.where(), u"secret"_s, pace);
+        const core::Status status = lookedAt(other);
+        QVERIFY2(status.errorCode != u"https_only"_s, qPrintable(status.errorCode));
+    }
+
+    void aKvmThatSendsItsPlainAddressOnToHttpsSinceItWasSignedInToIsSaidSo()
+    {
+        // On the wall over plain HTTP first; HTTPS made its only way in afterwards: what it answers with its pass is
+        // the same redirect, said so; and a sign-in that goes at once (the KVM was heard just now) and is answered so
+        // is held back as one that came to neither yes nor no, the password not sent again at every look.
+        MadeUpKvm kvm;
+        KvmdDevice::Pace pace = quick();
+        pace.pacing = std::make_shared<core::SignInPacing>();
+        pace.signInRetryMs = 60'000;
+        KvmdDevice device(kvm.where(), u"secret"_s, pace);
+        QCOMPARE(lookedAt(device).state, u"online"_s);
+        const int signedIn = kvm.asked("/api/auth/login"_ba);
+        const qsizetype beforeTheRedirect = kvm.stand->asked.size();
+        kvm.httpsAt = u"https://127.0.0.1"_s;
+        core::Status status = lookedAt(device);
+        QCOMPARE(status.state, u"error"_s);
+        QCOMPARE(status.errorCode, u"https_only"_s);
+        QVERIFY2(status.errorMessage.contains(u"sends everybody to https://127.0.0.1."_s),
+                 qPrintable(status.errorMessage));
+        QCOMPARE(kvm.asked("/api/auth/login"_ba), signedIn);
+        // Its pass went on the one question that heard the redirect, and on nothing after it: the driver lets go of it
+        // there, and holds what needs a pass back as a sign-in answered so is held (the merged review of 0.2.0, B-M1:
+        // the pass went in the clear at every look, to an address that only sends everybody on). Three more looks and
+        // an action carry no cookie and no password, and say the same.
+        qsizetype heardTheRedirect = beforeTheRedirect;
+        while (heardTheRedirect < kvm.stand->asked.size() &&
+               !kvm.stand->asked.at(heardTheRedirect).headers.contains("cookie")) {
+            ++heardTheRedirect;
+        }
+        QVERIFY2(heardTheRedirect < kvm.stand->asked.size(), "no question carried the pass to the redirect");
+        ++heardTheRedirect;
+        for (int look = 0; look < 3; ++look) {
+            QCOMPARE(lookedAt(device).errorCode, u"https_only"_s);
+        }
+        const auto refused = doneBy(device, core::Action::plain(u"reboot"_s));
+        QVERIFY(!refused.ok());
+        QCOMPARE(refused.error().code, std::string("https_only"));
+        QVERIFY(kvm.did.isEmpty());
+        QVERIFY(std::ranges::none_of(kvm.stand->asked.mid(heardTheRedirect), [](const Asked& one) {
+            return one.body.contains("secret") || one.headers.contains("cookie");
+        }));
+        QCOMPARE(kvm.asked("/api/auth/login"_ba), signedIn);
+        // (Held: nothing at all is asked of it meanwhile, not even whether it signs qKVM in.)
+        QCOMPARE(kvm.stand->asked.size(), heardTheRedirect);
+
+        // Once that hold is over, the next sign-in asks first with no password, though the KVM was heard a moment
+        // before: the redirect is said again, and no password goes the plain way to be sent on.
+        MadeUpKvm soon;
+        KvmdDevice::Pace brief = quick();
+        brief.pacing = std::make_shared<core::SignInPacing>();
+        brief.connectWithinMs = 6000; // (heard "just now" for the whole of it)
+        brief.signInRetryMs = 300;
+        KvmdDevice held(soon.where(), u"secret"_s, brief);
+        QCOMPARE(lookedAt(held).state, u"online"_s);
+        const int firstSignIns = soon.asked("/api/auth/login"_ba);
+        const qsizetype soonBefore = soon.stand->asked.size();
+        soon.httpsAt = u"https://127.0.0.1"_s;
+        QCOMPARE(lookedAt(held).errorCode, u"https_only"_s);
+        QTest::qWait(brief.signInRetryMs + 200);
+        for (int look = 0; look < 2; ++look) {
+            QCOMPARE(lookedAt(held).errorCode, u"https_only"_s);
+        }
+        QCOMPARE(soon.asked("/api/auth/login"_ba), firstSignIns);
+        const QList<Asked> afterIt = soon.stand->asked.mid(soonBefore + 1);
+        QVERIFY(std::ranges::any_of(afterIt, [](const Asked& one) { return one.path == "/api/auth/check"; }));
+        QVERIFY(std::ranges::none_of(
+            afterIt, [](const Asked& one) { return one.body.contains("secret") || one.headers.contains("cookie"); }));
+
+        MadeUpKvm again;
+        KvmdDevice anew(again.where(), u"secret"_s, pace);
+        QCOMPARE(lookedAt(anew).state, u"online"_s);
+        const int before = again.asked("/api/auth/login"_ba);
+        // (kvmd started anew behind its new front: the pass is forgotten, and only the sign-in is sent on.)
+        again.passes.clear();
+        again.httpsAt = u"https://127.0.0.1:8443"_s;
+        again.sendsOn = [](const QByteArray& path) { return path == "/api/auth/login"; };
+        for (int look = 0; look < 3; ++look) {
+            status = lookedAt(anew);
+            QCOMPARE(status.state, u"error"_s);
+            QCOMPARE(status.errorCode, u"https_only"_s);
+        }
+        QCOMPARE(again.asked("/api/auth/login"_ba), before + 1);
+    }
+
+    void aSignInHeldWhenTheRedirectBeganAsksFirstThoughItsKvmWasHeardJustNow()
+    {
+        // (Round 2 of the merged review of 0.2.0, L1.) A sign-in on hold (a refused password) holds no pass. HTTPS is
+        // made the KVM's only way in meanwhile: a look during the hold asks only whether it is there, with nothing, and
+        // hears the redirect. The hold ends a moment later: the next sign-in asks first with no password all the same,
+        // and no password goes the plain way to be sent on.
+        MadeUpKvm kvm;
+        KvmdDevice::Pace pace = quick();
+        pace.pacing = std::make_shared<core::SignInPacing>();
+        pace.connectWithinMs = 8000; // (heard "just now" for the whole of it)
+        pace.stillThereEveryMs = 200;
+        KvmdDevice device(kvm.where(), u"not it"_s, pace);
+        QCOMPARE(lookedAt(device).errorCode, u"auth_failed"_s);
+        const int logins = kvm.asked("/api/auth/login"_ba);
+        QCOMPARE(logins, 1);
+        const int checks = kvm.asked("/api/auth/check"_ba);
+        kvm.httpsAt = u"https://127.0.0.1"_s;
+        QTest::qWait(pace.stillThereEveryMs + 100);
+        QCOMPARE(lookedAt(device).errorCode, u"auth_failed"_s); // (the hold's own words; the redirect heard apart)
+        QVERIFY(kvm.asked("/api/auth/check"_ba) > checks);
+        QTest::qWait(pace.refusedHoldMs + 100);
+        QCOMPARE(lookedAt(device).errorCode, u"https_only"_s);
+        QCOMPARE(kvm.asked("/api/auth/login"_ba), logins);
     }
 
     void aKvmThatDoesNotSignTheProgramInIsSaidSoUntilItIsGone()
@@ -1133,8 +1311,14 @@ private slots:
         QCOMPARE(status.width, 0);
         QCOMPARE(status.height, 0);
         QCOMPARE(kvm.asked("/api/streamer"), 1);
-        QCOMPARE(pictureOf(device).error().code, std::string("no_stream"));
-        QTRY_VERIFY(kvm.stand->live.isConnected());
+        const FirstPicture first = firstPictureOf(device);
+        QCOMPARE(first.said().error().code, std::string("no_stream"));
+        QVERIFY2(!first.saidButNone, "It said the video is being woken, and began no line for it.");
+        // (Asked again where the line's first try was not let in, until the line is the driver's own: made_up_kvm.h's
+        // theDriversOwnLine. Nothing asked meanwhile: what a picture says is what this case reads after it.)
+        const Waited woken = theDriversOwnLine(
+            kvm.stand->live, [&device] { return device.isKeptAwake(); }, aPictureOf(device), pace.connectWithinMs);
+        QVERIFY2(woken, qPrintable(woken.why()));
         QTest::qWait(pace.holdMs / 2 + 50);
         const QSignalSpy changed(&device, &KvmdDevice::statusChanged);
 
@@ -1478,9 +1662,16 @@ private slots:
         Open device(where, u"secret"_s, quick());
         QCOMPARE(lookedAt(device).state, u"online"_s);
         QVERIFY(pictureOf(device).ok()); // signed in: it has a pass, and somebody is looking
-        // To the KVM itself the line is made.
-        device.keepAwake();
-        QTRY_VERIFY(kvm->stand->live.isConnected());
+        // To the KVM itself the line is made (and made again where its first try was not let in: askedAgainUntil; what
+        // the stand-in saw of the asking is the same on every try).
+        const Waited woken = askedAgainUntil([&kvm] { return kvm->stand->live.isConnected(); },
+                                             [&device] { return device.isKeptAwake(); },
+                                             [&device](const std::function<void(Woke)>& answered) {
+                                                 const bool kept = device.isKeptAwake();
+                                                 device.keepAwake();
+                                                 answered(kept ? Woke::nothing : Woke::maybe);
+                                             });
+        QVERIFY2(woken, qPrintable(woken.why()));
         QCOMPARE(kvm->stand->live.headers.value("cookie"), "auth_token=pass1"_ba);
 
         // Something else answers at its address, with a certificate that Windows trusts.
@@ -1509,21 +1700,31 @@ private slots:
         MadeUpKvm kvm;
         kvm.restsUntilWatched = true;
         KvmdDevice::Pace pace = quick();
-        pace.quietMs = 700;
+        // (The line counts as one that ended without a word once it was asked for longer ago than this: more than
+        // its time to be let in and the moment after, which a line let in late on the loaded build box took up.)
+        pace.quietMs = 3000;
         pace.restAfterMs = 20'000;
         KvmdDevice device(kvm.where(), u"secret"_s, pace);
-        QVERIFY(!pictureOf(device).ok());
-        QTRY_VERIFY(kvm.stand->live.isConnected());
-        QCOMPARE(kvm.stand->live.lines, 1);
+        const FirstPicture first = firstPictureOf(device);
+        QVERIFY(!first.said().ok());
+        QVERIFY2(!first.saidButNone, "It said the video is being woken, and began no line for it.");
+        // (Asked again where the first picture woke nothing, or the line's first try was not let in: askedAgainUntil.)
+        const Waited woken = askedAgainUntil([&kvm] { return kvm.stand->live.isConnected(); },
+                                             [&device] { return device.isKeptAwake(); }, aPictureOf(device));
+        QVERIFY2(woken, qPrintable(woken.why()));
         kvm.restsThoughWatched = true;
         // Not at once: a KVM takes a moment to wake under a line that is new.
         QTest::qWait(pace.holdMs / 2 + 50);
         QCOMPARE(pictureOf(device).error().code, std::string("no_stream"));
         QTest::qWait(200); // (a second line would have arrived by now)
-        QCOMPARE(kvm.stand->live.lines, 1);
+        // One line for the waking, and none for that picture, which found it resting under a line asked for within
+        // quietMs (made_up_kvm.h's oneLineAWaking: one more for each asking again that may have begun one).
+        const QString one = oneLineAWaking(kvm.stand->live.lines, woken.wakings);
+        QVERIFY2(one.isEmpty(), qPrintable(one));
+        const int before = kvm.stand->live.lines;
         QTest::qWait(pace.quietMs);
         QCOMPARE(pictureOf(device).error().code, std::string("no_stream"));
-        QTRY_COMPARE(kvm.stand->live.lines, 2);
+        QTRY_COMPARE(kvm.stand->live.lines, before + 1);
         kvm.restsThoughWatched = false;
         QTest::qWait(pace.holdMs / 2 + 50);
         QVERIFY(pictureOf(device).ok());
@@ -1574,8 +1775,13 @@ private slots:
         asks.more = {"WWW-Authenticate: NTLM"_ba};
         kvm.instead.insert("/api/ws"_ba, asks);
         KvmdDevice device(kvm.where(), u"secret"_s, quick());
-        QVERIFY(!pictureOf(device).ok());
-        QTRY_VERIFY(kvm.asked("/api/ws") >= 1);
+        const FirstPicture first = firstPictureOf(device);
+        QVERIFY(!first.said().ok());
+        QVERIFY2(!first.saidButNone, "It said the video is being woken, and began no line for it.");
+        // (Asked again where the first picture woke nothing, and no more once the line was asked for: askedAgainUntil.)
+        const Waited asked = askedAgainUntil([&kvm] { return kvm.asked("/api/ws") >= 1; },
+                                             [&device] { return device.isKeptAwake(); }, aPictureOf(device));
+        QVERIFY2(asked, qPrintable(asked.why()));
         QTest::qWait(700);
         // (Left to itself, Qt asks for the line again at once, with the beginning of a Windows
         // sign-on in it, which names this PC, and goes on asking for as long as it is answered so.)
@@ -1598,8 +1804,14 @@ private slots:
         pace.connectWithinMs = 500;
         pace.restAfterMs = 60'000; // (not let go of because nobody looks: given up because nobody answers)
         KvmdDevice device(kvm.where(), u"secret"_s, pace);
-        QVERIFY(!pictureOf(device).ok());
-        QTRY_VERIFY(kvm.asked("/api/ws") == 1);
+        const FirstPicture first = firstPictureOf(device);
+        QVERIFY(!first.said().ok());
+        QVERIFY2(!first.saidButNone, "It said the video is being woken, and began no line for it.");
+        // (Asked again where the first picture woke nothing, and no more once the line was asked for: askedAgainUntil.)
+        const Waited asked = askedAgainUntil([&kvm] { return kvm.asked("/api/ws") >= 1; },
+                                             [&device] { return device.isKeptAwake(); }, aPictureOf(device));
+        QVERIFY2(asked, qPrintable(asked.why()));
+        QCOMPARE(kvm.asked("/api/ws"), 1);
         QVERIFY(device.isKeptAwake());
         QTRY_VERIFY_WITH_TIMEOUT(!device.isKeptAwake(), 3000);
     }
@@ -1624,6 +1836,75 @@ private slots:
         const auto refused = doneBy(device, core::Action::type(u"a long text"_s, false));
         QCOMPARE(refused.error().code, std::string("action_failed"));
         QVERIFY(!KvmdDevice::mayHaveBeenDone(refused.error()));
+    }
+
+    void aTypingThatWaitsForASignInGoesNowhereOnceStopped_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<QByteArray>("path");
+        QTest::addColumn<bool>("afterARefusedSession");
+        for (const bool again : {false, true}) {
+            const char* const how = again ? ", signed in anew after its session was refused" : "";
+            QTest::newRow(qPrintable(u"a text and its Enter"_s + QLatin1StringView(how)))
+                << u"text"_s << "/api/hid/print"_ba << again;
+            QTest::newRow(qPrintable(u"keys pressed together"_s + QLatin1StringView(how)))
+                << u"keys"_s << "/api/hid/events/send_shortcut"_ba << again;
+            QTest::newRow(qPrintable(u"Ctrl+Alt+Del"_s + QLatin1StringView(how)))
+                << u"ctrl_alt_del"_s << "/api/hid/events/send_shortcut"_ba << again;
+        }
+    }
+    void aTypingThatWaitsForASignInGoesNowhereOnceStopped()
+    {
+        // Review cx6-2, L3 (6.18 of the outside review of the wave 2 desktop, for a kvmd): a driver with no session
+        // when a text is asked for waits for a sign-in, which may take seconds (the first action after a start, or a
+        // session the KVM refused, as after its restart). The program is locked, or made a wall screen, meanwhile
+        // (stopTyping): whoever asked is told "stopped" there and then, and once the sign-in is let in nothing of
+        // what waited goes, nor its Enter, then or later. What is asked after the stop goes, as ever.
+        QFETCH(QString, kind);
+        QFETCH(QByteArray, path);
+        QFETCH(bool, afterARefusedSession);
+        const auto typed = [&kind](const QString& text) {
+            if (kind == "text"_L1) {
+                return core::Action::type(text, true);
+            }
+            return kind == "keys"_L1 ? core::Action::press(u"ControlLeft,KeyC"_s) : core::Action::plain(kind);
+        };
+        MadeUpKvm kvm;
+        KvmdDevice device(kvm.where(), u"secret"_s, patient());
+        if (afterARefusedSession) {
+            // Signed in, then the KVM forgets every session it gave: the next question is refused, and signed in anew.
+            QVERIFY(doneBy(device, typed(u"before the lock"_s)).ok());
+            kvm.passes.clear();
+        }
+        const int before = kvm.asked(path);
+        kvm.signInAfterMs = 1500;
+        bool signingIn = false;
+        kvm.whenSignedInTo = [&signingIn] { signingIn = true; };
+        const QSignalSpy given(&device, &KvmdDevice::passGiven);
+        std::optional<base::Result<core::Done>> said;
+        device.act(typed(u"never after the lock"_s), [&said](base::Result<core::Done> how) { said = std::move(how); });
+        QTRY_VERIFY_WITH_TIMEOUT(signingIn, 10000);
+        kvm.whenSignedInTo = {};
+        QVERIFY(!said.has_value());
+        device.stopTyping();
+        QTRY_VERIFY_WITH_TIMEOUT(said.has_value(), 500);
+        const base::Result<core::Done> answer = said.value_or(base::Error{"never", "It was never answered."});
+        QVERIFY(!answer.ok());
+        QCOMPARE(answer.error().code, std::string("stopped"));
+        QVERIFY(!KvmdDevice::mayHaveBeenDone(answer.error()));
+        // The sign-in is let in all the same (whoever waited for it has been handed the pass by then): what waited
+        // for it does not go then, nor a while after.
+        QTRY_COMPARE_WITH_TIMEOUT(given.count(), 1, 10000);
+        QTest::qWait(1000);
+        QCOMPARE(kvm.asked(path), before + (afterARefusedSession ? 1 : 0));
+        QVERIFY(std::ranges::none_of(kvm.did, [](const QByteArray& one) { return one.contains("never after"); }));
+        // Nothing of the driver is stopped for good: what is asked after the stop goes.
+        kvm.signInAfterMs = 0;
+        QVERIFY(doneBy(device, typed(u"after the lock"_s)).ok());
+        QCOMPARE(kvm.asked(path), before + (afterARefusedSession ? 2 : 1));
+        if (kind == "text"_L1) {
+            QCOMPARE(kvm.did.constLast(), "type after the lock\n"_ba);
+        }
     }
 
     void aButtonIsNotPressedTwiceOnAKeptLineEither()
@@ -1659,18 +1940,28 @@ private slots:
         MadeUpKvm kvm;
         kvm.restsUntilWatched = true;
         KvmdDevice device(kvm.where(), u"secret"_s, waitingForTheFirstLook());
-        const auto resting = pictureOf(device);
-        QVERIFY(!resting.ok());
-        QCOMPARE(resting.error().code, std::string("no_stream"));
-        QCOMPARE(resting.error().message, std::string("Video stream is idle - waking it up"));
+        const FirstPicture resting = firstPictureOf(device);
+        QVERIFY(!resting.said().ok());
+        QCOMPARE(resting.said().error().code, std::string("no_stream"));
+        QCOMPARE(resting.said().error().message, std::string("Video stream is idle - waking it up"));
+        // ...and as it says so, it keeps the line that wakes it.
+        QVERIFY2(!resting.saidButNone, "It said the video is being woken, and began no line for it.");
         // It is watched as a browser would watch it, with the pass handed over both ways: it is GL.iNet's (its
-        // answer to /api/upgrade/version, at the first look, said so), whose own page does so.
-        QTRY_VERIFY(kvm.stand->live.isConnected());
+        // answer to /api/upgrade/version, at the first look, said so), whose own page does so. (Asked again where the
+        // line's first try was not let in, until the line is the driver's own, as a card asks: made_up_kvm.h's
+        // theDriversOwnLine. One line for the waking: oneLineAWaking.)
+        const Waited woken = theDriversOwnLine(
+            kvm.stand->live, [&device] { return device.isKeptAwake(); }, aPictureOf(device),
+            waitingForTheFirstLook().connectWithinMs, true);
+        QVERIFY2(woken, qPrintable(woken.why()));
+        const int first = kvm.stand->live.lines;
+        const QString one = oneLineAWaking(first, woken.wakings);
+        QVERIFY2(one.isEmpty(), qPrintable(one));
         QCOMPARE(kvm.stand->live.path, "/api/ws?stream=1&auth_token=pass1"_ba);
         QCOMPARE(kvm.stand->live.headers.value("cookie"), "auth_token=pass1"_ba);
         QTest::qWait(quick().holdMs / 2 + 50);
         QVERIFY(pictureOf(device).ok());
-        QCOMPARE(kvm.stand->live.lines, 1);
+        QCOMPARE(kvm.stand->live.lines, first);
         // Nobody asks for a picture any more: it is not kept awake for nobody.
         QTRY_VERIFY_WITH_TIMEOUT(!kvm.stand->live.isConnected(), 5000);
     }
@@ -1757,6 +2048,35 @@ private slots:
         QCOMPARE(kvm.mostPicturesAtOnce, 2);
     }
 
+    void aPictureWhoseAskerLeftIsWithTheKvmUntilItsAnswerWouldHaveBeenWritten()
+    {
+        // (The made-up KVM's books, review arm 1, L6.) A real kvmd makes the picture it was asked for whether or not
+        // its asker still waits: one that lets go of the line at its patience and asks again at once has two pictures
+        // out with it. The made-up KVM counts the first until its answer would have been written, so that a driver
+        // that did so would be seen asking two at once (test_kvmd_live's whoever case reads it).
+        MadeUpKvm kvm;
+        kvm.pictureAfterMs = 400;
+        kvm.passes.insert("pass-by-hand");
+        const QByteArray asking =
+            "GET /api/streamer/snapshot HTTP/1.1\r\nHost: 127.0.0.1\r\nCookie: auth_token=pass-by-hand\r\n\r\n";
+        auto first = std::make_unique<QTcpSocket>();
+        first->connectToHost(QHostAddress::LocalHost, kvm.stand->serverPort());
+        QVERIFY(first->waitForConnected(5000));
+        first->write(asking);
+        QTRY_COMPARE(kvm.pictureAsks.size(), 1);
+        first->abort();
+        first.reset();
+        QTest::qWait(50); // (its end heard by the stand-in)
+        QTcpSocket second;
+        second.connectToHost(QHostAddress::LocalHost, kvm.stand->serverPort());
+        QVERIFY(second.waitForConnected(5000));
+        second.write(asking);
+        QTRY_COMPARE(kvm.pictureAsks.size(), 2);
+        QCOMPARE(kvm.mostPicturesAtOnce, 2);
+        // (And the second is answered as ever.)
+        QTRY_VERIFY_WITH_TIMEOUT(second.bytesAvailable() > 0, 5000);
+        QVERIFY(second.readAll().startsWith("HTTP/1.1 200"));
+    }
     void whoeverAsksForANewPictureIsHandedOneNobodyHadOnlyWhileItHasJustCome()
     {
         // A KVM that takes longer over a picture as captured than whoever asks waits for it.
@@ -2323,8 +2643,17 @@ private slots:
         // Stock kvmd (it answered 404 where GL.iNet's firmware answers): the cookie alone, on both lines.
         QCOMPARE(lookedAt(device).model, QString());
         QCOMPARE(lineFor(), "/api/ws?stream=0"_ba);
-        device.keepAwake();
-        QTRY_VERIFY(kvm.stand->live.isConnected() && kvm.stand->live.path.startsWith("/api/ws?stream=1"));
+        // (Made again where its first try was not let in: askedAgainUntil; what the stand-in saw of the asking is the
+        // same on every try.)
+        const Waited woken = askedAgainUntil(
+            [&kvm] { return kvm.stand->live.isConnected() && kvm.stand->live.path.startsWith("/api/ws?stream=1"); },
+            [&device] { return device.isKeptAwake(); },
+            [&device](const std::function<void(Woke)>& answered) {
+                const bool kept = device.isKeptAwake();
+                device.keepAwake();
+                answered(kept ? Woke::nothing : Woke::maybe);
+            });
+        QVERIFY2(woken, qPrintable(woken.why()));
         QCOMPARE(kvm.stand->live.path, "/api/ws?stream=1"_ba);
         QCOMPARE(kvm.stand->live.headers.value("cookie"), "auth_token=pass1"_ba);
         // GL.iNet's: in both.

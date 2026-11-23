@@ -68,6 +68,11 @@ QString versionFile(const QString& settings)
     return settings + u".version"_s;
 }
 
+QString runningFile(const QString& settings)
+{
+    return settings + u".running"_s;
+}
+
 bool namesAVersion(const QString& version)
 {
     static const QRegularExpression shape(u"\\A[0-9A-Za-z.+-]{1,32}\\z"_s);
@@ -192,20 +197,20 @@ base::Result<QString> keepCopy(const QString& settings, CopyKind kind, const QSt
 
 namespace {
 
-// Who wrote the settings last: they say so from 0.1.2 on; where they say nobody, the version recorded, where they
-// were not written since it recorded them; else one from before 0.1.2 (which drops the name when it writes them):
-// empty then, and where there are no settings.
+// Who left the settings as they are: the version recorded, where they were not written since it recorded them (its
+// start found them so, and kept them then where another had left them: a start that writes nothing of them leaves
+// them naming the version before, seen by the fixture of 0.1.2); else the version they say wrote them, from 0.1.2 on;
+// else one from before 0.1.2 (which drops the name when it writes them): empty then, and where there are no settings.
 QString writerOf(const QString& settings, const std::optional<Record>& record)
 {
     const QFileInfo found(settings);
     if (!found.isFile()) {
         return {};
     }
-    QString writer = writtenBy(settings);
-    if (writer.isEmpty() && record && record->settingsTime == found.lastModified().toMSecsSinceEpoch()) {
-        writer = record->version;
+    if (record && record->settingsTime == found.lastModified().toMSecsSinceEpoch()) {
+        return record->version;
     }
-    return writer;
+    return writtenBy(settings);
 }
 
 } // namespace

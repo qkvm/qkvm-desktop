@@ -106,10 +106,14 @@ core::KvmProbe::Pace quickProbe()
     core::KvmProbe::Pace pace;
     // Room to be let in, and the whole asking with it: a TLS handshake under the address sanitizer on a busy PC
     // took longer than the 1.5 s this had (gate 18 of M6: seven certificate tests "unreachable", all of them
-    // passing when run again by themselves), as the Add box's tests had found in gate 4 of Checkpoint 2.
+    // passing when run again by themselves), as the Add box's tests had found in gate 4 of Checkpoint 2. And as
+    // long to be quiet, as the program's own times have it (kvm_times.h: let in within 4.5 s, quiet 8 s): the quiet
+    // is the question's limit in Qt (its transfer timeout), which runs from the asking on, through the handshake, and
+    // gave up on a slow one at 1.5 s all the same (a certificate shown at a new address told as "unreachable", in
+    // gates and builders' runs on the loaded build box; a handshake let in 2.5 s late was, every time).
     pace.connectWithinMs = 5000;
-    pace.quietMs = 1500;
-    pace.withinMs = 6500;
+    pace.quietMs = 5000;
+    pace.withinMs = 10'000;
     return pace;
 }
 
@@ -201,12 +205,23 @@ private:
         pace.driver = quickDriver();
         return pace;
     }
-    // The same, with room for a sign-in over TLS to be let in (5 s), as the probe has: where a JetKVM's two
-    // ways are asked, a slow handshake is not to make a test find the HTTPS way gone.
+    // A driver's pace with room for a sign-in over TLS to be let in (5 s), as the probe has, and as long to be quiet:
+    // the quiet is the question's limit in Qt, which runs through the handshake (quickProbe), and the program's own
+    // times have it so (kvm_times.h). Behind a quiet of 1.5 s the room to be let in was none: the same cause as the
+    // probe's "unreachable", not seen failing here yet.
+    template <typename Pace>
+    static Pace withRoomForTls(Pace pace)
+    {
+        pace.connectWithinMs = 5000;
+        pace.quietMs = std::max(pace.quietMs, pace.connectWithinMs);
+        return pace;
+    }
+    // The same, with that room for the sign-in: where a JetKVM's two ways are asked, a slow handshake is not to make a
+    // test find the HTTPS way gone.
     static KvmEditing::Pace roomForTls()
     {
         KvmEditing::Pace pace = quick();
-        pace.driver.connectWithinMs = 5000;
+        pace.driver = withRoomForTls(pace.driver);
         return pace;
     }
 
@@ -1344,7 +1359,7 @@ private slots:
         };
         core::DriverPaces paces = core::DriverPaces::alike(quickDriver());
         paces.jetkvm.otherWay = seam;
-        paces.jetkvm.connectWithinMs = 5000;
+        paces.jetkvm = withRoomForTls(paces.jetkvm);
         OwnWall own(paces);
         OwnKvm other = at(u"https://127.0.0.1:%1"_s.arg(nobody.port()), u"The other"_s, "first");
         other.kind = u"jetkvm"_s;
@@ -1918,13 +1933,16 @@ private slots:
         // The next start, its drivers looking at that HTTPS as the program's do.
         core::DriverPaces paces = core::DriverPaces::alike(quickDriver());
         paces.jetkvm.otherWay = seam;
-        paces.jetkvm.connectWithinMs = 5000;
+        paces.jetkvm = withRoomForTls(paces.jetkvm);
         core::Settings settings(file);
         LocalWall wall(settings, secrets, paces);
         QCOMPARE(onceItIs(wall, id, u"error"_s).errorCode, u"same_device"_s);
+        // Held through the wall's look at that HTTPS and its end in doubt, and a second after: the look ends by its
+        // time to be let in or its quiet, whichever comes first, both of them the room the pace gives TLS (5 s here;
+        // the watch was 3 s while the quiet was 1.5 s), from a start that may begin it late.
         QElapsedTimer watch;
         watch.start();
-        while (watch.elapsed() < 3000) {
+        while (watch.elapsed() < paces.jetkvm.connectWithinMs + paces.jetkvm.quietMs + 1000) {
             QCOMPARE(onceItIs(wall, id, u"error"_s).errorCode, u"same_device"_s);
             QTest::qWait(100);
         }
@@ -4690,6 +4708,39 @@ private slots:
         QCOMPARE(refusalOf(outcome), std::string("no_password"));
         QVERIFY(heardOnlyTheQuestions(*there.stand));
         QVERIFY(kvmOf(own.wall, bare).address != there.stand->address());
+    }
+
+    void aKvmNotAskedYetWhosePlainAddressSendsEverybodyOnToHttpsIsSaidSoOnItsCardAndInItsBox()
+    {
+        // (Web 0.3.2.) A KVM over plain HTTP from a file, or of an earlier start (over plain HTTP, that it was asked is
+        // not kept), is asked what it is before its password goes. Where its plain address sends everybody on to HTTPS
+        // at the same host, its card says so with that address; nothing goes there and no password goes; and a change
+        // of its password at that address says the same, for the box to offer the address (not "not asked yet").
+        OwnWall own;
+        const MadeUpKvm secure(tls("first"));
+        const QUrl there(secure.stand->address());
+        MadeUpKvm front;
+        front.httpsAt = secure.stand->address();
+        LocalWall::FromAFile brought;
+        brought.kvm = at(front.stand->address(), u"From a file"_s);
+        brought.password = u"secret"_s;
+        const QString id = own.wall.takeFromAFile({brought}).constFirst().value();
+        const core::Status status = onceItIs(own.wall, id, u"error"_s);
+        QCOMPARE(status.errorCode, u"https_only"_s);
+        QCOMPARE(status.errorMessage, QString::fromStdString(core::kvm::httpsOnly(there).message));
+        QCOMPARE(own.wall.sentOnToHttps(id).value_or(QUrl()).toString(QUrl::FullyEncoded), there.toString());
+        QVERIFY(!own.wall.wasAskedWhatItIs(id));
+        KvmEditing editing(own.wall, quick());
+        KvmEditing::Typed typed = asItIs(own.wall, id);
+        typed.password = u"secret"_s;
+        const KvmEditing::Outcome outcome = cameOf(editing, id, typed);
+        QCOMPARE(refusalOf(outcome), std::string("https_only"));
+        QCOMPARE(core::kvm::httpsOffered(outcome.result.error()).value_or(QUrl()).toString(QUrl::FullyEncoded),
+                 there.toString());
+        QCOMPARE(front.asked("/api/auth/login"_ba), 0);
+        QVERIFY(secure.stand->asked.isEmpty());
+        // Of any other KVM nothing: one that was asked, and one that is not on the wall.
+        QVERIFY(!own.wall.sentOnToHttps(u"nobody"_s));
     }
 
     void whatTheWallRecordedByItselfMeanwhileIsNoChangeThatSomebodyMade()

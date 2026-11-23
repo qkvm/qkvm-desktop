@@ -55,8 +55,13 @@ public:
     // After the wall has its machines, `settleSeconds` pass, then `seconds` are measured, the
     // report is written to `file`, and `done` is called. `start`: the moments before there was a
     // window, which whoever made the window took down; they are written with the rest.
+    // `machines`: how many the wall is to have (the KVMs the rig adds, one after the other): the wall settles from
+    // when it has them all (a moment of its own, with the memory committed then), and not from its first, which on a
+    // loaded PC came 30 s and more before its last; where they have not all come within three times the settling, it
+    // is measured with those it has, which the report says. 0: from the first.
     WallMeasure(QQuickWindow& window, ui::WallView& wall, QString file, int settleSeconds, int seconds,
-                std::function<void()> done, std::vector<Moment> start = {}, QObject* parent = nullptr);
+                std::function<void()> done, std::vector<Moment> start = {}, int machines = 0,
+                QObject* parent = nullptr);
     ~WallMeasure() override;
 
     WallMeasure(const WallMeasure&) = delete;
@@ -64,7 +69,21 @@ public:
     WallMeasure(WallMeasure&&) = delete;
     WallMeasure& operator=(WallMeasure&&) = delete;
 
+    // Called as the measuring begins, after the wall settled (the rig: a window dragged meanwhile).
+    void whenItBegins(std::function<void()> then) { m_atBegin = std::move(then); }
+    // More lines of the report, of whoever made the window: asked as the measuring begins (`atTheEnd` false, for
+    // what counts since then; what it says then is not written) and at its end. (The rig: the card stills' line.)
+    void addToReport(std::function<QString(bool atTheEnd)> lines) { m_more = std::move(lines); }
+
+    // What the program's committed memory is made of just now, as lines of the report (PERF-2): its heaps walked
+    // (what is committed for them, what is in use there, and that by the size of each piece), its threads and their
+    // stacks, and the rest of what is its own (what the graphics driver and the libraries take for themselves
+    // outside a heap). The heaps are held still while they are walked, which takes moments: never while measuring.
+    static QString memoryParts();
+
 private:
+    // The wall has its machines (all that it is to have, or the first: `machines`), or has waited long enough.
+    void cardsCame();
     void begin();
     void end();
     // The second thread: asks, waits for the answer, and looks where it is late.
@@ -80,7 +99,18 @@ private:
     std::vector<Moment> m_start;
     Meter m_meter;
     qint64 m_firstFrameMs = -1;
+    qint64 m_firstCardMs = -1;
     qint64 m_cardsMs = -1;
+    int m_machines = 0;
+    int m_settleSeconds = 0;
+    double m_cardsCommittedMb = 0;
+    double m_beganCommittedMb = 0;
+    double m_compactedMb = -1; // (QKVM_RIG_COMPACT: as the heaps were compacted as the measuring began)
+    // What the memory was made of as the window was shown, and when the wall had its cards (memoryParts).
+    QString m_partsAtFirst;
+    QString m_partsWithCards;
+    std::function<void()> m_atBegin;
+    std::function<QString(bool)> m_more;
     bool m_inFrontAtFirst = false;
 
     // Taken down by the thread that draws, read at the end by the interface thread.

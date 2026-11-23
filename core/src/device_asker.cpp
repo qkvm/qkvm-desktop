@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <utility>
 
+#include <QAbstractSocket>
 #include <QCryptographicHash>
+#include <QHttp1Configuration>
+#include <QIODevice>
 #include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -12,6 +15,7 @@
 #include <QSslError>
 #include <QTimer>
 
+#include <qkvm/core/kept_with.h>
 #include <qkvm/core/kvm_certificate.h>
 #include <qkvm/core/wiped.h>
 
@@ -28,10 +32,12 @@ QByteArray shownBy(const QSslConfiguration& configuration)
 }
 
 // The ways a question is asked: a look, and what a server's controller is asked to do (POST), to change
-// (PATCH) and to forget (DELETE: a session given back). As written, in capitals: nothing else is a way.
+// (PATCH, and a Proxmox guest's settings: PUT) and to forget (DELETE: a session given back). As written, in capitals:
+// nothing else is a way.
 bool isAWayOfAsking(const QByteArray& method)
 {
-    return method == "GET"_ba || method == "POST"_ba || method == "PATCH"_ba || method == "DELETE"_ba;
+    return method == "GET"_ba || method == "POST"_ba || method == "PATCH"_ba || method == "PUT"_ba ||
+           method == "DELETE"_ba;
 }
 
 // The headers a caller may send, by the names they are sent under: none that signs this program on to
@@ -115,6 +121,10 @@ base::Error DeviceAsker::notFitToBeSent()
 {
     return {"invalid", "What was to be asked of the device is not fit to be sent"};
 }
+base::Error DeviceAsker::lineMadeAnew()
+{
+    return {lineMadeAnewCode, "The device closed the connection this was to go on, so it was not sent"};
+}
 
 DeviceAsker::DeviceAsker(Where where, Times times, QByteArray cookie, QObject* parent)
     : DeviceAsker(std::move(where), times, Carried{Carried::In::Cookie, std::move(cookie)}, parent)
@@ -125,11 +135,30 @@ DeviceAsker::DeviceAsker(Where where, Times times, Carried session, QObject* par
 {
     // Never somewhere else by itself, and straight to the KVM: it is on the local network, where
     // the proxy this PC may use for the web is not, and its password is not for a proxy to see.
-    m_network.setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
-    m_network.setProxy(QNetworkProxy::NoProxy);
+    m_network->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
+    m_network->setProxy(QNetworkProxy::NoProxy);
 }
 
+// (Its manager of HTTP ends off the interface thread, its questions with it here: network_end.h.)
 DeviceAsker::~DeviceAsker() = default;
+
+bool DeviceAsker::onlyTo(const QHostAddress& at)
+{
+    // Only where an address of the web can be written with it, and reads back as that very one (an IPv6 address with
+    // a zone, fe80::1%12, cannot: QUrl drops or refuses the zone).
+    if (at.isNull() || !at.scopeId().isEmpty()) {
+        return false;
+    }
+    const QString written =
+        at.protocol() == QAbstractSocket::IPv6Protocol ? QStringLiteral("[%1]").arg(at.toString()) : at.toString();
+    QUrl url = m_where.address;
+    url.setHost(written, QUrl::StrictMode);
+    if (!url.isValid() || QHostAddress(url.host()) != at) {
+        return false;
+    }
+    m_onlyTo = written;
+    return true;
+}
 
 void DeviceAsker::later(std::function<void()> what)
 {
@@ -165,7 +194,19 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
     // already (redfish::link), and is not escaped a second time.
     url.setPath(question.path, QUrl::TolerantMode);
     url.setQuery(question.query);
+    if (!m_onlyTo.isEmpty()) {
+        // To the one address it is held to (onlyTo), as to its name in every other way.
+        url.setHost(m_onlyTo, QUrl::StrictMode);
+    }
     QNetworkRequest request(url);
+    if (!m_onlyTo.isEmpty()) {
+        // The name and port of its address, as Qt says them of an address it goes to by name (its name in its ASCII
+        // form, its port where one was written); and over HTTPS the name the certificate is held to and said to it.
+        QUrl named = m_where.address;
+        named.setUserInfo({});
+        request.setRawHeader("Host"_ba, named.authority(QUrl::FullyEncoded).toLatin1());
+        request.setPeerVerifyName(m_where.address.host());
+    }
     const int quietMs = question.quietMs > 0 ? question.quietMs : m_times.quietMs;
     // The limits on an answer's whole are for an answer that has an end: one that has none is
     // read as it comes by whoever asked, who keeps the limits that fit it.
@@ -190,6 +231,11 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
     // One way of speaking, the plain one: that a question has gone out is told for it (below),
     // and on that hangs whether something may have been done.
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    if (m_oneConnection) {
+        QHttp1Configuration one;
+        one.setNumberOfConnectionsPerHost(1);
+        request.setHttp1Configuration(one);
+    }
     // The KVM is asked not to pack its answer: what unpacks to how much is then nobody's guess.
     request.setRawHeader("Accept-Encoding"_ba, "identity"_ba);
     for (const auto& [name, value] : question.sent) {
@@ -216,20 +262,32 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
     // nothing to send along (the tests try both), and does for one that sends no body at all (a
     // GET, a DELETE); and a POST sent Qt's other way has what stands behind its question mark
     // moved into it, where a KVM does not look.
-    const bool sendsABody = question.method == "POST"_ba || question.method == "PATCH"_ba;
-    const bool saysWhenOut = !sendsABody || !question.body.isEmpty();
-    if (sendsABody) {
+    const bool sendsABody =
+        question.method == "POST"_ba || question.method == "PATCH"_ba || question.method == "PUT"_ba;
+    // (Nor for one whose body is read as it goes: Qt says it went only once all of it has, and what fails before that
+    // is told by the line's own word, never as "not there".)
+    const bool saysWhenOut = question.streamed == nullptr && (!sendsABody || !question.body.isEmpty());
+    if (sendsABody && question.streamed != nullptr) {
+        // Its length said first, and read as the line takes it: Qt gathers none of it first.
+        request.setRawHeader("Content-Type"_ba,
+                             question.bodyIs.isEmpty() ? "application/octet-stream"_ba : question.bodyIs);
+        request.setHeader(QNetworkRequest::ContentLengthHeader, question.streamed->size() - question.streamed->pos());
+        request.setAttribute(QNetworkRequest::DoNotBufferUploadDataAttribute, true);
+        reply = question.method == "POST"_ba
+                    ? m_network->post(request, question.streamed)
+                    : m_network->sendCustomRequest(request, question.method, question.streamed);
+    } else if (sendsABody) {
         request.setRawHeader("Content-Type"_ba,
                              question.body.isEmpty() ? "application/octet-stream"_ba : question.bodyIs);
-        reply = question.method == "POST"_ba ? m_network.post(request, question.body)
-                                             : m_network.sendCustomRequest(request, "PATCH"_ba, question.body);
+        reply = question.method == "POST"_ba ? m_network->post(request, question.body)
+                                             : m_network->sendCustomRequest(request, question.method, question.body);
         // What it sent, written over once Qt has let go of it (SentBody): a turn of the loop after the reply went.
         auto* sent = new SentBody(question.body, this); // NOLINT(cppcoreguidelines-owning-memory): this asker's
         connect(reply, &QObject::destroyed, sent, &QObject::deleteLater);
     } else if (question.method == "DELETE"_ba) {
-        reply = m_network.deleteResource(request);
+        reply = m_network->deleteResource(request);
     } else {
-        reply = m_network.get(request);
+        reply = m_network->get(request);
     }
 
     reply->setProperty("saysWhenOut", saysWhenOut);
@@ -246,9 +304,9 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
     // to give up on. Only for a question that does nothing to the computer: Qt's word that a
     // question went comes a moment after it went, and in that moment this would call "not
     // there" what is on its way. A look that is told so wrongly is a look; a button is not.
-    // A PATCH changes something and a DELETE ends something, whatever their caller says of them.
-    const bool doesSomething =
-        question.doesSomething || question.method == "PATCH"_ba || question.method == "DELETE"_ba;
+    // A PATCH and a PUT change something and a DELETE ends something, whatever their caller says of them.
+    const bool doesSomething = question.doesSomething || question.method == "PATCH"_ba || question.method == "PUT"_ba ||
+                               question.method == "DELETE"_ba;
     if (saysWhenOut && !doesSomething) {
         QTimer::singleShot(m_times.connectWithinMs, reply, [reply] {
             // (Nor once the two have agreed on how to speak over HTTPS, which says the line was let in: below.)
@@ -263,7 +321,9 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
         // Nor may it keep a question open for as long as it likes, a byte at a time. (A precise timer: a coarse one,
         // as Qt makes one of over twenty seconds, comes up to five in a hundred late, a sign-in's 48.5 s by 2.4 s, and
         // a sign-in's hold is told by when its line gives up: SignInPacing.)
-        QTimer::singleShot(m_times.connectWithinMs + quietMs + m_times.transferMs, Qt::PreciseTimer, reply, [reply] {
+        const int wholeMs =
+            question.wholeMs > 0 ? question.wholeMs : m_times.connectWithinMs + quietMs + m_times.transferMs;
+        QTimer::singleShot(wholeMs, Qt::PreciseTimer, reply, [reply] {
             if (!reply->isFinished()) {
                 reply->setProperty("gaveUp", "timeout"_ba);
                 reply->abort();
@@ -297,27 +357,33 @@ base::Result<QNetworkReply*> DeviceAsker::sendOut(const Ask& question, const QBy
             reply->setProperty("certificate", m_where.knownByCertificate ? "cert_mismatch"_ba : "cert_invalid"_ba);
         }
     });
-    // The two have agreed on how to speak, and nothing has been sent yet.
-    connect(reply, &QNetworkReply::encrypted, this, [this, reply] {
+    // The two have agreed on how to speak, and nothing has been sent yet. (Said only of a line made for this question:
+    // one it goes on that was open already agreed long before.)
+    connect(reply, &QNetworkReply::encrypted, this, [this, reply, onItsLine = question.onItsLine] {
         // The line was let in: from here on whether the question went out is no longer what Qt says of it, and
         // it is never told as not there. (Over plain HTTP Qt says nothing between being let in and the question
         // going out.)
         reply->setProperty("saysWhenOut", false);
-        if (!m_where.knownByCertificate) {
-            return; // one that Windows trusts for its name
+        if (m_where.knownByCertificate) {
+            const QSslCertificate shown = reply->sslConfiguration().peerCertificate();
+            const QByteArray sha256 = shownBy(reply->sslConfiguration());
+            if (sha256 != m_where.certificate) {
+                m_shownCertificate = sha256;
+                reply->setProperty("certificate", "cert_mismatch"_ba);
+                reply->abort();
+                return;
+            }
+            // The one it is known by, and the certificate itself this time: told once, for whoever
+            // keeps it beside the fingerprint. (What is said is what was just hashed, and no other.)
+            if (!std::exchange(m_toldItsCertificate, true)) {
+                emit showedItsCertificate(shown.toDer());
+            }
         }
-        const QSslCertificate shown = reply->sslConfiguration().peerCertificate();
-        const QByteArray sha256 = shownBy(reply->sslConfiguration());
-        if (sha256 != m_where.certificate) {
-            m_shownCertificate = sha256;
-            reply->setProperty("certificate", "cert_mismatch"_ba);
+        if (onItsLine) {
+            // A line made anew for a question that goes only on the one open before it (Ask::onItsLine): that one is
+            // gone, and whoever answers here was not asked which it is. Nothing of it goes.
+            reply->setProperty("gaveUp", "lineMadeAnew"_ba);
             reply->abort();
-            return;
-        }
-        // The one it is known by, and the certificate itself this time: told once, for whoever
-        // keeps it beside the fingerprint. (What is said is what was just hashed, and no other.)
-        if (!std::exchange(m_toldItsCertificate, true)) {
-            emit showedItsCertificate(shown.toDer());
         }
     });
     connect(reply, &QNetworkReply::metaDataChanged, reply, [reply, whole, largest = question.largest] {
@@ -371,6 +437,9 @@ std::optional<base::Error> DeviceAsker::whyNoAnswer(const QNetworkReply* reply)
     if (reply->property("packed").toBool()) {
         return packed();
     }
+    if (gaveUp == "lineMadeAnew"_ba) {
+        return lineMadeAnew();
+    }
     if (gaveUp == "unreachable"_ba) {
         return unreachable();
     }
@@ -409,9 +478,22 @@ void DeviceAsker::send(const Ask& question, const QByteArray& token, std::functi
         return;
     }
     QNetworkReply* reply = asked.value();
-    // (What it asks of the answer is the question's: kept with it. What it sent is written over by SentBody.)
-    connect(reply, &QNetworkReply::finished, this, [this, reply, question, done = std::move(done)] {
+    if (question.handed) {
+        question.handed(reply);
+    }
+    // (What it asks of the answer is the question's: kept with it. What it sent is written over by SentBody.) Both,
+    // and whoever is to hear the answer, are the reply's, and end with it on its thread, never with what listens to the
+    // reply below, which Qt may let go of on its own network thread (kept_with.h).
+    struct Waiting {
+        Ask question;
+        std::function<void(base::Result<Reply>)> done;
+    };
+    const Waiting* const waiting = &keptWith(*reply, Waiting{question, std::move(done)});
+    connect(reply, &QNetworkReply::finished, this, [this, reply, waiting] {
         reply->deleteLater();
+        const Ask& question = waiting->question;
+        // (A copy: whoever hears it may end the reply, and what it keeps with it, there and then.)
+        const std::function<void(base::Result<Reply>)> done = waiting->done;
         if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 0) {
             m_heard.start(); // (it answered, whatever it said and whatever became of the answer)
         }
@@ -431,6 +513,10 @@ void DeviceAsker::send(const Ask& question, const QByteArray& token, std::functi
             said.headersAsSent.insert(name.toLower(), reply->rawHeader(name).trimmed());
         }
         said.cookies = reply->header(QNetworkRequest::SetCookieHeader).value<QList<QNetworkCookie>>();
+        said.reason = reply->attribute(QNetworkRequest::HttpReasonPhraseAttribute).toByteArray().left(mostReasonBytes);
+        for (const QByteArray& option : reply->rawHeader("Connection"_ba).split(',')) {
+            said.lineEnds = said.lineEnds || option.trimmed().compare("close"_ba, Qt::CaseInsensitive) == 0;
+        }
         done(std::move(said));
     });
 }

@@ -84,7 +84,8 @@ Rectangle {
             Text {
                 objectName: "consoleDeviceDetails"
                 width: parent.width
-                text: [panel.card.name, panel.card.group, panel.card.host, panel.card.title, panel.card.meta, panel.card.note].filter(value => value).join("\n")
+                // (And why its power is unknown, where the wall can say: the page's Details, web 0.3.2.)
+                text: [panel.card.name, panel.card.group, panel.card.host, panel.card.title, panel.card.meta, panel.card.powerNote, panel.card.note].filter(value => value).join("\n")
                 textFormat: Text.PlainText
                 color: Theme.text
                 font.pixelSize: Theme.textSize

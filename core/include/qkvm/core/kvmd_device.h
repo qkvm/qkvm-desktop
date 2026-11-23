@@ -27,6 +27,7 @@
 #include <qkvm/core/kvmd_console_line.h>
 #include <qkvm/core/kvmd_stream.h>
 #include <qkvm/core/own_device.h>
+#include <qkvm/core/own_media.h>
 #include <qkvm/core/server_types.h>
 #include <qkvm/core/sign_in_pacing.h>
 #include <qkvm/core/tls.h>
@@ -35,6 +36,15 @@
 class QNetworkReply;
 
 namespace qkvm::core {
+
+// What a driver of a KVM of the wall leaves for the next one of the same KVM (LocalWall keeps it, as a JetKVM's
+// JetKvmKept): that the KVM showed a driver of it several inputs (the web's _shown_several, web 0.3.2, carried to the
+// client that takes over from one of the same KVM), by where it is and what it is known by
+// (KvmdDevice::keptKey). A driver at another address, or under another certificate, may speak to another KVM, and
+// takes nothing of it. On the interface thread.
+struct KvmdKept {
+    QByteArray shownSeveralBy; // the KVM that showed several, by its key; empty: none did
+};
 
 // One KVM of this PC's own wall that runs kvmd (PiKVM, GL.iNet Comet), spoken to by the program
 // itself (SPEC.md section 6.3): signing in, how it is, a picture of its screen, its live picture,
@@ -52,7 +62,11 @@ namespace qkvm::core {
 //   how to speak and before a byte of a question goes out. A KVM that is neither hears nothing:
 //   no password, no session.
 // * It is spoken to straight, whatever proxy this PC uses for the web, and is followed nowhere: a
-//   KVM that answers "go there" has given an answer that is none.
+//   KVM that answers "go there" has given an answer that is none. But where its plain address sends
+//   everybody on to HTTPS at the same host (a web server before kvmd once HTTPS is its only way in),
+//   that is said, with that address ("https_only", kvm::httpsOnly; web 0.3.2): asked first with no
+//   password before a sign-in, so that none goes the plain way to be sent on; at a sign-in all the
+//   same, held back as one that came to neither yes nor no; and of any question after it.
 // * Every answer has a limit on its size and on its time (a sign-in's is longer: some KVMs hold a
 //   no back on purpose). A KVM that does not answer is asked less and less often while it stays
 //   away, and a password it refused is not sent again for a minute, then longer after each no in
@@ -61,7 +75,7 @@ namespace qkvm::core {
 //   a KVM at an HTTPS address: every question ends with the one code and sentence there is for
 //   that (damagedTls), and how the KVM is, is told as something to look at ("error"), not as a
 //   KVM that is away.
-class KvmdDevice : public OwnDevice {
+class KvmdDevice : public OwnDevice, public OwnMedia {
     Q_OBJECT
 
 public:
@@ -160,11 +174,32 @@ public:
         int batteryEveryMs = 3'600'000;
         int batteryRetryMs = 600'000;
         int batteryWaitMs = 3000;
+        // Its virtual media (kvmd_media.cpp; the web's msd parts): how often a look asks the state of its drive where
+        // its line for events has not said it of late (MSD_EVERY); how long its storage is asked again for what its
+        // watch on the storage has not seen yet, after a write answered whole or a deletion (LISTED_WITHIN), how often
+        // (every half second), and for what a write cut off left (LISTED_FOR_A_DISCARD); and how long, how often, a
+        // drive still busy with a write cut off is waited for before that (DISCARD_WAIT).
+        int msdEveryMs = 30'000;
+        int listedWithinMs = 10'000;
+        int listedEveryMs = 500;
+        int listedForADiscardMs = 3000;
+        int discardWaitMs = 15'000;
+        int discardEveryMs = 250;
+        // An upload: given as long as something moves either way, and its answer after its last byte for as long as
+        // kvmd may take to write the rest to its storage (UPLOAD_ANSWER); a day all told (UPLOAD_MOST).
+        int uploadQuietMs = 300'000;
+        int uploadMostMs = 86'400'000;
     };
 
     KvmdDevice(Where where, QString password, QObject* parent = nullptr);
     KvmdDevice(Where where, QString password, Pace pace, QObject* parent = nullptr);
     ~KvmdDevice() override;
+
+    // What this driver leaves for the next one of its KVM, and takes from the one before (KvmdKept): handed by the wall
+    // as the driver is made. Without it, nothing is kept beyond this driver.
+    void keepWith(std::shared_ptr<KvmdKept> kept);
+    // The KVM as KvmdKept knows it: its address, and the certificate it is known by (or that Windows vouches for it).
+    QByteArray keptKey() const;
 
     const Where& where() const { return m_where; }
     // The times it keeps: for whoever stands beside it and keeps a time of its own by one of them.
@@ -250,6 +285,12 @@ public:
     // to a Comet can wake its sleeping computer). One question to the Fingerbot at a time: a press waits for a
     // question of its battery that is under way (Pace::batteryWaitMs at the most).
     void act(const Action& what, std::function<void(base::Result<Done>)> done) override;
+    // kvmd is handed a text whole (its /api/hid/print) and types it by itself: what it has been handed is not stopped.
+    // A text, keys pressed together or Ctrl+Alt+Del not yet handed to its line, because it waits for a sign-in (this
+    // driver's, or another's of the same KVM), is answered "stopped" now, and is never sent, nor the Enter after the
+    // text (the program locked, or made a wall screen: review cx6-2, L3; OwnDevice::stopTyping). Nothing else is
+    // stopped: a press of a power button, a switch of computers, a waking goes as it was asked.
+    void stopTyping() override;
     // Whether an action of that kind presses the KVM's power board.
     static bool pressesTheBoard(QStringView kind);
     // Whether it is pressed by a Fingerbot paired with the KVM.
@@ -303,6 +344,50 @@ public:
     {
         return m_asker.shownCertificate().isEmpty() ? m_signInLineShowed : m_asker.shownCertificate();
     }
+    // Its virtual media (kvmd_media.cpp; the web's 0.3.0, A2): the images on the KVM's own storage, one of them in its
+    // drive at a time as a CD-ROM drive or a USB flash drive. What the drive is, is kept as the web keeps it: as GET
+    // /api/msd answered last, or as its `msd` event said it on the line for its events this driver holds while its
+    // picture is watched (the whole state as the line opens, then what changed); a look asks it where the line has not
+    // said it of late, every Pace::msdEveryMs at the most. What is in its drive is on its card (Status::media).
+    //
+    // What it can do, by what was last said of its drive: nothing where that is switched off in its own settings, or
+    // nothing was said of it yet.
+    std::optional<MediaOffer> mediaOffer() const override;
+    // The images and what is mounted, asked now; "no_virtual_media" where its own drive is switched off. What stands
+    // against a change just now (offline, busy, File Sharing) is among the list's notes.
+    void askMedia(std::function<void(base::Result<MediaList>)> done) override;
+    // As the web's server and driver take them together, in their words, `MediaMount::machine` naming the machine in
+    // them: an image the KVM lists, whole, as a CD-ROM drive (300 sectors at least) or a USB flash drive (writable only
+    // there), never started from (a KVM is no firmware), and restarted after the mount where it has a power board and
+    // that is asked (a press of it, by every rule of one: switched on where it is off, else reset). Not while something
+    // stands against it, nor over another image that is in its drive; asked again after it, and taken out again at
+    // once where it is in otherwise than it was asked. Answered with a note where there is more to say than that it was
+    // done.
+    void mountMedia(const MediaMount& mount, std::function<void(base::Result<MediaDone>)> done) override;
+    // `image`: what was in its drive when it was asked. Nothing in it: done, with that said. Another: refused.
+    void unmountMedia(const QString& image, std::function<void(base::Result<MediaDone>)> done) override;
+    // From its own storage: not while it is in the drive, and done once it is listed no more (Pace::listedWithinMs).
+    // One that is not there any more: done, with that said.
+    void deleteMedia(const QString& image, std::function<void(base::Result<MediaDone>)> done) override;
+    // An image carried from this PC to the KVM's own storage as `name` (the web's `media_upload` and `_carry`): POST
+    // /api/msd/write, from `image` as it is read (a file read at a place, moved to a thread of its own where it is not
+    // one that reads ahead: ReadAhead), its length said first, `remove_incomplete=1`, on a line of its own, counted
+    // and hashed as it goes and kept nowhere. Refused at once, and nothing sent: no file read at a place, an empty
+    // one, one over 16 GB (mostUploadBytes), a name the web does not take (isImageName), one while another is on its
+    // way. Refused after the KVM's state was asked, nothing sent: what stands against a change, a name on its storage
+    // already, no room. Given as long as something moves (Pace::uploadQuietMs), a day all told. Answered with its
+    // SHA-256 once kvmd said it wrote every byte and lists it whole (Pace::listedWithinMs; never taken off where it
+    // does not: said). What a write that ended otherwise left (cut off, stopped, not whole, refused) is taken off
+    // where kvmd did not take it off itself, once its drive is done with it, and said in the web's words: nothing, an
+    // image whole after all (which stays), or what is still there. What is handed back stops it: nothing more of it
+    // goes, and `done` is told uploadStopped where nothing of it is left.
+    std::function<void()> uploadMedia(const QString& name, std::unique_ptr<QIODevice> image,
+                                      std::function<void(base::Result<MediaUploaded>)> done) override;
+    // The image this driver is carrying to the KVM, and how far it has come (what Qt has written of it); nothing: none.
+    std::optional<MediaUploading> uploading() const override;
+    // Whether the question of its drive that a look asks beside it is out (for the tests, which wait for its answer).
+    bool asksItsDrive() const { return m_askingTheDrive; }
+
     // Lets go of what is only kept for whoever looks, once nobody has for a while.
     void tidy() override;
     // A person has just typed this password for the KVM at `where`: it is tried as for the first time,
@@ -367,6 +452,9 @@ private:
         // Told each time the question is handed to the line to the KVM (it may reach the KVM from then on): once
         // more where it is sent a second time, signed in anew.
         std::function<void()> goingOut;
+        // Keys or a text typed on the machine: answered "stopped", and never sent, where whoever had it typed says to
+        // stop (stopTyping) while it waits to be handed to its line (for a sign-in).
+        bool types = false;
     };
     struct Reply {
         int status = 0;
@@ -374,6 +462,9 @@ private:
         QByteArray kind;   // what it says its body is, in small letters and without what follows a ";"
         QByteArray online; // kvmd's header that says whether the computer sends a picture
         QList<QNetworkCookie> cookies;
+        // Where a redirect says to go (its Location), as it came: read for one thing alone, a plain address that sends
+        // everybody on to HTTPS at the same host (kvm::httpsInstead), which is said and never followed.
+        QByteArray location;
     };
     struct Tries {
         bool relogged = false; // signed in anew after the KVM refused the session
@@ -395,6 +486,9 @@ private:
     static std::optional<base::Error> whyNoAnswer(const QNetworkReply* reply);
     // One question and its whole answer.
     void send(const Ask& question, const QByteArray& token, std::function<void(base::Result<Reply>)> done);
+    // What an answer says where it sends the question on to HTTPS at the same host, from this KVM's plain address
+    // (kvm::httpsInstead): "https_only" with that address (kvm::httpsOnly). Nothing for any other answer.
+    std::optional<base::Error> sentOn(int status, const QByteArray& location) const;
     // One question of somebody who is signed in: signs in where that is needed, and once more
     // where the KVM has forgotten the session.
     void request(const Ask& question, std::function<void(base::Result<Reply>)> done);
@@ -444,6 +538,15 @@ private:
     // A look whose board said it is not there, or said nothing, keeps the board as it was a moment ago
     // (Pace::boardKeptMs, powerKeptMs); one whose board said it is there is noted for that.
     void keepTheBoard(Status& status);
+    // A board that says off beside a picture: why it is no witness of the power, where it can be said
+    // (Status::powerNote: never of a KVM that has shown several inputs, m_shownSeveral).
+    void noteThePower(Status& status);
+    // Whether a board that says so of the computer (by the last look, or at the press) is no witness of its power: off
+    // beside a picture, where the card says "Power unknown" (with the note's why, or alone on a KVM that has shown
+    // several inputs) or nothing of the power. A short press of the power button is refused then (act, pressBoard), in
+    // the words of powerUnknown, which say which of the two.
+    bool noWitnessOfThePower(std::optional<bool> boardSays) const;
+    base::Error powerUnknown() const;
     void lookOver(Status status);
     // A look found that it could not ask: said as what that is (a KVM that is there and does not sign
     // this program in is no KVM that is away).
@@ -531,6 +634,70 @@ private:
     // Its battery asked in the background, where one is paired and it is time (Pace::batteryEveryMs).
     void batterySoon();
 
+    // Its virtual media (kvmd_media.cpp). What its notes of images carried there know it by: its address.
+    QString mediaKey() const;
+    // Whether a look asks the state of its drive (the web's `_msd_look`).
+    bool driveIsDue() const;
+    // GET /api/msd: what is kept of it (kvmd::msdKept) once it is noted.
+    void askTheDrive(bool urgent, bool vital, std::function<void(base::Result<QJsonObject>)> then);
+    // The state of its drive as it was said (on the line: `onTheLine`), noted; where that changes what its card says of
+    // it, the card is due to be looked at again, and that is said (statusChanged).
+    void driveSaid(QJsonObject state, bool onTheLine);
+    // One of kvmd's changes of its drive or storage, sent once; why not, in the web's words (`what` it did not do).
+    void changeTheDrive(const QString& path, const QUrlQuery& query, const QString& what,
+                        std::function<void(std::optional<base::Error>)> then);
+    // Its storage asked until it lists an image, no longer lists it (in a list read whole: kvmd::Listed::whole), or
+    // lists it whole at a size (listedUntil).
+    struct ListedNow {
+        QJsonObject state;
+        std::optional<MediaImage> image;
+        bool whole = true;
+    };
+    enum class Until { Listed, Gone, WholeAt };
+    struct Listing {
+        QString name;
+        Until until = Until::Listed;
+        qint64 whole = 0;
+        qint64 deadline = 0;
+        std::optional<ListedNow> last;
+        std::function<void(base::Result<ListedNow>)> then;
+    };
+    void listedUntil(const QString& name, int withinMs, Until until, qint64 whole,
+                     std::function<void(base::Result<ListedNow>)> then);
+    void listingRound(const std::shared_ptr<Listing>& listing);
+    // A mount whose image was chosen as asked, connected (connectChosen): read back, and the machine restarted where
+    // that is asked.
+    void connectChosen(const MediaMount& mount, bool restart, const std::function<bool(const MountedMedia&)>& asAsked,
+                       const std::function<void(base::Result<MediaDone>)>& done);
+    // A mount whose connect kvmd answered yes to, and that is not as it was asked (`now`: what is in its drive;
+    // `thisOne`: that is `image`, as kvmd names it). What is in it was put there by that connect (kvmd takes one only
+    // while nothing is connected), this image otherwise or another client's choice in the moment between: taken out
+    // again, read back, and said. What cannot be read is left as it is, and said.
+    void mountedOtherwise(const std::optional<MountedMedia>& now, const QString& image, bool thisOne,
+                          const std::function<void(base::Result<MediaDone>)>& done);
+    // The machine restarted after a mount (`named`: what it is called in a sentence): a note, or why not.
+    void restartForMedia(const QString& named, std::function<void(base::Result<QString>)> then);
+    // An upload, from its asking to its answer (kvmd_media.cpp): carried on its own line, read back from what kvmd
+    // answered, and over.
+    struct Upload;
+    void carry(const std::shared_ptr<Upload>& upload, const QByteArray& token);
+    void written(const std::shared_ptr<Upload>& upload, const QByteArray& token,
+                 const base::Result<DeviceAsker::Reply>& reply);
+    // What it came to: cut off before its answer (`why`; `failed`: its file could not be read), not taken whole, or
+    // taken whole and listed so; and the words for what a discard left where it left nothing.
+    void cutOff(const std::shared_ptr<Upload>& upload, const base::Error& why, const QString& failed,
+                const std::optional<QString>& left);
+    void notWhole(const std::shared_ptr<Upload>& upload, int status, std::optional<qint64> written,
+                  const QString& detail, const std::optional<QString>& left);
+    void listedAfter(const std::shared_ptr<Upload>& upload, const base::Result<ListedNow>& listed);
+    static QString nothingLeft();
+    void uploadOver(const std::shared_ptr<Upload>& upload, const base::Result<MediaUploaded>& result);
+    static base::Error stoppedBefore();
+    // What a write that ended otherwise left of `name`, taken off where kvmd did not take it off itself (the web's
+    // `media_discard`): nothing said where nothing is left, else what is.
+    void discard(const QString& name, std::function<void(std::optional<QString>)> then);
+    void discardOnceIdle(const QString& name, qint64 until, std::function<void(std::optional<QString>)> then);
+
     Where m_where;
     // Its password, for as long as it signs in with it: its own, written over when it goes (wiped.h; from the outside
     // review, F5).
@@ -555,6 +722,9 @@ private:
     // What a sign-in's line that is over heard and was shown.
     void heardOn(const DeviceAsker& line, bool heard);
     QList<std::function<void(base::Result<QByteArray>)>> m_waitingForToken;
+    // The typings (Ask::types) that wait to be handed to their line, each with whoever is owed its answer: emptied
+    // where a stop answered it (stopTyping), which then never goes.
+    QList<std::shared_ptr<std::function<void(base::Result<Reply>)>>> m_typingsWaiting;
     // What came of the last sign-in of this driver's that let it nowhere, in its own words, and the
     // hold it noted then as the pacing kept it: heldSignIn says those words while that very hold
     // stands. Held here, until m_signInRetryAt, is only a session it was given and refuses.
@@ -594,6 +764,16 @@ private:
     // Which computer is on its screen as far as this driver knows: by its last look, or by having
     // put another there itself since.
     std::optional<int> m_portSeen;
+    // It has shown this driver, or one before it of the same KVM, several inputs, at any look (the web's
+    // _shown_several): its board may be another computer's than the one on screen, and no note is made of its wires
+    // (noteThePower). A driver made anew for a change of where the KVM is or of what it is known by begins with none
+    // (KvmdKept), as the web's client for another.
+    bool m_shownSeveral = false;
+    // What it said last of its plain address was that it sends everybody on to HTTPS (an answer of any question, or of
+    // a sign-in): the next sign-in asks first with no password, however lately it was heard (signIn). Until a sign-in
+    // that kvmd answered with a pass.
+    bool m_sentOnToHttps = false;
+    std::shared_ptr<KvmdKept> m_kept;
     bool m_usbUnsure = false;            // another one is than was, and it has not found its keyboard there yet
     std::optional<bool> m_mouseAbsolute; // mouseAbsolute()
     // Whether it is GL.iNet's firmware (it answered /api/upgrade/version in GL.iNet's shape: true), stock kvmd (it
@@ -626,6 +806,14 @@ private:
     qint64 m_fingerbotMayTakeMs = 0;
     std::unique_ptr<AwakeLine> m_fingerbotLine;
     bool m_askingBattery = false;
+    // The state of its drive as kvmd last said it (kvmd::msdKept), when that was (by m_clock), and when its line for
+    // events last said it.
+    std::optional<QJsonObject> m_msd;
+    std::optional<qint64> m_msdAt;
+    std::optional<qint64> m_msdHeardAt;
+    bool m_askingTheDrive = false; // a look's question of it is out
+    // The image on its way to it; none: none is.
+    std::shared_ptr<Upload> m_upload;
 
     QHash<QString, Frame> m_frames;
     QSet<QString> m_unseen; // the sizes whose picture nobody was handed yet

@@ -6,6 +6,10 @@ Builds the project's own minimal FFmpeg into .deps\ffmpeg, in WSL, from pinned s
 .DESCRIPTION
     tools\build_ffmpeg.ps1
     tools\build_ffmpeg.ps1 -Downloads <folder> -Work <folder>      (what tools/build_release.ps1 does)
+    tools\build_ffmpeg.ps1 -Arch arm64 [-Downloads <folder>]       (for Windows on ARM)
+    tools\build_ffmpeg.ps1 -Arch <x64|arm64> -Downloads <folder> -Work <folder> -NoImportLibraries
+                                              (a release's FFmpeg part: tools/build_release.ps1 -Part ffmpeg, with WSL)
+    tools\build_ffmpeg.ps1 -Arch <x64|arm64> -ImportLibrariesOnly  (its build part: build_release.ps1 -Part build)
 
 What is in it: the H.264, JPEG and PNG decoders, the H.264 parser, decoding on the graphics card through
 Direct3D 11, and zlib (for PNG), as avcodec and avutil DLLs for Windows x64, LGPL version 3 or later
@@ -19,14 +23,30 @@ From what, each checked against the size and SHA-256 written below before it is 
 - a cross compiler and its tools, as Ubuntu 24.04 packages them, unpacked into the work folder (nothing is
   installed, in WSL or in Windows). WSL's Ubuntu 24.04 (or a distribution with its C library) runs them.
 
+With -Arch arm64 the same sources, with the same options, become ARM64 DLLs, with FFmpeg's NEON code (its
+ARM64 assembly, and the configuration's own checks of the assembler) on: Ubuntu packages no compiler for ARM64
+Windows, so the cross compiler is llvm-mingw's (clang and lld, with mingw-w64's headers and runtime built for
+ARM64), one archive of its release on GitHub for an x86_64 Ubuntu host, with the runtime of Windows' own
+msvcrt.dll as Ubuntu's x64 compiler has it (the owner's choice, 2026-11-19); and Ubuntu's make, pinned below for
+x64. Unpacked into the work folder and used in WSL as Ubuntu's packages are. The result goes where an ARM64
+build looks for it (common.ps1, Get-DepsRoot), and says in build.json which of FFmpeg's ARM64 features it has;
+a build without NEON is refused.
+
 The import libraries the program links with are made by Microsoft's own lib tool from the DLLs' export
-lists. The archives of the sources are kept in the downloads folder: they are the source offered with
-the release (tools/release_files.ps1). .deps\ffmpeg\build.json says what was built from what.
+lists, which stay in the tree (def). lib stamps each with the time it was made, so they are other bytes at every
+making: -NoImportLibraries leaves them out, and the tree is then the same bytes at every build of the same pins (a
+release's FFmpeg part, checked against the record of an earlier build of them); -ImportLibrariesOnly makes them, and
+nothing else, in a tree that is there already (a release's build part, on a PC without WSL). The archives of the
+sources are kept in the downloads folder: they are the source offered with the release (tools/release_files.ps1).
+.deps\ffmpeg\build.json says what was built from what.
 #>
 param(
     [string] $Downloads = '',
     [string] $Work = '',
-    [string] $Distribution = 'Ubuntu'
+    [string] $Distribution = 'Ubuntu',
+    [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
+    [switch] $NoImportLibraries,
+    [switch] $ImportLibrariesOnly
 )
 
 . "$PSScriptRoot\common.ps1"
@@ -59,18 +79,48 @@ $Toolchain = @(
     @{ Name = 'libisl23_0.26-3build1_amd64.deb'; Path = 'main/i/isl'; Bytes = 679596
        Sha256 = '24b1aa0e1772080fd23df7bed10aadcbbe16b3181b77d3a013c14dfaf9848541' }
 )
+# For ARM64: llvm-mingw 20261104 (LLVM 23.1.5), its msvcrt kind for an x86_64 Ubuntu host, the SHA-256 GitHub publishes
+# for it (build_ffmpeg.sh checks the archive against it again before it unpacks it); and make as for x64.
+$LlvmMingw = @{ Name = 'llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64.tar.xz'; Bytes = 83338104
+    Url = 'https://github.com/mstorsjo/llvm-mingw/releases/download/20261104/llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64.tar.xz'
+    Sha256 = '6e3342e2e0dfa56e9178f3c34b198f278bd5e603db4a759455d1439cc2230630' }
+$Parts = if ($Arch -eq 'arm64') { @($LlvmMingw) + @($Toolchain | Where-Object { $_.Name -like 'make_*' }) } else { $Toolchain }
+if ($NoImportLibraries -and $ImportLibrariesOnly) { throw '-NoImportLibraries and -ImportLibrariesOnly ask for opposite things.' }
+$Root = Join-Path (Get-DepsRoot -Arch $Arch) 'ffmpeg'
+
+function New-ImportLibraries {
+    # The program is linked by Microsoft's linker: import libraries of Microsoft's own making, from each DLL's exports.
+    Enter-BuildEnvironment
+    New-Item -ItemType Directory -Force -Path "$Root\lib" | Out-Null
+    foreach ($library in 'avcodec', 'avutil') {
+        $dll = @(Get-ChildItem -LiteralPath "$Root\bin" -Filter "$library-*.dll")
+        if ($dll.Count -ne 1) { throw "There is not one $library DLL in $Root\bin." }
+        $definition = @(Get-ChildItem -LiteralPath "$Root\def" -Filter "$library-*.def")
+        if ($definition.Count -ne 1) { throw "There is not one export list of $library in $Root\def." }
+        & lib.exe /nologo "/machine:$Arch" "/def:$($definition[0].FullName)" "/name:$($dll[0].Name)" "/out:$Root\lib\$library.lib" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "lib.exe could not make $library.lib." }
+        Remove-Item -LiteralPath "$Root\lib\$library.exp" -ErrorAction SilentlyContinue
+    }
+}
+if ($ImportLibrariesOnly) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Root 'build.json'))) { throw "There is no FFmpeg in $Root to make import libraries for." }
+    New-ImportLibraries
+    Write-Host "The import libraries of the FFmpeg in $Root are made."
+    return
+}
 
 if (-not $Downloads) { $Downloads = Join-Path $DesktopRoot '.deps\downloads\ffmpeg' }
-if (-not $Work) { $Work = Join-Path $DesktopRoot '.deps\ffmpeg-build' }
+if (-not $Work) { $Work = if ($Arch -eq 'arm64') { Join-Path (Get-DepsRoot -Arch arm64) 'ffmpeg-build' } else { Join-Path $DesktopRoot '.deps\ffmpeg-build' } }
 $Downloads = [IO.Path]::GetFullPath($Downloads)
 $Work = [IO.Path]::GetFullPath($Work)
 New-Item -ItemType Directory -Force -Path $Downloads, $Work | Out-Null
 
-Write-Host "FFmpeg 9.0.2 (minimal) built in $Work"
+Write-Host "FFmpeg 9.0.2 (minimal$(if ($Arch -eq 'arm64') { ', ARM64' })) built in $Work"
 Get-Checked $FFmpeg.Url (Join-Path $Downloads $FFmpeg.Name) $FFmpeg.Bytes $FFmpeg.Sha256
 Get-Checked $Zlib.Url (Join-Path $Downloads $Zlib.Name) $Zlib.Bytes $Zlib.Sha256
-foreach ($package in $Toolchain) {
-    Get-Checked "$Ubuntu/$($package.Path)/$($package.Name)" (Join-Path $Downloads $package.Name) $package.Bytes $package.Sha256
+foreach ($package in $Parts) {
+    $from = if ($package.ContainsKey('Url')) { $package.Url } else { "$Ubuntu/$($package.Path)/$($package.Name)" }
+    Get-Checked $from (Join-Path $Downloads $package.Name) $package.Bytes $package.Sha256
 }
 
 function ConvertTo-Wsl([string] $Path) {
@@ -81,9 +131,9 @@ function ConvertTo-Wsl([string] $Path) {
 # The script as bash reads it: with Unix line ends, whatever a checkout or an archive made of them.
 $script = Join-Path $Work 'build_ffmpeg.sh'
 [IO.File]::WriteAllText($script, [IO.File]::ReadAllText("$PSScriptRoot\build_ffmpeg.sh").Replace("`r`n", "`n"))
-$arguments = @((ConvertTo-Wsl $script), (ConvertTo-Wsl $Work),
+$arguments = @((ConvertTo-Wsl $script), $Arch, (ConvertTo-Wsl $Work),
     (ConvertTo-Wsl (Join-Path $Downloads $FFmpeg.Name)), (ConvertTo-Wsl (Join-Path $Downloads $Zlib.Name)))
-$arguments += @($Toolchain | ForEach-Object { ConvertTo-Wsl (Join-Path $Downloads $_.Name) })
+$arguments += @($Parts | ForEach-Object { ConvertTo-Wsl (Join-Path $Downloads $_.Name) })
 $said = & wsl.exe -d $Distribution -e bash --noprofile --norc @arguments 2>&1 | ForEach-Object { "$_" }
 $ended = $LASTEXITCODE
 $said | Write-Host
@@ -97,26 +147,21 @@ foreach ($line in $said | Where-Object { $_ -match '^(avcodec|avutil)-\d+\.dll: 
     if ($foreign.Count) { throw "$(($line -split ':')[0]) needs $($foreign -join ', '), which is not Windows'." }
 }
 
-$Root = Join-Path $DesktopRoot '.deps\ffmpeg'
 if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $Work 'out\ffmpeg') -Destination $Root -Recurse
 foreach ($unwanted in @(Get-ChildItem -LiteralPath $Root -Recurse -File -Include '*.dll.a', '*.a', '*.pc')) {
     Remove-Item -LiteralPath $unwanted.FullName
 }
-
-# The program is linked by Microsoft's linker: import libraries of Microsoft's own making, from each DLL's exports.
-Enter-BuildEnvironment
-foreach ($library in 'avcodec', 'avutil') {
-    $dll = @(Get-ChildItem -LiteralPath "$Root\bin" -Filter "$library-*.dll")
-    if ($dll.Count -ne 1) { throw "There is not one $library DLL in $Root\bin." }
-    $definition = @(Get-ChildItem -LiteralPath (Join-Path $Work 'out\def') -Filter "$library-*.def")
-    if ($definition.Count -ne 1) { throw "The build left no export list for $library." }
-    & lib.exe /nologo /machine:x64 "/def:$($definition[0].FullName)" "/name:$($dll[0].Name)" "/out:$Root\lib\$library.lib" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "lib.exe could not make $library.lib." }
-    Remove-Item -LiteralPath "$Root\lib\$library.exp" -ErrorAction SilentlyContinue
+# (And the folders they were in, left empty: a tree compared file for file holds no folder without a file.)
+foreach ($empty in @(Get-ChildItem -LiteralPath $Root -Recurse -Directory | Sort-Object { $_.FullName.Length } -Descending)) {
+    if (-not @(Get-ChildItem -LiteralPath $empty.FullName -Force).Count) { Remove-Item -LiteralPath $empty.FullName }
 }
+Copy-Item -LiteralPath (Join-Path $Work 'out\def') -Destination (Join-Path $Root 'def') -Recurse
+if (-not $NoImportLibraries) { New-ImportLibraries }
 
-foreach ($needed in 'include\libavcodec\avcodec.h', 'include\libavutil\hwcontext_d3d11va.h', 'lib\avcodec.lib', 'lib\avutil.lib', 'LICENSE.txt', 'zlib-LICENSE.txt') {
+$needs = @('include\libavcodec\avcodec.h', 'include\libavutil\hwcontext_d3d11va.h', 'LICENSE.txt', 'zlib-LICENSE.txt')
+if (-not $NoImportLibraries) { $needs += @('lib\avcodec.lib', 'lib\avutil.lib') }
+foreach ($needed in $needs) {
     if (-not (Test-Path -LiteralPath (Join-Path $Root $needed))) { throw "After the build, $needed is not in $Root." }
 }
 # What the build says of itself, in the configuration line it carries; and nothing of where it was made.
@@ -128,8 +173,24 @@ foreach ($wanted in '--enable-d3d11va', '--enable-zlib') {
 }
 # (The rule the release audit holds the package's avcodec to: everything disabled, nothing found by itself, LGPL
 # version 3, and nothing enabled but what build_ffmpeg.sh names.)
-$refused = @(Get-FFmpegRefusals $configuration)
+$refused = @(Get-FFmpegRefusals $configuration -Arch $Arch)
 if ($refused.Count) { throw "The build is not the minimal one: $($refused -join '; ')." }
+# ARM64: programs for ARM64 Windows, with FFmpeg's NEON code built in (wall tiles decode in software: without it, at
+# a fraction of the pace). configure's own findings, as build_ffmpeg.sh kept them from config.h.
+$features = $null
+if ($Arch -eq 'arm64') {
+    foreach ($file in Get-ChildItem -LiteralPath "$Root\bin" -File -Filter '*.dll') {
+        $bytes = [IO.File]::ReadAllBytes($file.FullName)
+        if ([BitConverter]::ToUInt16($bytes, [BitConverter]::ToInt32($bytes, 0x3C) + 4) -ne 0xAA64) { throw "$($file.Name) is not a program for ARM64 Windows." }
+    }
+    $features = [ordered]@{}
+    foreach ($line in Get-Content -LiteralPath (Join-Path $Work 'out\features.txt')) {
+        if ($line -match '^#define (\w+) (\d+)$') { $features[$Matches[1]] = [int] $Matches[2] }
+    }
+    foreach ($needed in 'ARCH_AARCH64', 'HAVE_NEON', 'HAVE_ARMV8', 'HAVE_NEON_EXTERNAL') {
+        if ($features[$needed] -ne 1) { throw "The ARM64 build has no $needed (configure's config.h): FFmpeg's NEON code is not in it." }
+    }
+}
 $wslWork = ConvertTo-Wsl $Work
 foreach ($file in Get-ChildItem -LiteralPath "$Root\bin" -File) {
     foreach ($folder in $Work, $wslWork, $DesktopRoot) {
@@ -137,13 +198,16 @@ foreach ($file in Get-ChildItem -LiteralPath "$Root\bin" -File) {
     }
 }
 
-[ordered]@{
+$record = [ordered]@{
     ffmpeg = [ordered]@{ archive = $FFmpeg.Name; bytes = $FFmpeg.Bytes; sha256 = $FFmpeg.Sha256 }
     zlib = [ordered]@{ archive = $Zlib.Name; bytes = $Zlib.Bytes; sha256 = $Zlib.Sha256 }
-    toolchain = @($Toolchain | ForEach-Object { [ordered]@{ package = $_.Name; bytes = $_.Bytes; sha256 = $_.Sha256 } })
+    toolchain = @($Parts | ForEach-Object { [ordered]@{ package = $_.Name; bytes = $_.Bytes; sha256 = $_.Sha256 } })
     wsl = $Distribution
     configuration = $configuration
-    files = @(Get-ChildItem -LiteralPath "$Root\bin", "$Root\lib" -File | Sort-Object Name | ForEach-Object {
+    # (The DLLs and their export lists: the import libraries made from them are other bytes at every making.)
+    files = @(Get-ChildItem -LiteralPath "$Root\bin", "$Root\def" -File | Sort-Object Name | ForEach-Object {
         [ordered]@{ file = $_.Name; bytes = $_.Length; sha256 = Get-Sha256 $_.FullName } })
-} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$Root\build.json" -Encoding utf8
-Write-Host "FFmpeg is in ${Root}: H.264, JPEG and PNG, Direct3D 11 decoding, zlib; LGPL version 3 or later."
+}
+if ($features) { $record['architecture'] = $Arch; $record['features'] = $features }
+$record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$Root\build.json" -Encoding utf8
+Write-Host "FFmpeg is in ${Root}: H.264, JPEG and PNG, Direct3D 11 decoding, zlib; LGPL version 3 or later$(if ($features) { '; ARM64, NEON on' })."

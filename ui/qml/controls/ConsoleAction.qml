@@ -16,8 +16,9 @@ Button {
     opacity: enabled && !resting ? 1 : 0.5
     onOfferedChanged: if (shelf)
         shelf.schedule()
+    // (At once: its words are laid out in the pass that lays out the window, before it is drawn.)
     onImplicitWidthChanged: if (shelf)
-        shelf.schedule()
+        shelf.fit()
     onClicked: if (shelf)
         shelf.closeMenu()
 }

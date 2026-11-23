@@ -1,5 +1,6 @@
 #include "../installer/health_exchange.h"
 #include "../installer/native_health.h"
+#include "../installer/package_architecture.h"
 #include "../installer/setup_context.h"
 #include "../installer/setup_launch.h"
 #include <QCoreApplication>
@@ -229,6 +230,31 @@ private slots:
         QCOMPARE(launchSetup(self().toStdWString(), {L"--arbitrary"}, SetupHop::Relay, false, api),
                  DWORD(ERROR_INVALID_PARAMETER));
         QCOMPARE(seenCommand, previous);
+    }
+    // The installer takes the MSIX of the PC's own kind of Windows alone: x64's on x64, ARM64's on Windows on Arm;
+    // never one of the other kind, a neutral one or one of a kind qKVM is never built for.
+    void anMsixIsTakenOnlyForThePcsOwnKindOfWindows_data()
+    {
+        QTest::addColumn<int>("package");
+        QTest::addColumn<qkvm::base::Architecture>("pc");
+        QTest::addColumn<bool>("taken");
+        const auto x64 = qkvm::base::Architecture::X64;
+        const auto arm64 = qkvm::base::Architecture::Arm64;
+        QTest::newRow("x64's on x64") << int{APPX_PACKAGE_ARCHITECTURE_X64} << x64 << true;
+        QTest::newRow("ARM64's on Arm") << int{APPX_PACKAGE_ARCHITECTURE_ARM64} << arm64 << true;
+        QTest::newRow("x64's on Arm") << int{APPX_PACKAGE_ARCHITECTURE_X64} << arm64 << false;
+        QTest::newRow("ARM64's on x64") << int{APPX_PACKAGE_ARCHITECTURE_ARM64} << x64 << false;
+        QTest::newRow("neutral on x64") << int{APPX_PACKAGE_ARCHITECTURE_NEUTRAL} << x64 << false;
+        QTest::newRow("neutral on Arm") << int{APPX_PACKAGE_ARCHITECTURE_NEUTRAL} << arm64 << false;
+        QTest::newRow("x86 on x64") << int{APPX_PACKAGE_ARCHITECTURE_X86} << x64 << false;
+        QTest::newRow("32-bit Arm on Arm") << int{APPX_PACKAGE_ARCHITECTURE_ARM} << arm64 << false;
+    }
+    void anMsixIsTakenOnlyForThePcsOwnKindOfWindows()
+    {
+        QFETCH(int, package);
+        QFETCH(qkvm::base::Architecture, pc);
+        QFETCH(bool, taken);
+        QCOMPARE(packageFitsThePc(static_cast<APPX_PACKAGE_ARCHITECTURE>(package), pc), taken);
     }
     void setupRefusesPackageIdentityAndAnUnknownPackageState_data()
     {

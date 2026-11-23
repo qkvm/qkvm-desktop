@@ -1,40 +1,75 @@
 #!/bin/bash
 # Builds the project's own FFmpeg in WSL, from sources and a toolchain tools/build_ffmpeg.ps1 has fetched and checked:
-# only the H.264, JPEG and PNG decoders, the H.264 parser, Direct3D 11 decoding and zlib, as DLLs for Windows x64.
+# only the H.264, JPEG and PNG decoders, the H.264 parser, Direct3D 11 decoding and zlib, as DLLs for Windows x64, or
+# with arm64 for Windows on ARM.
 #
-#     build_ffmpeg.sh <work folder> <ffmpeg archive> <zlib archive> <toolchain .deb>...
+#     build_ffmpeg.sh <x64|arm64> <work folder> <ffmpeg archive> <zlib archive> <toolchain part>...
 #
 # The build is made in a scratch folder of WSL's own (a Windows drive as WSL sees it is many times slower for the
 # thousands of small files a build makes), and deleted afterwards; what it made is copied to <work folder>/out. The
 # toolchain is unpacked there (dpkg-deb -x: nothing is installed), and FFmpeg and zlib are configured and built in
 # their own trees with relative paths, so that what the DLLs carry of how they were made (their configuration line,
 # their source names) says nothing of where.
+#
+# x64: Ubuntu's MinGW-w64 GCC (its .deb packages). arm64: llvm-mingw 20261104 (LLVM 23.1.5, mingw-w64's headers and
+# runtime built for ARM64, its msvcrt kind, for an x86_64 Ubuntu host), the one archive of its GitHub release whose
+# SHA-256 is below, unpacked as the packages are; Ubuntu packages no compiler for ARM64 Windows. make is Ubuntu's in
+# both. The same configuration but for the architecture and the compiler's name: FFmpeg's ARM64 code (NEON) is on by
+# FFmpeg's own default, and config.h's word on it is kept for build_ffmpeg.ps1 to check (out/features.txt).
 set -euo pipefail
 
-work=$1
-ffmpeg_archive=$2
-zlib_archive=$3
-shift 3
+arch=$1
+work=$2
+ffmpeg_archive=$3
+zlib_archive=$4
+shift 4
+llvm_mingw_sha256=6e3342e2e0dfa56e9178f3c34b198f278bd5e603db4a759455d1439cc2230630
 
 scratch=$(mktemp -d /tmp/qkvm-ffmpeg.XXXXXX)
 trap 'rm -rf "$scratch"' EXIT
 cd "$scratch"
 mkdir -p toolchain out
-for deb in "$@"; do
-    dpkg-deb -x "$deb" toolchain
+for part in "$@"; do
+    case "$part" in
+    *.deb) dpkg-deb -x "$part" toolchain ;;
+    */llvm-mingw-20261104-msvcrt-ubuntu-22.04-x86_64.tar.xz)
+        echo "$llvm_mingw_sha256  $part" | sha256sum --check --quiet -
+        mkdir -p toolchain/llvm-mingw
+        tar -xJf "$part" -C toolchain/llvm-mingw --strip-components=1
+        ;;
+    *) echo "not a part of the toolchain: $part" >&2; exit 1 ;;
+    esac
 done
 tools=$PWD/toolchain/usr
-export PATH="$tools/bin:/usr/bin:/bin"
-export LD_LIBRARY_PATH="$tools/lib/x86_64-linux-gnu"
 unset CFLAGS CXXFLAGS LDFLAGS CPPFLAGS PKG_CONFIG_PATH
 export SOURCE_DATE_EPOCH=0
-host=x86_64-w64-mingw32
-cc=$host-gcc-win32
-# (The package's plain name for the compiler, which windres asks for as its preprocessor, is made by dpkg when it
-# installs; unpacked, it is made here.)
-ln -sf "$cc" "$tools/bin/$host-gcc"
-"$cc" --version | head -n 1
-nasm -v
+case "$arch" in
+x64)
+    export PATH="$tools/bin:/usr/bin:/bin"
+    export LD_LIBRARY_PATH="$tools/lib/x86_64-linux-gnu"
+    host=x86_64-w64-mingw32
+    cc=$host-gcc-win32
+    ffarch=x86_64
+    # (The package's plain name for the compiler, which windres asks for as its preprocessor, is made by dpkg when it
+    # installs; unpacked, it is made here.)
+    ln -sf "$cc" "$tools/bin/$host-gcc"
+    "$cc" --version | head -n 1
+    nasm -v
+    ;;
+arm64)
+    export PATH="$PWD/toolchain/llvm-mingw/bin:$tools/bin:/usr/bin:/bin"
+    host=aarch64-w64-mingw32
+    cc=$host-clang
+    ffarch=aarch64
+    said=$("$cc" --version)
+    echo "${said%%$'\n'*}"
+    case "$said" in
+    *"clang version 23.1.5"*) ;;
+    *) echo 'not the pinned llvm-mingw' >&2; exit 1 ;;
+    esac
+    ;;
+*) echo "no architecture $arch" >&2; exit 1 ;;
+esac
 make --version | head -n 1
 
 mkdir zlib ffmpeg
@@ -51,7 +86,7 @@ tar -xJf "$ffmpeg_archive" -C ffmpeg --strip-components=1
 cd ffmpeg
 ./configure \
     --prefix=/ffmpeg \
-    --target-os=mingw32 --arch=x86_64 --enable-cross-compile --cross-prefix=$host- --cc="$cc" \
+    --target-os=mingw32 --arch=$ffarch --enable-cross-compile --cross-prefix=$host- --cc="$cc" \
     --host-cc="$cc" \
     --pkg-config=false \
     --enable-shared --disable-static \
@@ -71,6 +106,12 @@ cp ../zlib/LICENSE "$scratch/out/ffmpeg/zlib-LICENSE.txt"
 # The export lists Microsoft's lib tool makes the import libraries from.
 mkdir -p "$scratch/out/def"
 cp libavcodec/avcodec-*.def libavutil/avutil-*.def "$scratch/out/def/"
+# What configure found of the ARM64 features (ARCH_AARCH64, HAVE_NEON and the rest), for build_ffmpeg.ps1.
+if [ "$arch" = arm64 ]; then
+    grep -E '^#define (ARCH_AARCH64|HAVE_(NEON|ARMV8|VFP|ARM_CRC|DOTPROD|I8MM|SVE|SVE2|INLINE_ASM)(_EXTERNAL|_INLINE)?) ' config.h \
+        > "$scratch/out/features.txt"
+    cat "$scratch/out/features.txt"
+fi
 # What each DLL needs of Windows (none of the toolchain's own DLLs may be among them).
 for dll in "$scratch"/out/ffmpeg/bin/*.dll; do
     echo "$(basename "$dll"): $($host-objdump -p "$dll" | sed -n 's/^\s*DLL Name: //p' | tr '\n' ' ')"

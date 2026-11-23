@@ -166,6 +166,10 @@ private:
     {
         KvmAdding::Pace pace = quick();
         pace.driver.connectWithinMs = 5000;
+        // (And as long to be quiet: Qt's quiet runs from the asking on, through the handshake, as the program's own
+        // times have it, kvm_times.h; behind 1.5 s the room above was none. The cause of test_kvm_editing's probe that
+        // told a slow handshake as "unreachable", not seen failing here yet.)
+        pace.driver.quietMs = std::max(pace.driver.quietMs, pace.driver.connectWithinMs);
         return pace;
     }
 
@@ -262,10 +266,14 @@ private slots:
     void everyFamilyASavedKvmMayBeOfIsOneTheAskingFinds()
     {
         // The two lists go together: a family a saved KVM may be of is one the asking can find it to
-        // be, and a word that is no such family is none it finds.
-        for (const QString& family : {u"kvmd"_s, u"jetkvm"_s, u"redfish"_s, u"amt"_s, u"KVMD"_s, u""_s, u"vnc"_s}) {
+        // be, and a word that is no such family is none it finds. But a VNC server's (desktop 0.2.0), which is
+        // asked nothing beside its own connection, as the web asks none: its RFB greeting is its asking
+        // (LocalWall::ask).
+        for (const QString& family : {u"kvmd"_s, u"jetkvm"_s, u"redfish"_s, u"amt"_s, u"KVMD"_s, u""_s}) {
             QCOMPARE(core::kvm::foundAs(family).has_value(), core::OwnKvm::namesAFamily(family));
         }
+        QVERIFY(core::OwnKvm::namesAFamily(u"vnc"_s));
+        QVERIFY(!core::kvm::foundAs(u"vnc"_s).has_value());
         QCOMPARE(core::kvm::foundAs(u"kvmd"_s), std::optional<core::KvmProbe::Kind>(core::KvmProbe::Kind::Kvmd));
         QCOMPARE(core::kvm::foundAs(u"jetkvm"_s), std::optional<core::KvmProbe::Kind>(core::KvmProbe::Kind::JetKvm));
         QCOMPARE(core::kvm::foundAs(u"redfish"_s), std::optional<core::KvmProbe::Kind>(core::KvmProbe::Kind::Redfish));
@@ -2266,7 +2274,8 @@ private slots:
         keptEncrypted.password = u"Kept-Zq7-two"_s;
         const MadeUpKvm refusing(tls("second"));
         const StandIn page(asAPage);
-        const StandIn controller(asAController);
+        StandIn controller(asAController);
+        controller.keepsLines = true; // (its sign-in goes only on the line its root was read on: outside review, 5.4)
         const core::testing::NobodyThere nobody;
         JetKvmByHand jetKept;
         jetKept.password = u"Kept-Zq7-jet"_s;
@@ -2310,7 +2319,7 @@ private slots:
         }
         // And to what was never signed in to, nothing of it went. (The controller was signed in to once, with the
         // password typed for it, in its sign-in's body alone: never in a path, a cookie or an Authorization.)
-        for (const StandIn* stand : {&page, &controller}) {
+        for (const StandIn* stand : {&page, &std::as_const(controller)}) {
             for (const Asked& one : std::as_const(stand->asked)) {
                 const bool itsSignIn = stand == &controller && one.method == "POST" &&
                                        one.path == "/redfish/v1/SessionService/Sessions" &&

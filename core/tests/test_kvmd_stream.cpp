@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <utility>
 
@@ -26,10 +27,14 @@ using core::KvmdDevice;
 using core::KvmdStream;
 using core::testing::Answered;
 using core::testing::Asked;
+using core::testing::askedAgainUntil;
 using core::testing::jpeg;
 using core::testing::MadeUpKvm;
+using core::testing::oneLineAWaking;
 using core::testing::refusal;
 using core::testing::StandIn;
+using core::testing::Waited;
+using core::testing::Woke;
 
 Q_DECLARE_METATYPE(qkvm::core::testing::Answered)
 
@@ -54,6 +59,33 @@ public:
 private:
     QSslConfiguration m_before;
 };
+
+// A driver whose line that wakes the video a case asks for again where its first try was not let in, as the next
+// asking would (askedAgainUntil): a stream asked for again would be one more asking of the stream, and a picture would
+// say the video is awake. (What the stream began itself is held as it ends: keptAtItsEnd.)
+struct Woken : core::KvmdDevice {
+    using KvmdDevice::keepAwake;
+    using KvmdDevice::KvmdDevice;
+};
+// The line made again so (askedAgainUntil's `again`): it may have begun one where the driver kept none.
+core::testing::Again aLineAskedFor(Woken& device)
+{
+    return [&device](const std::function<void(Woke)>& answered) {
+        const bool kept = device.isKeptAwake();
+        device.keepAwake();
+        answered(kept ? Woke::nothing : Woke::maybe);
+    };
+}
+// Whether the driver kept a line that wakes the video as the stream ended, read as it ended: a stream that ends "Video
+// stream is idle - waking it up" has the driver begin one, or keep the one it began at its start (resting()). What a
+// case asks again after it would hide a stream that began none.
+std::shared_ptr<bool> keptAtItsEnd(const KvmdStream& stream, const KvmdDevice& device)
+{
+    auto kept = std::make_shared<bool>(false);
+    QObject::connect(
+        &stream, &KvmdStream::ended, &stream, [kept, &device] { *kept = device.isKeptAwake(); }, Qt::DirectConnection);
+    return kept;
+}
 
 // Where a KVM has its stream of pictures.
 QByteArray place()
@@ -763,18 +795,32 @@ private slots:
         QFETCH(QByteArray, body);
         MadeUpKvm kvm;
         kvm.instead.insert(place(), Answered(status, body, "text/html"_ba));
-        KvmdDevice device(kvm.where(), u"secret"_s, awakeForLong());
+        // (Its line is neither let rest nor taken for one that ended without a word within the case: the second asking
+        // finds the line the first woke, kept, and begins none.)
+        KvmdDevice::Pace pace = awakeForLong();
+        pace.restAfterMs = 60'000;
+        pace.quietMs = 60'000;
+        Woken device(kvm.where(), u"secret"_s, pace);
+        int wakings = 0;
         for (int time = 1; time <= 2; ++time) {
             const std::unique_ptr<KvmdStream> stream = device.watch();
             const Heard heard(stream.get());
+            const std::shared_ptr<bool> kept = keptAtItsEnd(*stream, device);
             QTRY_COMPARE(heard.ended.size(), 1);
             QCOMPARE(heard.code(), u"no_stream"_s);
             QCOMPARE(heard.message(), u"Video stream is idle - waking it up"_s);
             QVERIFY(heard.pictures.isEmpty());
             QCOMPARE(kvm.asked(place()), time);
-            // The line that wakes it is asked for, once.
-            QTRY_VERIFY(kvm.stand->live.isConnected());
-            QCOMPARE(kvm.stand->live.lines, 1);
+            // The line that wakes it is kept as that is said...
+            QVERIFY2(*kept, "It said the video is being woken, and kept no line for it.");
+            // ...and asked for once: none for the second asking (made_up_kvm.h's oneLineAWaking; made again where its
+            // first try was not let in, askedAgainUntil, one more for each asking again that may have begun one).
+            const Waited woken = askedAgainUntil([&kvm] { return kvm.stand->live.isConnected(); },
+                                                 [&device] { return device.isKeptAwake(); }, aLineAskedFor(device));
+            QVERIFY2(woken, qPrintable(woken.why()));
+            wakings += time == 1 ? woken.wakings : woken.wakings - 1;
+            const QString one = oneLineAWaking(kvm.stand->live.lines, wakings);
+            QVERIFY2(one.isEmpty(), qPrintable(one));
         }
         // A picture of it comes: its video is awake. The same page then says that there is no
         // such stream here.
@@ -1783,18 +1829,30 @@ private slots:
         kvm.first[place()].append(resting);
         const QByteArray picture = jpeg(1920, 1080);
         kvm.instead.insert(place(), streaming(part(picture)));
-        KvmdDevice device(kvm.where(), u"secret"_s, quick());
+        // (Its line is neither let rest nor taken for one that ended without a word within the case: the stream asked
+        // again finds the line the first woke, kept, and begins none.)
+        KvmdDevice::Pace pace = quick();
+        pace.restAfterMs = 60'000;
+        pace.quietMs = 60'000;
+        Woken device(kvm.where(), u"secret"_s, pace);
         const std::unique_ptr<KvmdStream> stream = device.watch();
         const Heard heard(stream.get());
+        const std::shared_ptr<bool> kept = keptAtItsEnd(*stream, device);
         QTRY_COMPARE(heard.ended.size(), 1);
         QCOMPARE(heard.code(), u"no_stream"_s);
         QCOMPARE(heard.message(), u"Video stream is idle - waking it up"_s);
-        QTRY_VERIFY(kvm.stand->live.isConnected());
-        // Asked again, the pictures come.
+        QVERIFY2(*kept, "It said the video is being woken, and kept no line for it.");
+        // (Made again where its first try was not let in: askedAgainUntil.)
+        const Waited woken = askedAgainUntil([&kvm] { return kvm.stand->live.isConnected(); },
+                                             [&device] { return device.isKeptAwake(); }, aLineAskedFor(device));
+        QVERIFY2(woken, qPrintable(woken.why()));
+        // Asked again, the pictures come: one line for the waking, and none for the stream asked again
+        // (made_up_kvm.h's oneLineAWaking: one more for each asking again that may have begun one).
         const std::unique_ptr<KvmdStream> next = device.watch();
         const Heard again(next.get());
         QTRY_COMPARE(again.pictures.size(), 1);
-        QCOMPARE(kvm.stand->live.lines, 1);
+        const QString one = oneLineAWaking(kvm.stand->live.lines, woken.wakings);
+        QVERIFY2(one.isEmpty(), qPrintable(one));
     }
 };
 

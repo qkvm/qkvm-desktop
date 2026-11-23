@@ -187,7 +187,7 @@ base::Error invalid(const QString& message)
 
 } // namespace
 
-base::Result<Report> combination(const QString& keys, const QString& whose)
+base::Result<Report> combination(const QString& keys, const QString& whose, const QString& noSuchKey)
 {
     // (The rule kvmd::callFor holds an action's keys to, and the web's KEYS, as a whole match: a line feed after it
     // is no part of a name.)
@@ -199,7 +199,7 @@ base::Result<Report> combination(const QString& keys, const QString& whose)
     for (const QStringView name : QStringView(keys).split(u',')) {
         const Named* key = named(name);
         if (key == nullptr) {
-            return invalid(u"%1 has no %2 key"_s.arg(whose, name));
+            return invalid(noSuchKey.isEmpty() ? u"%1 has no %2 key"_s.arg(whose, name) : noSuchKey.arg(name));
         }
         if (key->modifier != 0) {
             report.modifiers |= key->modifier;

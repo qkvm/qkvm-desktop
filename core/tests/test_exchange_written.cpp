@@ -423,6 +423,98 @@ private slots:
         QCOMPARE(QString::fromLatin1(file.value()), QString::fromLatin1(expected));
     }
 
+    // Review cx3-2, M1: a wall's two guests of one Proxmox (one address, two numbers there) are written into a file,
+    // sealed and plain, each with its node and number in its url as the web keeps a guest, and read back both, each at
+    // its own place.
+    void aWallsTwoGuestsOfOneProxmoxAreWrittenAndReadBackBoth()
+    {
+        Device web = deviceAt(u"https://192.168.1.50:8006"_s);
+        web.name = u"web"_s;
+        web.user = u"wall@pve!qkvm"_s;
+        web.password = u"0b9e4f2a-5c1d-4e8f-9a3b-7d6c5e4f3a2b"_s;
+        web.kind = u"proxmox"_s;
+        web.node = u"pve1"_s;
+        web.vmid = 100;
+        web.machine = u"proxmox:"_s + QString(32, u'a');
+        Device db = web;
+        db.name = u"db"_s;
+        db.vmid = 101;
+        db.machine = u"proxmox:"_s + QString(32, u'b');
+        Content content;
+        content.sealed = true;
+        content.devices = QList<Device>{web, db};
+        Content plain = content;
+        plain.sealed = false;
+        web.password.clear();
+        db.password.clear();
+        plain.devices = QList<Device>{web, db};
+        WatchedWork work;
+        for (const bool sealed : {true, false}) {
+            const Content& wanted = sealed ? content : plain;
+            const base::Result<QByteArray> file = written(wanted, sealed ? thePassphrase() : QString(), work);
+            QCOMPARE(saidOf(file), u"read"_s);
+            const base::Result<Content> read = core::exchange::read(file.value(), sealed ? thePassphrase() : QString());
+            QCOMPARE(saidOf(read), u"read"_s);
+            QCOMPARE(read.value().leftOut, QStringList());
+            QCOMPARE(read.value().devices, wanted.devices);
+            QCOMPARE(devicesIn(read.value()).value(0).place.counted(), qsizetype{1});
+            QCOMPARE(devicesIn(read.value()).value(1).place.counted(), qsizetype{2});
+            if (!sealed) {
+                QVERIFY(file.value().contains("\"url\": \"https://192.168.1.50:8006/nodes/pve1/qemu/100\""));
+                QVERIFY(file.value().contains("\"url\": \"https://192.168.1.50:8006/nodes/pve1/qemu/101\""));
+            }
+        }
+    }
+
+    // Review cx3-3, M1: a wall's guest of a Proxmox at 443 (added as "pve.example:443", a Proxmox behind a proxy; kept
+    // as every address at 443 is, with no port written) is written into a file, sealed and plain, as the web writes
+    // such a guest (its url with no port), and read back whole beside a guest of a Proxmox at 8006 and a KVM: nothing
+    // of the wall is refused for it, and each is where it was.
+    void aWallsGuestOfAProxmoxAt443IsWrittenAndReadBackWhole()
+    {
+        Device behind = deviceAt(u"https://pve.example"_s);
+        behind.name = u"web"_s;
+        behind.user = u"wall@pve!qkvm"_s;
+        behind.password = u"0b9e4f2a-5c1d-4e8f-9a3b-7d6c5e4f3a2b"_s;
+        behind.kind = u"proxmox"_s;
+        behind.tls = u"system"_s;
+        behind.node = u"pve1"_s;
+        behind.vmid = 100;
+        behind.machine = u"proxmox:"_s + QString(32, u'a');
+        Device at8006 = behind;
+        at8006.address = u"https://192.168.1.50:8006"_s;
+        at8006.name = u"db"_s;
+        at8006.tls = u"pinned"_s;
+        at8006.password = u"11111111-2222-3333-4444-555555555555"_s;
+        at8006.machine = u"proxmox:"_s + QString(32, u'b');
+        Device kvm = deviceAt(u"https://192.168.1.21"_s);
+        kvm.password = u"made-up-password-1"_s;
+        Content content;
+        content.sealed = true;
+        content.devices = QList<Device>{behind, at8006, kvm};
+        Content plain = content;
+        plain.sealed = false;
+        behind.password.clear();
+        at8006.password.clear();
+        kvm.password.clear();
+        plain.devices = QList<Device>{behind, at8006, kvm};
+        WatchedWork work;
+        for (const bool sealed : {true, false}) {
+            const Content& wanted = sealed ? content : plain;
+            const base::Result<QByteArray> file = written(wanted, sealed ? thePassphrase() : QString(), work);
+            QCOMPARE(saidOf(file), u"read"_s);
+            const base::Result<Content> read = core::exchange::read(file.value(), sealed ? thePassphrase() : QString());
+            QCOMPARE(saidOf(read), u"read"_s);
+            QCOMPARE(read.value().leftOut, QStringList());
+            QCOMPARE(read.value().devices, wanted.devices);
+            QCOMPARE(devicesIn(read.value()).value(0).address, u"https://pve.example"_s);
+            if (!sealed) {
+                QVERIFY(file.value().contains("\"url\": \"https://pve.example/nodes/pve1/qemu/100\""));
+                QVERIFY(file.value().contains("\"url\": \"https://192.168.1.50:8006/nodes/pve1/qemu/100\""));
+            }
+        }
+    }
+
     void aPlainFileHoldsNoSecretAndIsReadWithoutAPassphrase()
     {
         WatchedWork work;

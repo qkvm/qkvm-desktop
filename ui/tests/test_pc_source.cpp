@@ -1,6 +1,9 @@
 #include <functional>
+#include <optional>
 #include <utility>
 
+#include <QByteArray>
+#include <QHash>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -10,9 +13,11 @@
 #include <qkvm/core/wall_feed.h>
 
 #include "memory_secrets.h"
+#include "own_kvms_view.h"
 #include "pc_source.h"
 #include "server_session.h"
 #include "session_view.h"
+#include "stand_in.h"
 #include "wall_key.h"
 #include "wall_model.h"
 #include "wall_view.h"
@@ -187,7 +192,9 @@ private slots:
         core::Settings settings(folder.filePath(u"settings.json"_s));
         MemorySecrets secrets;
         core::LocalWall own(settings, secrets);
-        const ui::PcSource pc(own, 60'000);
+        ui::PcSource pc(own, 60'000);
+        // Its kvmd KVMs' virtual media are had through the wall itself (GAPS A2).
+        QCOMPARE(pc.mediaPlace(), static_cast<core::MediaPlace*>(&own));
         // Nothing on the wall: nothing travels anywhere. One over HTTPS: encrypted. One over plain
         // HTTP besides: not, whether its wall is shown or not, for as long as that one is on it.
         QVERIFY(pc.isEncrypted());
@@ -197,6 +204,127 @@ private slots:
         QVERIFY(!pc.isEncrypted());
         QVERIFY(own.remove(plain).ok());
         QVERIFY(pc.isEncrypted());
+    }
+
+    void aVncServerInTheClearIsSaidOnTheBarAsAKvmOverPlainHttpIs()
+    {
+        // Outside review c9a-4, M1: the bar of this PC's wall said nothing of a VNC server over vnc://, where its card
+        // writes vnc:// before its address and its row in the settings says it is unencrypted: what is seen and typed
+        // there can be read on the way, and its VNC answer worked out from what goes. It is said as of a KVM over plain
+        // HTTP: with a VNC server in the clear alone, a KVM alone, and both; and of neither over vncs:// or HTTPS. Its
+        // card and its row say the same of every KVM of the wall, by the wall's one rule (OwnKvm::isInTheClear). A
+        // Proxmox guest, whose API is spoken to over HTTPS and its console by wss:// at that address, is of the
+        // encrypted beside each, and said of by none (after the rebase of the Proxmox VE guests).
+        QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        core::Settings sessionsOwn(folder.filePath(u"session.json"_s));
+        MemorySecrets secrets;
+        core::LocalWall own(settings, secrets);
+        ui::PcSource pc(own, 60'000);
+        // And the bar as the program has it, of the wall shown in its window.
+        ui::SessionView view;
+        ui::WallView wall;
+        ui::ServerSession session(view, wall, sessionsOwn, secrets, 100);
+        session.useOwnWall(own);
+        session.begin();
+        QVERIFY(view.ownWall());
+        QTRY_VERIFY(view.encrypted());
+        ui::OwnKvmsView rows;
+        rows.use(&own);
+        // (At ports where nothing listens, which Windows gives nobody else meanwhile.)
+        const core::testing::NobodyThere secureVncsPlace;
+        const core::testing::NobodyThere plainVncsPlace;
+        const core::testing::NobodyThere secureKvmsPlace;
+        const core::testing::NobodyThere plainKvmsPlace;
+        const core::testing::NobodyThere guestsPlace;
+        const auto added = [&own](core::OwnKvm kvm, const QString& kind) {
+            kvm.kind = kind;
+            const base::Result<QString> id = own.add(kvm, u"secret"_s);
+            return id.ok() ? id.value() : QString();
+        };
+        // Of every KVM of the wall, in its order: those its card says are spoken to in the clear, and those its row in
+        // the settings says so of.
+        const auto cardsInTheClear = [&own] {
+            std::optional<base::Result<core::Wall>> came;
+            own.askWall([&came](base::Result<core::Wall> answer) { came = std::move(answer); });
+            static_cast<void>(QTest::qWaitFor([&came] { return came.has_value(); }, 5000));
+            QStringList said;
+            for (const core::Machine& machine : came && came->ok() ? came->value().machines : QList<core::Machine>()) {
+                if (machine.plain) {
+                    said.append(machine.name);
+                }
+            }
+            return said;
+        };
+        const auto rowsInTheClear = [&rows] {
+            rows.begin();
+            const QHash<int, QByteArray> roles = rows.roleNames();
+            QStringList said;
+            for (int row = 0; row < rows.rowCount(); ++row) {
+                if (rows.index(row, 0).data(roles.key(QByteArray("way"))).toString() == u"plain"_s) {
+                    said.append(rows.index(row, 0).data(roles.key(QByteArray("name"))).toString());
+                }
+            }
+            rows.end();
+            return said;
+        };
+
+        // Over vncs:// and HTTPS: encrypted, and said of none.
+        const QString secureVnc =
+            added(at(u"vncs://127.0.0.1:%1"_s.arg(secureVncsPlace.port()), u"Secure VNC"_s), u"vnc"_s);
+        const QString secureKvm =
+            added(at(u"https://127.0.0.1:%1"_s.arg(secureKvmsPlace.port()), u"Secure KVM"_s), u"kvmd"_s);
+        // And a Proxmox guest, added as its box adds one (its token's ID as its user, its secret kept).
+        core::OwnKvm guest = at(u"https://127.0.0.1:%1"_s.arg(guestsPlace.port()), u"Guest"_s);
+        guest.kind = u"proxmox"_s;
+        guest.node = u"pve1"_s;
+        guest.vmid = 100;
+        guest.user = u"qkvm@pve!wall"_s;
+        const base::Result<QString> aGuest = own.add(guest, u"6c1d0e2f-8a3b-4c5d-9e7f-0a1b2c3d4e5f"_s);
+        QVERIFY(aGuest.ok());
+        QCOMPARE(own.kvms().size(), 3);
+        QVERIFY(!secureVnc.isEmpty() && !secureKvm.isEmpty());
+        QVERIFY(pc.isEncrypted());
+        QVERIFY(view.encrypted());
+        QCOMPARE(cardsInTheClear(), QStringList());
+        QCOMPARE(rowsInTheClear(), QStringList());
+        // A VNC server over vnc://, alone in the clear.
+        const QString plainVnc =
+            added(at(u"vnc://127.0.0.1:%1"_s.arg(plainVncsPlace.port()), u"Plain VNC"_s), u"vnc"_s);
+        QVERIFY(!plainVnc.isEmpty());
+        QVERIFY(!pc.isEncrypted());
+        QTRY_VERIFY(!view.encrypted());
+        QCOMPARE(cardsInTheClear(), QStringList{u"Plain VNC"_s});
+        QCOMPARE(rowsInTheClear(), QStringList{u"Plain VNC"_s});
+        // And a KVM over plain HTTP beside it: both.
+        const QString plainKvm =
+            added(at(u"http://127.0.0.1:%1"_s.arg(plainKvmsPlace.port()), u"Plain KVM"_s), u"kvmd"_s);
+        QVERIFY(!plainKvm.isEmpty());
+        QVERIFY(!pc.isEncrypted());
+        QCOMPARE(cardsInTheClear(), (QStringList{u"Plain VNC"_s, u"Plain KVM"_s}));
+        QCOMPARE(rowsInTheClear(), (QStringList{u"Plain VNC"_s, u"Plain KVM"_s}));
+        // The KVM alone.
+        QVERIFY(own.remove(plainVnc).ok());
+        QVERIFY(!pc.isEncrypted());
+        QTest::qWait(300);
+        QVERIFY(!view.encrypted());
+        QCOMPARE(cardsInTheClear(), QStringList{u"Plain KVM"_s});
+        QCOMPARE(rowsInTheClear(), QStringList{u"Plain KVM"_s});
+        // And none: encrypted again.
+        QVERIFY(own.remove(plainKvm).ok());
+        QVERIFY(pc.isEncrypted());
+        QTRY_VERIFY(view.encrypted());
+        QCOMPARE(cardsInTheClear(), QStringList());
+        QCOMPARE(rowsInTheClear(), QStringList());
+        // (Whatever else an address may come to have, only https:// and vncs:// are encrypted, as the web's row in its
+        // settings has it: /^(https|vncs):/.)
+        for (const QString& address : {u"https://box"_s, u"vncs://box"_s}) {
+            QVERIFY2(!at(address, {}).isInTheClear(), qPrintable(address));
+        }
+        QVERIFY(!guest.isInTheClear());
+        for (const QString& address : {u"http://box"_s, u"vnc://box"_s, u"ftp://box"_s, u"box"_s, QString()}) {
+            QVERIFY2(at(address, {}).isInTheClear(), qPrintable(address));
+        }
     }
 
     void aSecondWallOfThisPcIsNotTaken()

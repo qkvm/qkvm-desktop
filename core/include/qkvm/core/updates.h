@@ -70,6 +70,9 @@ public:
     void download();
     void cancel();
     UpdateKind kind() const { return m_channel.kind; }
+    // An x64 copy on Windows on Arm, which Windows runs under its emulation: what it offers is the ARM64 release, of
+    // its own version too (the owner, 2026-11-19: a person ends up with the program of the PC's own kind).
+    bool offersThePcsOwnKind() const { return m_channel.machine != m_channel.program; }
     // An MSIX copy only: verifies the file again immediately before handing it to the installer. Does not quit
     // the program. The UI must first check all windows for control or unfinished work.
     bool openInstaller(const std::function<bool(const QString&)>& open);

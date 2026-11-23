@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <utility>
@@ -12,7 +13,7 @@
 
 #include <qkvm/bmc/aspeed.h>
 #include <qkvm/core/live.h>
-#include <qkvm/core/server_screen.h>
+#include <qkvm/core/server_console.h>
 #include <qkvm/core/typed_keys.h>
 
 namespace qkvm::core {
@@ -59,7 +60,7 @@ public:
     };
 
     // `screen` outlives this, or is closed before it goes.
-    ServerLive(ServerScreen* screen, Limits limits, QObject* parent = nullptr);
+    ServerLive(ServerConsole* screen, Limits limits, QObject* parent = nullptr);
     ~ServerLive() override;
     ServerLive(const ServerLive&) = delete;
     ServerLive& operator=(const ServerLive&) = delete;
@@ -68,6 +69,11 @@ public:
 
     // What the screen showed (its Shown): the picture as it stands and what the frame changed.
     void shown(const bmc::aspeed::Picture& picture, std::span<const bmc::aspeed::Rect> changed);
+    // Keyboard and mouse are not given while this says why (whoever made this knows: a machine being acted on, as the
+    // web's live lines are refused them while theirs is, `lines.busy`), asked as the screen gives a turn, the last
+    // moment before they would be this one's: a no for the asking, in those words. None: given whenever the screen
+    // gives them.
+    void refuseControlWhile(std::function<std::optional<base::Error>()> why) { m_refused = std::move(why); }
 
     Pointer pointerMode() const override { return Pointer::Absolute; }
     bool isOpen() const override;
@@ -97,9 +103,9 @@ private:
     // One word for an asking or a giving back, a turn of the loop later.
     void tell(bool on, const QString& code, const QString& message);
     // What the screen answered an asking for keyboard and mouse, decided (a turn of the loop after it came).
-    void answered(const base::Result<int>& turn);
+    void answered(const base::Result<ServerConsole::Turn>& turn);
 
-    QPointer<ServerScreen> m_screen;
+    QPointer<ServerConsole> m_screen;
     Limits m_limits;
     QTimer m_looks;
     bool m_closed = false;
@@ -107,9 +113,10 @@ private:
     std::pair<int, int> m_size;
     quint32 m_counter = 0;
     // Keyboard and mouse: the turn held, whether one is being asked for, and what is down there by this one's word.
-    std::optional<int> m_turn;
+    std::optional<ServerConsole::Turn> m_turn;
     bool m_asking = false;
     bool m_givenBackWhileAsking = false;
+    std::function<std::optional<base::Error>()> m_refused;
     // Something this one had down was let go of, and the session it was let go of in has not ended: what the screen
     // says may have stayed down is this one's to pass on.
     bool m_lettingGo = false;

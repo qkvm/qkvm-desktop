@@ -57,7 +57,9 @@ QtObject {
     readonly property string lostContactAt: qsTr("Lost contact with qKVM at %1. Trying again…")
     readonly property string notEncryptedShort: qsTr("Not encrypted")
     readonly property string notEncryptedHint: qsTr("What is seen and typed here goes to this qKVM unencrypted: its address is not an https:// one.")
-    readonly property string notEncryptedHintOwnWall: qsTr("A KVM of this wall is spoken to over plain HTTP: its password, and what is seen and typed there, can be read on the way. Its card says which, with http:// before its address.")
+    // (Of a KVM over plain HTTP, and of a VNC server over vnc://, whose VNC answer is worked out from what goes: outside
+    // review c9a-4, M1.)
+    readonly property string notEncryptedHintOwnWall: qsTr("A KVM or VNC server of this wall is spoken to unencrypted: what is seen and typed there can be read on the way, and its password read or worked out from what goes. Its card says which, with http:// or vnc:// before its address.")
     readonly property string restartedLocked: qsTr("This qKVM was restarted locked, and reaches no machine until somebody has signed in.")
     readonly property string tryingAgainByItsLink: qsTr("This screen opens by its display link, and asks again by itself until its qKVM answers.")
 
@@ -136,20 +138,39 @@ QtObject {
     readonly property string addAKvm: qsTr("Add a KVM")
     readonly property string addAKvmToThisPc: qsTr("Add a KVM to this PC's wall")
     readonly property string address: qsTr("Address")
+    // What the adding box adds, as the page's form chooses it ("What to add"): KVMs and servers, VNC servers, or
+    // virtual machines on Proxmox VE.
+    readonly property string whatToAdd: qsTr("What to add")
+    readonly property string kvmsAndServers: qsTr("KVMs and servers (told apart automatically)")
+    readonly property string vncServers: qsTr("VNC servers")
+    readonly property string proxmoxGuests: qsTr("Virtual machines on Proxmox VE")
+    readonly property string addressOfAVncServerHint: qsTr("IP address or name of the VNC server, with its port after a colon where it is not 5900 (192.168.1.20:5901). The password below is the VNC password; the user name is not used.")
     readonly property string addressOfAKvmHint: qsTr("IP address or name of the KVM, or of a server's management controller (BMC). GL.iNet Comet, PiKVM, JetKVM and Redfish controllers are spoken to by this program itself.")
     readonly property string none: qsTr("None")
     readonly property string groupHint: qsTr("Optional: a rack, a room, a customer. The wall can show one group at a time.")
     readonly property string itsCertificateIsRemembered: qsTr("It is contacted to check the login. Over HTTPS its certificate is remembered, so qKVM will refuse to send the password to anything else at that address.")
     readonly property string rememberedSha256: qsTr("Remembered SHA-256: %1")
     readonly property string checkAndAdd: qsTr("Check and add")
+    // Virtual machines on Proxmox VE (wave 2), in the page's words (app.js addDevicesForm, fromProxmox).
+    readonly property string addressOfAProxmoxHint: qsTr("The address of a Proxmox VE host (its port after a colon where it is not 8006). The virtual machines the API token may see are listed to pick from; to add one at once, put its ID after the address (192.168.1.5/100).")
+    readonly property string apiTokenId: qsTr("API token ID")
+    readonly property string apiTokenSecret: qsTr("API token secret")
+    readonly property string listItsGuests: qsTr("List its virtual machines")
+    readonly property string addTheTicked: qsTr("Add the ticked ones")
+    readonly property string guestsToTick: qsTr("%1 virtual machines the token may see. Tick the ones to put on the wall:")
+    readonly property string guestsListedHere: qsTr("List its virtual machines: the ones the token may see come here, to tick.")
+    readonly property string noGuestSeen: qsTr("The token may see no virtual machine there. It needs VM.Audit on them (on their pool, say).")
+    readonly property string containersNotListed: qsTr("%1 containers are not listed: the wall shows virtual machines only.")
     readonly property string checking: qsTr("Checking…")
     readonly property string done: qsTr("Done")
     // The box that changes a KVM of this PC's wall, and its look at the KVM's certificate.
     readonly property string editNamed: qsTr("Edit %1")
     readonly property string name: qsTr("Name")
     readonly property string typeOfAKvm: qsTr("Type: GL.iNet Comet / PiKVM")
+    readonly property string typeOfAGuest: qsTr("Type: Virtual machine (Proxmox VE)")
     readonly property string typeOfAJetKvm: qsTr("Type: JetKVM")
     readonly property string typeOfAServer: qsTr("Type: Server (Redfish)")
+    readonly property string typeOfAVncServer: qsTr("Type: VNC server")
     readonly property string unchanged: qsTr("Unchanged")
     readonly property string leaveEmptyToKeep: qsTr("Leave empty to keep the saved one.")
     // A KVM's screen watches, as the page's Edit box has them (app.js).
@@ -162,13 +183,18 @@ QtObject {
     readonly property string answersOverHttpsNow: qsTr("It answers over HTTPS now.")
     // Where a JetKVM says by its number that it is one of the wall already, as on the page.
     readonly property string keepBoth: qsTr("Keep both")
+    // A KVM whose plain address sends everybody on to HTTPS: the address it names, offered (the page's words).
+    readonly property string useInstead: qsTr("Use %1")
     readonly property string spokenToOverPlainHttp: qsTr("This KVM is spoken to over plain HTTP: its password, and what is seen and typed there, can be read on the way.")
+    // (And a VNC server's over vnc://, which is no HTTP: VNC authentication sends no password, but an answer it can be worked out from.)
+    readonly property string vncSpokenToInTheClear: qsTr("This VNC server is spoken to unencrypted (vnc://): what is seen and typed there can be read on the way, and its password worked out from what goes.")
     readonly property string remove: qsTr("Remove")
     readonly property string reviewCertificate: qsTr("Review certificate")
     readonly property string save: qsTr("Save")
     readonly property string savedNamed: qsTr("%1 saved")
     readonly property string removeNamed: qsTr("Remove %1?")
     readonly property string whatRemovingDoes: qsTr("The KVM disappears from the wall and its saved password is erased. The KVM itself is not touched.")
+    readonly property string removingLeavesTheBootOrder: qsTr("qKVM changed this guest's boot order to %1 to start it from an image, and has not put back the order it had, %2. Removing the card forgets that order: the guest keeps the one it has now. To have it put back, take the image out first; or set it on Proxmox (Options, Boot Order).")
     readonly property string certificateOf: qsTr("%1 certificate")
     readonly property string rememberedByQkvm: qsTr("Remembered by qKVM:")
     readonly property string noneYet: qsTr("none yet")
@@ -181,14 +207,27 @@ QtObject {
     readonly property string changedThen: qsTr("Changed. %1")
     readonly property string noCertificateToCompareWith: qsTr("This KVM is known by no certificate yet, so there is none here to compare this one with: compare it with what the KVM's own page shows. Saying yes sends the password to what shows it, and the KVM is known by it from then on.")
     readonly property string knownByWindowsWordSoNoneToCompareWith: qsTr("This KVM is known by Windows' word and by no certificate of its own, so there is none here to compare this one with: compare it with what the KVM's own page shows. Saying yes sends the password to what shows it, and the KVM is known by this certificate from then on, and no longer by Windows' word.")
+    // (The same two of a VNC server, which has no page of its own to compare with, and whose VNC authentication sends no
+    // password: with none kept, none at all.)
+    readonly property string vncNoCertificateToCompareWith: qsTr("This VNC server is known by no certificate yet, so there is none here to compare this one with: compare it with the certificate the server was set up with. Saying yes signs in to what shows it, and the server is known by it from then on.")
+    readonly property string vncKnownByWindowsWordSoNoneToCompareWith: qsTr("This VNC server is known by Windows' word and by no certificate of its own, so there is none here to compare this one with: compare it with the certificate the server was set up with. Saying yes signs in to what shows it, and the server is known by this certificate from then on, and no longer by Windows' word.")
     readonly property string windowsTrustsWhatIsShownThere: qsTr("Windows trusts what is shown there for this name")
     readonly property string trustWindowsWord: qsTr("Trust Windows' word")
     readonly property string yesMeansWindowsWordNotItsCertificate: qsTr("Saying yes means that this KVM is known by Windows' word from then on, and no longer by its certificate.")
     readonly property string yesMeansWindowsWord: qsTr("Saying yes means that this KVM is known by Windows' word from then on.")
+    // (The same two of a VNC server: outside review c9a-4, L3.)
+    readonly property string vncYesMeansWindowsWordNotItsCertificate: qsTr("Saying yes means that this VNC server is known by Windows' word from then on, and no longer by its certificate.")
+    readonly property string vncYesMeansWindowsWord: qsTr("Saying yes means that this VNC server is known by Windows' word from then on.")
     readonly property string showsTheCertificateOf: qsTr("What answers at this address shows the certificate of %1, which is on this wall. Either that KVM answers here now, or the two were given the same certificate: then each needs one of its own before both can be on the wall.")
+    // (Where one of the two is a VNC server, behind one certificate by what it says: the road SPEC gives, review cx6-2 L2.)
+    readonly property string showsTheCertificateItSaysOf: qsTr("What answers at this address shows the certificate of %1, which is on this wall. Either that one answers here now, or the two are behind one certificate (a TLS proxy before both, or a PiKVM's VNC server and its page): then remove this card and add it again, with Keep both.")
     readonly property string oneThenAnother: qsTr("%1. %2")
     readonly property string plainHttpThereShowsNothing: qsTr("Plain HTTP at %1: nothing shows who answers there, and its password, and what is seen and typed, can be read on the way")
     readonly property string usePlainHttp: qsTr("Use plain HTTP")
+    // (The same of a VNC server going from vncs:// to vnc:// at another address, in its family's words: %1 is that
+    // address whole.)
+    readonly property string vncUnencryptedThereShowsNothing: qsTr("Unencrypted at %1: nothing shows who answers there, what is seen and typed can be read on the way, and its password worked out from what goes")
+    readonly property string useVncUnencrypted: qsTr("Use vnc:// (unencrypted)")
     readonly property string windowsWordForItsCertificate: qsTr("Windows' word for the certificate it shows")
     readonly property string afterWindowsWordNotTrusted: qsTr("Windows' word was said yes to for that address, and Windows does not trust what answers there now. It shows this certificate.")
     readonly property string afterWindowsWordAnotherTrusted: qsTr("What answers at that address is not what it was when Windows' word for it was said yes to. Windows trusts what it shows now, too.")
@@ -264,6 +303,8 @@ QtObject {
     readonly property string details: qsTr("Details")
     readonly property string toBeOpenedBeforeAnythingIsTaken: qsTr("To be opened before anything is taken.")
     readonly property string sha256OfTheCertificateTheFileNames: qsTr("SHA-256 of the certificate the file names, to compare with what the KVM's own page shows:")
+    // (Of a VNC server, which has no page of its own: outside review c9a-4, L3.)
+    readonly property string sha256OfTheCertificateTheFileNamesOfAVncServer: qsTr("SHA-256 of the certificate the file names, to compare with the certificate the server was set up with:")
     readonly property string notTakenColon: qsTr("Not taken:")
 
     // The wall.
@@ -355,10 +396,14 @@ QtObject {
     readonly property string removeOne: qsTr("Remove %1")
     readonly property string kvmdKind: qsTr("GL.iNet Comet / PiKVM")
     readonly property string jetKvmKind: qsTr("JetKVM")
+    readonly property string proxmoxGuestKind: qsTr("Virtual machine (Proxmox VE)")
     readonly property string serverControllerKind: qsTr("Server (Redfish)")
+    readonly property string vncServerKind: qsTr("VNC server")
     readonly property string knownByItsCertificate: qsTr("Known by its certificate")
     readonly property string knownByWindowsWord: qsTr("Known by Windows' word")
     readonly property string plainHttpInTheClear: qsTr("Plain HTTP: its password goes in the clear")
+    // (The page's words for a VNC server spoken to over vnc://.)
+    readonly property string plainVncUnencrypted: qsTr("Unencrypted (vnc)")
     readonly property string sameDeviceAs: qsTr("Same device as %1")
     readonly property string noPasswordSaved: qsTr("No password saved")
     // (A JetKVM out of its box runs without one: nothing is wrong with that.)
@@ -448,6 +493,7 @@ QtObject {
             "cert_mismatch": "error",
             "cert_invalid": "error",
             "plain_only": "error",
+            "https_only": "error",
             "another_machine": "error",
             "unknown_kind": "error",
             "not_set_up": "error",
@@ -457,6 +503,7 @@ QtObject {
             "console_time_up": "error",
             "no_picture": "error",
             "health": "error",
+            "power_led_unwired": "online",
             "internal": "error"
         })
     readonly property var refusals: ({
@@ -493,6 +540,7 @@ QtObject {
             "initialized": [409],
             "last_admin": [409],
             "locked": [409, 503],
+            "moved": [409],
             "no_password": [409, 502],
             "no_second_step": [409],
             "no_text": [409],
@@ -510,6 +558,7 @@ QtObject {
             "length_required": [411],
             "too_large": [413, 422],
             "another_machine": [422, 502],
+            "https_only": [422, 502],
             "damaged": [422],
             "invalid": [422],
             "name_required": [422],

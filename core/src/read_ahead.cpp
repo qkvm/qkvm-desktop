@@ -12,9 +12,12 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QFile>
+#include <QFileInfo>
 #include <QPointer>
 #include <QThread>
+#include <QTimeZone>
 
 using namespace Qt::StringLiterals;
 
@@ -56,7 +59,72 @@ QString whyNot(const QIODevice& device, const QString& otherwise)
     return said.isEmpty() || said == "Unknown error"_L1 ? otherwise : said;
 }
 
+// A file that is read only while it stays as it was when it was opened: its length, and when it was last written.
+// Looked at before every read of it, and once more after the read that reaches its end, so that every byte of it was
+// read between two looks that found it as it was. Where it changed, the read fails, and says so.
+class Unchanged final : public QFile {
+public:
+    explicit Unchanged(const QString& path) : QFile(path) {}
+    Unchanged(const Unchanged&) = delete;
+    Unchanged& operator=(const Unchanged&) = delete;
+    Unchanged(Unchanged&&) = delete;
+    Unchanged& operator=(Unchanged&&) = delete;
+    ~Unchanged() override = default;
+
+    bool openToRead()
+    {
+        if (!open(QIODevice::ReadOnly | QIODevice::Unbuffered)) {
+            return false;
+        }
+        m_length = size();
+        m_written = writtenAt();
+        return true;
+    }
+
+protected:
+    qint64 readData(char* data, qint64 most) override
+    {
+        if (changed()) {
+            return refused();
+        }
+        const qint64 got = QFile::readData(data, most);
+        if (got > 0 && pos() + got >= m_length && changed()) {
+            return refused();
+        }
+        return got;
+    }
+
+private:
+    // When it was last written, as Windows says it now: asked anew each time, never as it was kept.
+    QDateTime writtenAt() const
+    {
+        QFileInfo now(fileName());
+        now.setCaching(false);
+        return now.lastModified(QTimeZone::UTC);
+    }
+    bool changed() const { return size() != m_length || writtenAt() != m_written; }
+    qint64 refused()
+    {
+        setErrorString(u"It was changed while it was read."_s);
+        return -1;
+    }
+
+    qint64 m_length = 0;
+    QDateTime m_written;
+};
+
 } // namespace
+
+ReadAhead::Source ReadAhead::unchangedFileAt(const QString& path)
+{
+    return [path]() -> base::Result<std::unique_ptr<QIODevice>> {
+        auto file = std::make_unique<Unchanged>(path);
+        if (!file->openToRead()) {
+            return base::Error{"unreadable", file->errorString().toStdString()};
+        }
+        return std::unique_ptr<QIODevice>(std::move(file));
+    };
+}
 
 ReadAhead::Source ReadAhead::fileAt(const QString& path)
 {

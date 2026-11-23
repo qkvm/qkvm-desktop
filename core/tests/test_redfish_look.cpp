@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -274,10 +275,14 @@ private slots:
         QCOMPARE(lookedAt(device).state, u"online"_s);
         first.reset();
         const qkvm::core::Status gone = lookedAt(device);
-        QCOMPARE(gone.state, u"offline"_s);
-        QVERIFY(gone.errorCode == u"unreachable"_s || gone.errorCode == u"dropped"_s);
+        // (What it was, said where it is not what was looked for: a program run beside this one may take the port in
+        // the moment between the two controllers, and one that takes the line and says nothing would give a timeout.)
+        const QString said = u"%1, %2: %3"_s.arg(gone.state, gone.errorCode, gone.errorMessage);
+        QVERIFY2(gone.state == u"offline"_s, qPrintable(said));
+        QVERIFY2(gone.errorCode == u"unreachable"_s || gone.errorCode == u"dropped"_s, qPrintable(said));
         RedfishByHand second(RedfishByHand::Layout::Ami, {}, port);
-        QVERIFY(second.stand->isListening());
+        QVERIFY2(second.stand->isListening(),
+                 qPrintable(u"port %1 was taken in between, by another program"_s.arg(port)));
         second.beServer(aSystem, aRoot);
         QTRY_VERIFY_WITH_TIMEOUT(lookedAt(device).state == u"online"_s, 10000);
         QCOMPARE(second.logins, 1);
@@ -406,8 +411,10 @@ private slots:
     void l16WhileAPasswordWaitsItIsAskedWhetherItIsThere()
     {
         // (kvm.py:1317-1340) While a refused password waits to be offered again, nothing is asked that needs a
-        // sign-in: its root is asked, with no session, now and then, and a controller that went is said to be gone.
+        // sign-in: its root is asked, with no session, now and then, and a controller that went is said to be gone. (It
+        // closes every line after its answer: one it kept would still be answered on once it takes no new ones.)
         RedfishByHand bmc;
+        bmc.stand->closesSilently = true;
         RedfishDevice::Pace pace = quick();
         pace.refusedHoldMs = 5000;
         pace.stillThereEveryMs = 300;
@@ -751,6 +758,48 @@ private slots:
         QVERIFY(bmc.requests.contains(u"GET /redfish/v1/UpdateService/FirmwareInventory"_s));
         QTRY_COMPARE_WITH_TIMEOUT(identity.size(), 1, 5000);
         bmc.whenAsked = nullptr;
+    }
+
+    void v7AnInventoryOfTensOfThousandsIsRefusedBeforeAnyWorkOnIt()
+    {
+        // (Outside review of 0.2.0, area 5, HIGH 5.3.) A controller lists 20,000 short members of its inventory, each
+        // its own (an answer may hold some 58,000 of them in its 2 MiB): its cap of mostImages is looked at before
+        // anything is done with them. A pass that weeded out the doubles first, member by member against those before,
+        // held the interface thread (the wall's) for seconds at every identify and every ten minutes (tens of seconds
+        // here in a debug build; at 58,000, past QtTest's five minutes). Here no member of them is gone through one by
+        // one (counted: the catch holds in every build, outside review of 0.2.0's Redfish fixes, L8, where the clock's
+        // below held reliably only in a debug one), the thread is not held for longer than the stand-in's own making of
+        // the answer and the reading of the JSON, and none of them is asked for.
+        QJsonArray more;
+        for (int at = 0; at < 20'000; ++at) {
+            more.append(QJsonObject{{u"@odata.id"_s, u"/redfish/v1/a%1"_s.arg(at, 5, 10, u'0')}});
+        }
+        RedfishByHand bmc(RedfishByHand::Layout::OpenBmc);
+        bmc.managerSays = u"neither"_s;
+        bmc.inventoryMore = more;
+        RedfishDevice::Pace pace = quick();
+        const auto walked = std::make_shared<qsizetype>(0);
+        pace.inventoryWalked = [walked] { ++*walked; };
+        QElapsedTimer since;
+        since.start();
+        qint64 last = 0;
+        qint64 longest = 0;
+        QTimer ticks;
+        connect(&ticks, &QTimer::timeout, &ticks, [&] {
+            longest = std::max(longest, since.elapsed() - last);
+            last = since.elapsed();
+        });
+        ticks.start(20);
+        const QString said = firmwareSaid(bmc, pace);
+        ticks.stop();
+        longest = std::max(longest, since.elapsed() - last);
+        // (The count first: where its members are gone through, the look may also come too late, and the version said
+        // be another; what the count says is the cause.)
+        QVERIFY2(*walked == 0, qPrintable(u"%1 members of the inventory were gone through one by one"_s.arg(*walked)));
+        QCOMPARE(said, QString());
+        QVERIFY2(longest < 2500, qPrintable(u"the interface thread was held %1 ms"_s.arg(longest)));
+        QVERIFY(bmc.requests.contains(u"GET /redfish/v1/UpdateService/FirmwareInventory"_s));
+        QVERIFY(inventoryAsked(bmc).isEmpty());
     }
 
     void r1AResourceTheAccountMayNotReadIsRefusedAndNotTheSession()

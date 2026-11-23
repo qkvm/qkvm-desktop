@@ -30,15 +30,16 @@ using qkvm::core::RedfishDevice;
 
 namespace {
 
-// Has the controller do something, and says what came of it.
+// Has the controller do something, and says what came of it. (The answers held apart from this call: a press it gave up
+// on is told what became of it after this has returned, by its driver's end at the latest; as test_redfish_setup's.)
 base::Result<qkvm::core::Done> doneBy(RedfishDevice& device, const qkvm::core::Action& what)
 {
-    QList<base::Result<qkvm::core::Done>> answers;
-    device.act(what, [&](base::Result<qkvm::core::Done> answer) { answers.append(std::move(answer)); });
-    if (!QTest::qWaitFor([&] { return !answers.isEmpty(); }, 30000)) {
+    const auto answers = std::make_shared<QList<base::Result<qkvm::core::Done>>>();
+    device.act(what, [answers](base::Result<qkvm::core::Done> answer) { answers->append(std::move(answer)); });
+    if (!QTest::qWaitFor([&answers] { return !answers->isEmpty(); }, 30000)) {
         return base::Error{"never", "The call was never answered."};
     }
-    return answers.takeFirst();
+    return answers->takeFirst();
 }
 
 qkvm::core::Action button(const char* kind)

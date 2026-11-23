@@ -88,6 +88,7 @@ std::pair<QString, QString> saidOf(DeviceLine::End why)
         return {u"timeout"_s, u"The controller's console did not answer in time"_s};
     case DeviceLine::End::NotReached:
     case DeviceLine::End::SignedOut:
+    case DeviceLine::End::Refused: // (the web's _watch_console: any refusal alike)
     case DeviceLine::End::NotLetIn:
         return {u"dropped"_s, u"The controller's console could not be opened"_s};
     case DeviceLine::End::Fell:
@@ -106,12 +107,41 @@ base::Error error(const QString& code, const QString& message)
     return {code.toStdString(), message.toStdString()};
 }
 
-// Turns of the console's keyboard and mouse, numbered for the whole program: a turn of one screen's is no other's.
-std::atomic<int> turns{0};
+// Turns of the console's keyboard and mouse, numbered for the whole program: a turn of one screen's is no other's
+// (OpenBMC's console's among them: ServerConsole::aNewTurn). (Of 64 bits: no number comes round again while the
+// program runs.)
+std::atomic<ServerScreen::Turn> turns{0};
 
-int aNewTurn() noexcept
+ServerScreen::Turn aNewTurn() noexcept
 {
     return turns.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
+// A keyboard report as a keyboard makes one: six keys at the most, none twice.
+bool aKeyboardReport(const typed::Report& keys) noexcept
+{
+    if (std::cmp_greater(keys.keys.size(), typed::mostKeysDown)) {
+        return false;
+    }
+    for (auto key = keys.keys.begin(); key != keys.keys.end(); ++key) {
+        if (std::find(std::next(key), keys.keys.end(), *key) != keys.keys.end()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// What of `before` is still down in `after`: what a report that also presses something lets go of, alone.
+typed::Report stillDownIn(const typed::Report& before, const typed::Report& after)
+{
+    typed::Report kept;
+    kept.modifiers = static_cast<std::uint8_t>(before.modifiers & after.modifiers);
+    for (const std::uint8_t key : before.keys) {
+        if (std::ranges::find(after.keys, key) != after.keys.end()) {
+            kept.keys.push_back(key);
+        }
+    }
+    return kept;
 }
 
 // Whether a keyboard report only lets go: of a key or a modifier, and presses none.
@@ -137,6 +167,12 @@ base::Error handedOver()
 base::Error consoleClosed()
 {
     return {"dropped", "The server's console was closed"};
+}
+
+// Nothing that presses is said behind what has waited too long to leave: the turn stands, the console goes on.
+base::Error busy()
+{
+    return {"busy", "The server's console stopped taking keys and the mouse"};
 }
 
 QByteArray bytesOf(const ami::Bytes& bytes)
@@ -200,6 +236,9 @@ struct ServerScreen::Session : QObject {
     std::uint32_t reports = 0;
     typed::Report keysThere; // the last keyboard report said
     std::uint8_t buttonsDown = 0;
+    // Each letting go said that had not left this program when it was said, oldest first: where it ends among all
+    // that was said on the line (DeviceLine::mark), and by when it has to have left.
+    std::deque<std::pair<qint64, qint64>> owed;
 
     bool keysDown() const noexcept { return keysThere.modifiers != 0 || !keysThere.keys.empty(); }
     std::pair<int, int> place{ami::farthest / 2, ami::farthest / 2};
@@ -213,7 +252,7 @@ struct ServerScreen::Typing {
     Still still;
     Typed done;
     bool asked = false;   // its keyboard was asked for
-    int turn = -1;        // ...and given, in this turn
+    Turn turn = -1;       // ...and given, in this turn
     std::size_t next = 0; // the report that goes next
     bool down = false;    // ...is down, and not let go of yet
 };
@@ -271,6 +310,11 @@ void next(const std::shared_ptr<Seat>& seat)
 }
 
 } // namespace
+
+ServerConsole::Turn ServerConsole::aNewTurn() noexcept
+{
+    return qkvm::core::aNewTurn();
+}
 
 ServerScreen::Asker ServerScreen::oneSeatAtATime(Asker asker)
 {
@@ -348,7 +392,7 @@ ServerScreen::Asker ConsoleSeats::asker(std::function<std::optional<Of>()> of, S
 }
 
 ServerScreen::ServerScreen(Asker asker, Shown shown, Limits limits, QObject* parent)
-    : QObject(parent), m_asker(std::move(asker)), m_shown(std::move(shown)), m_limits(limits),
+    : ServerConsole(parent), m_asker(std::move(asker)), m_shown(std::move(shown)), m_limits(limits),
       m_reader(std::make_shared<ScreenReader>(this, [this] { takeReads(); }, limits.mostResizesASecond))
 {
     m_clock.start();
@@ -406,6 +450,11 @@ int ServerScreen::framesWaiting() const noexcept
     return m_session != nullptr ? m_session->waiting : 0;
 }
 
+qint64 ServerScreen::inputWaitedMs()
+{
+    return m_session != nullptr ? m_session->line.waitedMs() : 0;
+}
+
 bool ServerScreen::holdsTheConsole() const noexcept
 {
     return m_session != nullptr && m_session->mine;
@@ -422,7 +471,6 @@ void ServerScreen::close()
     // Whoever waits for keys, or for a typing, is told: nothing more goes.
     m_inputTicks.stop();
     m_typingSteps.stop();
-    m_owed.reset();
     std::vector<Asking> askings = std::exchange(m_askings, {});
     std::deque<std::unique_ptr<Typing>> typings = std::exchange(m_typings, {});
     const QPointer<ServerScreen> self(this);
@@ -578,7 +626,9 @@ void ServerScreen::take(const ami::Message& one)
                 // A button held as the server's mouse became a relative one is let go of in the form it takes now
                 // (as the web's lets go of buttons where it has no place for them).
                 session.buttonsDown = 0;
-                say(ami::mouseRelative(0, 0, 0, 0, ++session.reports));
+                if (say(ami::mouseRelative(0, 0, 0, 0, ++session.reports))) {
+                    watchLettingGo(); // (as every letting go: where it does not leave in time, the session ends)
+                }
             }
         }
         return;
@@ -971,9 +1021,9 @@ void ServerScreen::answerInput()
         return;
     }
     // Each answer may do anything (ask again, close this, throw it away): the answered are taken out first.
-    std::vector<std::pair<InputAnswer, base::Result<int>>> answered;
+    std::vector<std::pair<InputAnswer, base::Result<Turn>>> answered;
     for (auto asking = m_askings.begin(); asking != m_askings.end();) {
-        std::optional<base::Result<int>> said = inputNow(asking->until, looked);
+        std::optional<base::Result<Turn>> said = inputNow(asking->until, looked);
         if (said) {
             answered.emplace_back(std::move(asking->answer), std::move(*said));
             asking = m_askings.erase(asking);
@@ -981,8 +1031,10 @@ void ServerScreen::answerInput()
             ++asking;
         }
     }
-    if (!m_askings.empty() || m_owed) {
-        m_inputTicks.start(m_limits.tickMs);
+    if (!m_askings.empty() || (m_session != nullptr && !m_session->owed.empty())) {
+        if (!m_inputTicks.isActive() || m_inputTicks.interval() != m_limits.tickMs) {
+            m_inputTicks.start(m_limits.tickMs); // (one that runs is not put off: it would never come)
+        }
     } else {
         m_inputTicks.stop();
     }
@@ -994,7 +1046,8 @@ void ServerScreen::answerInput()
     }
 }
 
-std::optional<base::Result<int>> ServerScreen::inputNow(qint64 until, const base::Result<void>& looked) const
+std::optional<base::Result<ServerScreen::Turn>> ServerScreen::inputNow(qint64 until,
+                                                                       const base::Result<void>& looked) const
 {
     const qint64 at = now();
     if (m_session != nullptr && m_session->handedOver) {
@@ -1022,7 +1075,7 @@ std::optional<base::Result<int>> ServerScreen::inputNow(qint64 until, const base
     return std::nullopt;
 }
 
-base::Result<void> ServerScreen::mayGo(int turn, bool letsGo)
+base::Result<void> ServerScreen::mayGo(Turn turn)
 {
     if (m_session == nullptr || !m_session->mine || turn != m_turn) {
         return m_lost;
@@ -1030,15 +1083,16 @@ base::Result<void> ServerScreen::mayGo(int turn, bool letsGo)
     if (now() < m_session->keysFrom) {
         return error(u"no_stream"_s, u"Waiting for the server's keyboard and mouse to be attached"_s);
     }
-    // A key from then would be pressed now: nothing that presses is said behind what has waited too long to leave.
-    // A letting go presses nothing, and goes.
-    if (!letsGo && m_session->line.waitedMs() > m_limits.inputSayMs) {
-        return error(u"dropped"_s, u"The server's console stopped taking keys and the mouse"_s);
-    }
     return {};
 }
 
-base::Result<void> ServerScreen::inTurn(int turn) const
+bool ServerScreen::backlogged()
+{
+    // A key from then would be pressed now: nothing that presses is said behind what has waited too long to leave.
+    return m_session->line.waitedMs() > m_limits.inputSayMs;
+}
+
+base::Result<void> ServerScreen::inTurn(Turn turn) const
 {
     if (m_session == nullptr || !m_session->mine || turn != m_turn) {
         return m_lost;
@@ -1046,7 +1100,7 @@ base::Result<void> ServerScreen::inTurn(int turn) const
     return {};
 }
 
-base::Result<void> ServerScreen::sayInput(int turn, const ami::Bytes& report)
+base::Result<void> ServerScreen::sayInput(Turn turn, const ami::Bytes& report)
 {
     const QPointer<ServerScreen> self(this);
     if (!say(report)) {
@@ -1056,37 +1110,72 @@ base::Result<void> ServerScreen::sayInput(int turn, const ami::Bytes& report)
     return {};
 }
 
-base::Result<void> ServerScreen::keyboard(const typed::Report& keys, int turn)
+base::Result<void> ServerScreen::keyboard(const typed::Report& keys, Turn turn)
 {
-    const bool letsGo = m_session != nullptr && onlyLetsGo(m_session->keysThere, keys);
-    if (auto may = mayGo(turn, letsGo); !may) {
+    if (!aKeyboardReport(keys)) {
+        return error(u"invalid"_s, u"A keyboard holds six keys down at the most, each once"_s);
+    }
+    if (auto may = mayGo(turn); !may) {
         return may;
     }
     Session& session = *m_session;
-    const bool behind = session.line.waitedMs() > 0;
+    const bool letsGo = onlyLetsGo(session.keysThere, keys);
+    // Whether it lets go of anything at all, whatever else it presses ({A} to {B} lets go of A): what it lets go of is
+    // watched as every letting go is (outside review of 0.2.0, area 5, MEDIUM 5.10: only a report that pressed nothing
+    // was, and A, not taken, would repeat on the server while the line went on).
+    const bool releases = stillDownIn(session.keysThere, keys) != session.keysThere;
+    if (!letsGo && backlogged()) {
+        // What it lets go of goes all the same, alone, behind what waits (it presses nothing); what it presses does
+        // not. (A key let go of in a report that also presses one would stay down while the console goes on.)
+        const typed::Report kept = stillDownIn(session.keysThere, keys);
+        if (kept != session.keysThere) {
+            if (auto said = sayInput(turn, ami::keyboard(kept.modifiers, kept.keys, ++session.reports)); !said) {
+                return said;
+            }
+            session.keysThere = kept;
+            watchLettingGo();
+        }
+        return busy();
+    }
     if (auto said = sayInput(turn, ami::keyboard(keys.modifiers, keys.keys, ++session.reports)); !said) {
         return said;
     }
     session.keysThere = keys;
-    if (letsGo && behind) {
+    if (releases) {
         watchLettingGo();
     }
     return {};
 }
 
-base::Result<void> ServerScreen::mouse(std::uint8_t buttons, int x, int y, int wheel, int turn)
+base::Result<void> ServerScreen::mouse(std::uint8_t buttons, int x, int y, int wheel, Turn turn)
 {
-    const bool letsGo = m_session != nullptr && m_session->buttonsDown != 0 &&
-                        (buttons & ~m_session->buttonsDown) == 0 && buttons != m_session->buttonsDown;
-    if (auto may = mayGo(turn, letsGo); !may) {
+    if (auto may = mayGo(turn); !may) {
         return may;
     }
     Session& session = *m_session;
-    const bool behind = session.line.waitedMs() > 0;
-    // (Nothing is held where it is relative: what was held was let go of as it became so.)
+    // Nothing is held where it is relative: what was held was let go of as it became so, as a relative report.
     if (session.relative) {
         return error(u"no_input"_s,
                      u"This server's mouse is a relative one, and this program moves an absolute one only, so far"_s);
+    }
+    const bool letsGo = (buttons & ~session.buttonsDown) == 0 && buttons != session.buttonsDown;
+    // (A button let go of while another is pressed is watched too: 5.10, as for the keys.)
+    const bool releases = (session.buttonsDown & ~buttons) != 0;
+    if (backlogged()) {
+        // Behind what has waited too long nothing moves, turns the wheel or presses: what the report lets go of goes
+        // alone, where the pointer stands (not a drag to where it was asked to go, and a turn of the wheel, seconds
+        // late), and the rest is refused.
+        const auto kept = static_cast<std::uint8_t>(session.buttonsDown & buttons);
+        if (kept != session.buttonsDown) {
+            if (auto said = sayInput(
+                    turn, ami::mouseAbsolute(kept, session.place.first, session.place.second, 0, ++session.reports));
+                !said) {
+                return said;
+            }
+            session.buttonsDown = kept;
+            watchLettingGo();
+        }
+        return letsGo ? base::Result<void>{} : busy();
     }
     const std::pair<int, int> place{std::clamp(x, 0, ami::farthest), std::clamp(y, 0, ami::farthest)};
     if (auto said = sayInput(turn, ami::mouseAbsolute(buttons, place.first, place.second, wheel, ++session.reports));
@@ -1095,7 +1184,7 @@ base::Result<void> ServerScreen::mouse(std::uint8_t buttons, int x, int y, int w
     }
     session.buttonsDown = buttons;
     session.place = place;
-    if (letsGo && behind) {
+    if (releases) {
         watchLettingGo();
     }
     return {};
@@ -1127,12 +1216,14 @@ bool ServerScreen::letGoOfWhatIsDown()
         if (!say(ami::keyboard(0, {}, ++session.reports))) {
             return false;
         }
+        watchLettingGo();
     }
     if (session.buttonsDown != 0) {
         session.buttonsDown = 0;
         if (!say(ami::mouseAbsolute(0, session.place.first, session.place.second, 0, ++session.reports))) {
             return false;
         }
+        watchLettingGo();
     }
     return true;
 }
@@ -1149,27 +1240,34 @@ void ServerScreen::endTurn(base::Error why)
 
 void ServerScreen::watchLettingGo()
 {
-    if (!m_owed) {
-        m_owed = now() + m_limits.letGoWithinMs;
+    // Watched by where it ends among all that was said, not by whether anything at all waits: behind a console that is
+    // slow and well, what waits never comes to nothing, while each letting go leaves in its time.
+    Session& session = *m_session;
+    const qint64 mark = session.line.mark();
+    if (session.line.hasLeft(mark)) {
+        return;
     }
-    m_inputTicks.start(m_limits.tickMs);
+    session.owed.emplace_back(mark, now() + m_limits.letGoWithinMs);
+    if (!m_inputTicks.isActive()) {
+        m_inputTicks.start(m_limits.tickMs); // (one that runs is not put off: with lettings go that keep coming, it
+                                             // would never come)
+    }
 }
 
 void ServerScreen::letGoOwed()
 {
-    if (!m_owed) {
-        return;
+    if (m_session == nullptr) {
+        return; // (a controller lets go of what a session had down as it ends; this program let go before its goodbye)
     }
-    if (m_session == nullptr || m_session->line.waitedMs() == 0) {
-        // It has left (all that waited has: it was behind that), or the session is over (and a controller lets go of
-        // what a session had down as it ends; this program let go of it before its goodbye).
-        m_owed.reset();
-        return;
+    Session& session = *m_session;
+    // What left is let go of: each later one ends further on, so what has not left is the rest.
+    while (!session.owed.empty() && session.line.hasLeft(session.owed.front().first)) {
+        session.owed.pop_front();
     }
-    if (now() > *m_owed) {
+    if (!session.owed.empty() && now() > session.owed.front().second) {
         // The console takes nothing, and a key, a modifier or a button it was told to let go of may still be down
         // there, repeating on the server, while the line goes on: the session is ended, which lets go of it.
-        m_owed.reset();
+        session.owed.clear();
         const QPointer<ServerScreen> self(this);
         emit leftDown();
         if (self == nullptr || m_session == nullptr) {
@@ -1188,7 +1286,7 @@ void ServerScreen::inputTick()
         return;
     }
     answerInput();
-    if (self != nullptr && m_askings.empty() && !m_owed) {
+    if (self != nullptr && m_askings.empty() && (m_session == nullptr || m_session->owed.empty())) {
         m_inputTicks.stop();
     }
 }
@@ -1212,7 +1310,7 @@ void ServerScreen::press(const QString& keys, Still still, Typed done)
     queueTyping(std::move(typing));
 }
 
-void ServerScreen::type(const QString& text, Still still, Typed done)
+void ServerScreen::type(const QString& text, Still still, Typed done, bool thenEnter)
 {
     base::Result<std::vector<typed::Report>> reports = typed::text(text);
     if (!reports) {
@@ -1221,6 +1319,11 @@ void ServerScreen::type(const QString& text, Still still, Typed done)
     }
     auto typing = std::make_unique<Typing>();
     typing->reports = std::move(reports).value();
+    if (thenEnter) {
+        // Enter after the text, in the text's own typing and turn (outside review 2.3), as typed::text types a "\n".
+        constexpr std::uint8_t enterKey = 0x28;
+        typing->reports.push_back(typed::Report{0, {enterKey}});
+    }
     typing->heldMs = m_limits.keyPauseMs;
     typing->still = std::move(still);
     typing->done = std::move(done);
@@ -1267,7 +1370,7 @@ void ServerScreen::typingStep()
     // Copied before anything is said: what is said may end the session, and whoever hears that may stop every typing
     // or throw this away; the typing is looked for again by its number after.
     const std::uint64_t number = typing->number;
-    const int turn = typing->turn;
+    const Turn turn = typing->turn;
     const QPointer<ServerScreen> self(this);
     const auto stillThere = [this, &self, number] {
         return self != nullptr && !m_typings.empty() && m_typings.front()->number == number;
@@ -1283,7 +1386,7 @@ void ServerScreen::typingStep()
     if (!typing->asked) {
         typing->asked = true;
         askForInput(
-            [self, number](base::Result<int> given) {
+            [self, number](base::Result<Turn> given) {
                 if (self != nullptr && !self->m_typings.empty() && self->m_typings.front()->number == number) {
                     self->typingTurn(number, std::move(given));
                 }
@@ -1318,7 +1421,9 @@ void ServerScreen::typingStep()
     m_wantedAt = now();
     const auto sent = static_cast<int>(typing->next);
     if (sent > 0 && sent % m_limits.askAgainEvery == 0 && typing->still) {
-        const bool may = typing->still();
+        // (Copied first: whoever is asked may stop every typing, which takes this one, and what it asks with, away.)
+        const Still still = typing->still;
+        const bool may = still();
         if (!stillThere()) {
             return; // (whoever was asked stopped it, or threw this away)
         }
@@ -1329,7 +1434,9 @@ void ServerScreen::typingStep()
             return;
         }
     }
-    std::optional<base::Result<void>> pressed = said(typing->reports[typing->next]);
+    // (Copied first, as what is asked: the typing may be gone in the saying.)
+    const typed::Report report = typing->reports[typing->next];
+    std::optional<base::Result<void>> pressed = said(report);
     if (!pressed) {
         return;
     }
@@ -1341,7 +1448,7 @@ void ServerScreen::typingStep()
     m_typingSteps.start(typing->heldMs);
 }
 
-void ServerScreen::typingTurn(std::uint64_t number, base::Result<int> turn)
+void ServerScreen::typingTurn(std::uint64_t number, base::Result<Turn> turn)
 {
     if (!turn) {
         endTyping(turn.error());
@@ -1349,7 +1456,8 @@ void ServerScreen::typingTurn(std::uint64_t number, base::Result<int> turn)
     }
     Typing* const typing = m_typings.front().get();
     const QPointer<ServerScreen> self(this);
-    const bool may = !typing->still || typing->still();
+    const Still still = typing->still; // (copied first: see typingStep)
+    const bool may = !still || still();
     if (self == nullptr || m_typings.empty() || m_typings.front()->number != number) {
         return; // (whoever was asked stopped it, or threw this away)
     }

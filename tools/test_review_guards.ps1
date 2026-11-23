@@ -37,6 +37,50 @@ if ($gate -notmatch "(?m)^\s*Step 'review follow-up guards' \{ & \(Join-Path \`$
 if ($gate -notmatch "(?m)^\s*Step `"time margins \`$preset`" \{ & \(Join-Path \`$PSScriptRoot 'test_time_margins\.ps1'\) -Preset \`$preset -Since \`$script:testsBegan \}") {
     $problems.Add('L-1: tools/check.ps1 no longer looks at how close each program came to its limit.')
 }
+# The gate fuzzes the readers of what a device sends, on a line of its own, for its bounded time and not as the canary
+# proof (whose finding of a canary passes); the step fails on what a target finds, and the gate's preset is never the
+# canaries' (FUZZ, 2026-11-17).
+# The step stands among the gate's own (indented as they are, not in a branch of its own), runs fuzz.ps1 for its time,
+# and fails where fuzz.ps1 ends well without its last line; and the gate fails where the step never ran at all, in
+# whatever branch (outside review of FUZZ, L1).
+$fuzzStepOfTheGate = '(?m)^ {8}Step ''fuzz'' \{\r?\n' +
+    '\s*pwsh -NoProfile -File \(Join-Path \$PSScriptRoot ''fuzz\.ps1''\) -Minutes \d+ -FastCores \| ForEach-Object \{ \$_; \$last = \$_ \}\r?\n' +
+    '\s*if \(\$LASTEXITCODE -eq 0 -and \$last -ne ''No fuzz target found anything\.''\) \{\r?\n' +
+    '[^\r\n]*\r?\n' +
+    '\s*\$global:LASTEXITCODE = 1\r?\n'
+if ($gate -notmatch $fuzzStepOfTheGate) {
+    $problems.Add('FUZZ: tools/check.ps1 no longer runs the fuzz targets among its steps (Step ''fuzz'', tools/fuzz.ps1 -Minutes n), or no longer fails where fuzz.ps1 does not end saying that nothing was found.')
+}
+if ($gate -notmatch "(?m)^\s*foreach \(\`$must in 'fuzz', 'review follow-up guards'\) \{\r?\n\s*if \(-not \(\`$steps \| Where-Object \{ \`$_ -like `"\`$\{must\}: \*`" \}\)\) \{\r?\n\s*\`$failed\.Add\(") {
+    $problems.Add('FUZZ: tools/check.ps1 no longer fails where its fuzz step, or its guards, never ran.')
+}
+$fuzzStep = (Get-Content -LiteralPath "$root/tools/fuzz.ps1" -Raw) -replace '(?s)<#.*?#>', ''
+# The gate's own branch: a target that exited otherwise than well, kept an input, or fuzzed nothing, fails the step; the
+# step's end exits 1 on any failure, and says its last line only after that (outside review of FUZZ, L1 and L2).
+$gateBranch = '(?m)^\s*\} elseif \(\$code -ne 0 -or \$kept\.Count -gt 0 -or -not \$read\.Inited -or \$read\.Runs -eq 0\) \{\r?\n\s*\$failed\+\+\s*$'
+$theEnd = '(?m)^if \(\$failed -gt 0\) \{\r?\n(?:[^\r\n]*\r?\n){2}\s*exit 1\r?\n\}\r?\n' +
+    'Write-Output \$\(if \(\$Canary\) \{ "[^"]*" \} else \{ ''No fuzz target found anything\.'' \}\)\r?\nexit 0\s*$'
+if ($fuzzStep -notmatch $gateBranch -or $fuzzStep -notmatch $theEnd -or
+    $fuzzStep -notmatch "\`$preset = if \(\`$Canary\) \{ 'fuzz-canary' \} else \{ 'fuzz' \}") {
+    $problems.Add('FUZZ: tools/fuzz.ps1 no longer fails on a finding or on a target that fuzzed nothing, or no longer keeps the canaries to their own preset.')
+}
+# The gate's runs held to the fast cores where a PC has two kinds (L3), after the build; slow inputs said and no finding,
+# the rest counted however old (L4).
+if ($fuzzStep -notmatch '(?m)^if \(\$FastCores\) \{ Use-FastCores 6>&1 \}\s*$' -or
+    $fuzzStep -notmatch '(?m)^\s*\$kept = @\(\$all \| Where-Object \{ \$_\.Name -notlike ''slow-unit-\*'' \}\)\s*$') {
+    $problems.Add('FUZZ: tools/fuzz.ps1 no longer holds the gate''s runs to the fast cores, or no longer counts every finding but a slow input.')
+}
+# A target that cannot be started fails the step, and no other target's process stands in for it (L2): both where its
+# seeds are read alone and where it is fuzzed.
+$notStarted = '(?m)^\s*if \(\$process -isnot \[Diagnostics\.Process\]\) \{\r?\n(?:\s*#[^\r\n]*\r?\n)?\s*\$failed\+\+\s*$'
+if ([regex]::Matches($fuzzStep, $notStarted).Count -lt 2 -or $fuzzStep -notmatch '-ErrorAction Stop') {
+    $problems.Add('FUZZ: tools/fuzz.ps1 no longer fails where a target cannot be started.')
+}
+$fuzzPresets = Get-Content -LiteralPath "$root/CMakePresets.json" -Raw | ConvertFrom-Json
+$gatePreset = @($fuzzPresets.configurePresets | Where-Object name -eq 'fuzz')
+if ($gatePreset.Count -ne 1 -or $gatePreset[0].cacheVariables.QKVM_FUZZ -ne 'ON' -or $gatePreset[0].cacheVariables.QKVM_FUZZ_CANARY -ne 'OFF') {
+    $problems.Add('FUZZ: the fuzz preset is not QKVM_FUZZ ON with QKVM_FUZZ_CANARY OFF in so many words.')
+}
 $top = Get-Content -LiteralPath "$root/CMakeLists.txt" -Raw
 if ($top -notmatch '(?m)^add_test\(NAME test_review_guards\s') {
     $problems.Add('L-3: CMakeLists.txt no longer registers test_review_guards.')
@@ -151,10 +195,18 @@ if ($BuildDir) {
         test_ui_bar_screens = @{ Debug = 1050; RelWithDebInfo = 1050; Release = 600 }
         test_ui_console_screens = @{ Debug = 1020; RelWithDebInfo = 1020; Release = 600 }
         test_ui_box_screens = @{ Debug = 700; RelWithDebInfo = 700; Release = 600 }
+        # The two boxes' screens (PERF, 2026-11-15; ui/CMakeLists.txt).
+        test_ui_own_files_screens_use = @{ Debug = 300; RelWithDebInfo = 300; Release = 600 }
+        test_ui_own_files_screens_hold = @{ Debug = 280; RelWithDebInfo = 280; Release = 600 }
+        test_ui_own_files_screens_room = @{ Debug = 270; RelWithDebInfo = 270; Release = 600 }
+        test_ui_own_files_screens_looks = @{ Debug = 320; RelWithDebInfo = 320; Release = 600 }
     }
     $shown = & $Ctest --test-dir $BuildDir --show-only=json-v1 | ConvertFrom-Json
     if (@($shown.tests | Where-Object name -eq 'test_ui_screens').Count -ne 0) {
         $problems.Add('T-2/L-1: CTest has test_ui_screens again, which has no measured limit.')
+    }
+    if (@($shown.tests | Where-Object name -eq 'test_ui_own_files_screens').Count -ne 0) {
+        $problems.Add('T-2/L-1: CTest has test_ui_own_files_screens again, the one program of 598 s of its 600.')
     }
     foreach ($name in $screens.Keys | Sort-Object) {
         $limits = $screens[$name]
@@ -175,10 +227,18 @@ if ($BuildDir) {
 # letGoOfDecoding, which looks whether a packet waits only after letting go: a packet that came while
 # it was held, whose wake found it taken, would lie there until the next one came. So the lock is
 # only ever held by a unique_lock named `decoding`, never let go of by hand elsewhere, and in run()
-# no return after it is held but through letGoOfDecoding.
+# no return after it is held but through letGoOfDecoding. (PERF-2's stills' line: letGoOfDecoding gives
+# back a card's place in the line first, then lets go of the decoding, then looks and hands in what waits
+# through handIn, and does nothing more, to its closing brace; and handIn wakes the pool itself for every
+# stream that is not a card's key frames. A place given back after the decoding is let go lets the next card
+# and this one decode at once for a whole decoding, which a test sees only by chance: the review of abb20deb,
+# L2.)
 $stream = (Get-Content -LiteralPath "$root/engine/src/stream_core.cpp" -Raw) -replace '//[^\n]*', ''
-if ($stream -notmatch '(?s)void StreamCore::letGoOfDecoding\(std::unique_lock<std::mutex>& decoding\)\s*\{\s*decoding\.unlock\(\);\s*bool more = false;\s*\{\s*const std::lock_guard guard\(m_inboxLock\);\s*more = !m_inbox\.empty\(\);\s*\}\s*if \(more\) \{\s*m_gpu\.decodePool\(\)\.wake\(this\);') {
-    $problems.Add('V-1: engine/src/stream_core.cpp letGoOfDecoding no longer lets go first and looks after.')
+if ($stream -notmatch '(?s)void StreamCore::letGoOfDecoding\(std::unique_lock<std::mutex>& decoding\)\s*\{\s*if \(keyFrameStills\(\)\) \{\s*m_gpu\.stillsGate\(\)\.leave\(m_member\);\s*\}\s*decoding\.unlock\(\);\s*bool more = false;\s*\{\s*const std::lock_guard guard\(m_inboxLock\);\s*more = !m_inbox\.empty\(\);\s*\}\s*if \(more\) \{\s*handIn\(\);\s*\}\s*\n\}(?=\n)') {
+    $problems.Add('V-1: engine/src/stream_core.cpp letGoOfDecoding no longer gives back its place in the stills'' line, lets go, looks and hands in what waits, and nothing more.')
+}
+if ($stream -notmatch '(?s)void StreamCore::handIn\(bool fresh\)\s*\{\s*if \(gated\(\)\) \{\s*m_gpu\.stillsGate\(\)\.handIn\(m_member, fresh\);\s*\} else \{\s*m_gpu\.decodePool\(\)\.wake\(this\);\s*\}\s*\}') {
+    $problems.Add('V-1: engine/src/stream_core.cpp handIn no longer wakes the pool itself for every stream but a card''s key frames.')
 }
 $holds = [regex]::Matches($stream, 'm_decodingLock')
 $asUnique = [regex]::Matches($stream, 'std::unique_lock decoding\(m_decodingLock(, std::try_to_lock)?\);')
@@ -216,8 +276,36 @@ foreach ($file in Get-ChildItem -LiteralPath "$root/engine" -Recurse -File -Incl
     }
 }
 
+# Every stall case has ports of its own (core/tests/signer_far_away.h): its table is tools/make_testdata.ps1's, which
+# makes the certificates that name them, no port is two cases', and none is a port the profile fixtures' stand-in
+# servers take (ui/tests/profile_maker.cpp), which the upgrade tests listen at again: the asker's case had 47391, and
+# beside test_ui_upgrade_continuity one of the two failed (review arm 1, L7, 2026-11-21).
+$stallTable = [ordered]@{}
+foreach ($found in [regex]::Matches((Get-Content -LiteralPath "$root/core/tests/signer_far_away.h" -Raw),
+        'inline constexpr Stalls \w+\{"stalls-([a-z0-9-]+)", \{(\d+), (\d+), (\d+)\}\};')) {
+    $stallTable[$found.Groups[1].Value] = @(2..4 | ForEach-Object { [int] $found.Groups[$_].Value })
+}
+$madeTable = [ordered]@{}
+$madeText = [regex]::Match((Get-Content -LiteralPath "$root/tools/make_testdata.ps1" -Raw), '(?s)\$stalls = \[ordered\] @\{(.*?)\}\r?\n').Groups[1].Value
+foreach ($found in [regex]::Matches($madeText, "'([a-z0-9-]+)' = (\d+), (\d+), (\d+)")) {
+    $madeTable[$found.Groups[1].Value] = @(2..4 | ForEach-Object { [int] $found.Groups[$_].Value })
+}
+$fixturePorts = @([regex]::Matches((Get-Content -LiteralPath "$root/ui/tests/profile_maker.cpp" -Raw),
+        'constexpr quint16 (?:serverPort|screenServerPort) = (\d+);') | ForEach-Object { [int] $_.Groups[1].Value })
+$stallPorts = @($stallTable.Values | ForEach-Object { $_ })
+if ($stallTable.Count -lt 10 -or $fixturePorts.Count -ne 2) {
+    $problems.Add('L7: the stall cases'' table (signer_far_away.h) or the fixtures'' servers'' ports (profile_maker.cpp) are no longer where this guard reads them.')
+} elseif (($stallTable.Keys -join ',') -cne ($madeTable.Keys -join ',') -or
+    @($stallTable.Keys | Where-Object { ($stallTable[$_] -join ',') -cne ($madeTable[$_] -join ',') }).Count) {
+    $problems.Add('L7: the stall cases of core/tests/signer_far_away.h are not tools/make_testdata.ps1''s, name for name and port for port.')
+} elseif (@($stallPorts | Group-Object | Where-Object Count -gt 1).Count) {
+    $problems.Add("L7: a port is two stall cases': $(@($stallPorts | Group-Object | Where-Object Count -gt 1 | ForEach-Object Name) -join ', ').")
+} elseif (@($stallPorts | Where-Object { $fixturePorts -contains $_ }).Count) {
+    $problems.Add("L7: a stall case takes a port of the profile fixtures' stand-in servers: $(@($stallPorts | Where-Object { $fixturePorts -contains $_ }) -join ', ').")
+}
+
 if ($problems.Count) { $problems | Write-Output; exit 1 }
 # (The screens programs' limits for the address sanitizer are Debug's, borrowed: said so.)
 $limitsSaid = if ($Config -eq 'RelWithDebInfo') { 'the ones written down, the screens programs'' borrowed from Debug' } else { 'the measured ones' }
-Write-Output ('Isolated retries, the guards in the gate and in every build, the margin step, the Credential Manager ' +
+Write-Output ('Isolated retries, the guards in the gate and in every build, the margin step, the fuzz step, the Credential Manager ' +
     'boundary wording, the WebRTC files'' lock rule and the library''s boundary (tried on a scratch copy) and the decoding threads'' order passed' + $(if ($BuildDir) { "; the limits CTest applies in $Config are $limitsSaid." } else { '.' }))

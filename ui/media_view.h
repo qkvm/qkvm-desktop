@@ -14,27 +14,35 @@
 #include <QVariantMap>
 #include <QtQml/qqmlregistration.h>
 
+#include <qkvm/core/media_place.h>
 #include <qkvm/core/read_ahead.h>
-#include <qkvm/core/server_client.h>
 
 #include <qkvm/base/result.h>
 
 namespace qkvm::ui {
 
-// The box for a machine's virtual media through a QKVM server (0.3.0), as the page's Actions > Media... has it
-// (app.js, mediaDialog): the images, what is in the drive and who put it there, and mount, unmount, upload and delete,
-// each asked first with a question that names the machine and the image, and sent with both: the server does nothing
-// where the machine is called otherwise by then (409 changed), and that is said, and nothing more is sent. It is an
-// admin's, signed in in person (whoever opens it sees to that: MachineActions). The box holds still: one size and
-// place whatever it shows (its screen's), and while something of it is out nothing in it takes a click.
+// The box for a machine's virtual media (0.3.0), as the page's Actions > Media... has it (app.js, mediaDialog): through
+// a QKVM server, or of a kvmd KVM of this PC's own wall, which the program speaks to itself (core::MediaPlace says
+// which answers, and the box cannot tell: GAPS A2). The images, what is in the drive and who put it there, and mount,
+// unmount, upload and delete, each asked first with a question that names the machine and the image, and sent with
+// both: the place does nothing where the machine is called otherwise by then (409 changed), and that is said, and
+// nothing more is sent. Through a server 0.3.2 each is sent with the mark of the list it was picked from as well: where
+// the tile's machine is another by then (its tile edited to another KVM), the server does nothing (409 moved), and the
+// box closes and says so in its words; an upload asks for the list again first, and sends nothing where its mark is
+// another by then (web 0.3.2's page). And the box is held to the mark of the first list it was opened with, as this
+// PC's own wall's box is to its first listing: a later look that lists the machine by another mark closes it, unshown
+// (stricter than the page). Through a server it is an admin's, signed in in person (whoever opens it sees to
+// that: MachineActions). The box holds still: one size and place whatever it shows (its screen's), and while something
+// of it is out nothing in it takes a click.
 //
 // What the box does is told in it, as the page tells it, and what was done in the window's corner as well (`told`).
 // One thing at a time for each machine, with whatever else is done to it from any window (`underWay`, by the machine's
-// key for that). An upload is carried from the file as it is read, through the server to the device, a piece at a
-// time (ServerClient::uploadMedia), with how far it has come as the server counts it, asked every second; closing the
-// box stops it. A mount, an unmount or a deletion goes on when the box is closed, and is told in the corner.
+// key for that). An upload is carried from the file as it is read, a piece at a time, through the server or straight
+// to the KVM (MediaPlace::uploadMedia), with how far it has come as the place counts it, asked every second; closing
+// the box stops it. The file is held to stay as it was while it is read (core::ReadAhead::unchangedFileAt). A mount,
+// an unmount or a deletion goes on when the box is closed, and is told in the corner.
 //
-// On the interface thread. The client may go first: the box is then of nothing.
+// On the interface thread. The place may go first: the box is then of nothing.
 class MediaView : public QObject {
     Q_OBJECT
     QML_ELEMENT
@@ -79,28 +87,32 @@ public:
     MediaView(MediaView&&) = delete;
     MediaView& operator=(MediaView&&) = delete;
 
-    // Opened for this machine of this server: `machine` is its id there, `name` what it is called now. `key`: its key
-    // on the wall, told with `done`; `underWayKey`: its key in `underWay`, which outlives the box, or is let go of
-    // first (letGo). The images are asked for at once.
-    void open(core::ServerClient* client, const QString& machine, const QString& name, const QString& key,
+    // Opened for this machine of this place (a server's client, or this PC's own wall, each a QObject): `machine` is
+    // its id there, `name` what it is called now. `key`: its key on the wall, told with `done`; `underWayKey`: its key
+    // in `underWay`, which outlives the box, or is let go of first (letGo). The images are asked for at once.
+    void open(core::MediaPlace* place, const QString& machine, const QString& name, const QString& key,
               UnderWay* underWay, const QString& underWayKey);
     // The machine is called this now: the box says so, and its next question names it so.
     void rename(const QString& name);
     // Whoever may have the box may no longer, or the place is gone: it closes, an upload is stopped, and nothing that
     // is out is anybody's any more (what it held in `underWay` is given back now).
     void letGo();
+    // The machine is said to be at another address than when the box was opened for it: the box closes (as close()),
+    // and that is said in the window's corner. It is opened again from the machine's menu.
+    void movedElsewhere();
     // How an image is chosen on this PC: Windows' own box in the program (win/file_dialogs.h), a test's own in a
     // test. The file's whole name; nothing where whoever was asked said no; why not, where they could not be asked.
     void setImageDoor(std::function<base::Result<QString>()> door) { m_whichImage = std::move(door); }
-    // How the image chosen there is read: the file at its path (core::ReadAhead::fileAt) in the program, a test's own
-    // in a test.
+    // How the image chosen there is read: the file at its path, held to stay as it was
+    // (core::ReadAhead::unchangedFileAt) in the program, a test's own in a test.
     void setImageSource(std::function<core::ReadAhead::Source(const QString& path)> source)
     {
         m_source = std::move(source);
     }
     // The key on the wall of the machine the box is open for; empty: it is closed.
     QString key() const { return m_opened ? m_key : QString(); }
-    core::ServerClient* client() const { return m_client; }
+    // The place it is open for; none: it is closed, or the place went.
+    core::MediaPlace* place() const { return m_alive != nullptr ? m_place : nullptr; }
 
     bool opened() const { return m_opened; }
     QString title() const;
@@ -156,11 +168,18 @@ private:
         QString yes;
         bool danger = true;
         QString named; // the machine as the question named it
+        // The mark of the list shown when it was asked (MediaList::listed: the page's `listed`, taken when the image is
+        // picked and asked for), sent with it; a mount's is its own.
+        QString listed;
         core::MediaMount mount;
         QString image;
     };
 
     bool isCurrent(quint64 turn) const;
+    // The box is open, and its place answers as somebody else now (signed in again, as another account or to another
+    // server through the same client): what it shows and what was asked in it are the other sign-in's, and no look of
+    // it is answered any more. It closes, says why in the corner, and says so (true).
+    bool signedInOtherwise();
     // Asks what can be mounted and what is; what came of that.
     void load(bool retried = false);
     void listed(const base::Result<core::MediaList>& answer, bool retried);
@@ -168,8 +187,9 @@ private:
     void fit();
     void tell(const QString& text, bool bad = false);
     const core::MediaImage* picked() const;
-    // What the last look says stands against an upload, said here and nothing sent; nothing where nothing does.
-    QString refusedAtOnce(const QString& name, qint64 size) const;
+    // What a list says stands against an upload, said here and nothing sent; nothing where nothing does. Of the list
+    // shown when it is asked, and of the fresh one of the look before it goes.
+    QString refusedAtOnce(const core::MediaList& list, const QString& name, qint64 size) const;
     // Sends what was asked, holding the box still meanwhile: `send` hands what came back (a sentence to say, or why
     // not) to the function it is given. `inTheCorner`: that sentence is told in the window's corner too, after "...
     // done" (the server's note of a mount, say); else only in the box (an upload's SHA-256), as the page tells them.
@@ -179,9 +199,17 @@ private:
     // The upload asked of the file chosen, once it is open; and sent with its yes.
     void askUpload(const QString& name, std::unique_ptr<core::ReadAhead> file);
     void sendUpload(const Asked& asked, std::unique_ptr<core::ReadAhead> file, const Answer& answered);
+    // The upload itself, once the look before it (where there is one) found the machine the box listed.
+    void carryUpload(const Asked& asked, std::unique_ptr<core::ReadAhead> file, const Answer& answered);
+    // How the upload of the thing out from the box as `carrying` is stopped, held until it is over; and let go of then,
+    // where that is still the one held (a late answer of one stopped before is nobody's).
+    void holdStop(quint64 carrying, std::function<void()> stop);
+    void letGoOfStop(quint64 carrying);
     void countUp();
 
-    QPointer<core::ServerClient> m_client;
+    // The place, and the QObject it is (gone with it).
+    core::MediaPlace* m_place = nullptr;
+    QPointer<QObject> m_alive;
     QByteArray m_identity;
     QString m_machine;
     QString m_name;
@@ -193,6 +221,13 @@ private:
     quint64 m_look = 0;
     QTimer m_again;
     std::optional<core::MediaList> m_shown;
+    // What the place said the machine is bound to when the box first listed it (MediaList::boundTo); and whether it is
+    // bound to another since: then the box changes nothing more, and is to be opened again.
+    std::optional<QString> m_bound;
+    bool m_moved = false;
+    // The mark of that first list (MediaList::listed, a server 0.3.2's): a later list with another, or with none, is of
+    // another machine than the one the box was opened for, and closes it.
+    QString m_mark;
     QString m_picked;
     QString m_drive = QStringLiteral("cd");
     QString m_boot = QStringLiteral("none");
@@ -217,8 +252,9 @@ private:
     QString m_carryKey;
     QElapsedTimer m_since;
     QTimer m_counting;
-    // The upload under way: how it is stopped, and the look at how far it has come.
+    // The upload under way: how it is stopped (that of the thing out as m_stopOf), and the look at how far it has come.
     std::function<void()> m_stopUpload;
+    quint64 m_stopOf = 0;
     QTimer m_progress;
     QString m_uploading;
     std::function<base::Result<QString>()> m_whichImage;

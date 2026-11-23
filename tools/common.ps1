@@ -45,13 +45,44 @@ function Expand-Checked {
     }
 }
 
+function Get-LocalSetting {
+    <# What local.cmake says of $Name (set(<Name> "<value>")), with backslashes; nothing where it says nothing. #>
+    param([Parameter(Mandatory)] [string] $Name)
+    $local = Join-Path $DesktopRoot 'local.cmake'
+    if (-not (Test-Path -LiteralPath $local)) { return $null }
+    $line = Select-String -LiteralPath $local -Pattern ('^set\(' + [regex]::Escape($Name) + ' "(.+)"\)$') | Select-Object -First 1
+    if (-not $line) { return $null }
+    return $line.Matches[0].Groups[1].Value -replace '/', '\'
+}
+
 function Get-QtRoot {
-    <# Where Qt is on this PC, as tools\fetch_qt.ps1 wrote it into local.cmake. #>
+    <#
+    Where Qt is on this PC, as tools\fetch_qt.ps1 wrote it into local.cmake: the x64 Qt, or with -Arch arm64 the ARM64
+    one (tools\fetch_qt.ps1 -Arch arm64).
+    #>
+    param([ValidateSet('x64', 'arm64')] [string] $Arch = 'x64')
     $local = Join-Path $DesktopRoot 'local.cmake'
     if (-not (Test-Path -LiteralPath $local)) { throw 'Qt is not known on this PC yet. Run tools\fetch_qt.ps1 first (README.md, Building).' }
-    $line = Select-String -LiteralPath $local -Pattern '^set\(QKVM_QT_DIR "(.+)"\)$' | Select-Object -First 1
-    if (-not $line) { throw 'local.cmake does not say where Qt is. Run tools\fetch_qt.ps1 again.' }
-    return $line.Matches[0].Groups[1].Value -replace '/', '\'
+    if ($Arch -eq 'arm64') {
+        $root = Get-LocalSetting 'QKVM_QT_DIR_ARM64'
+        if (-not $root) { throw 'local.cmake does not say where the ARM64 Qt is. Run tools\fetch_qt.ps1 -Arch arm64.' }
+        return $root
+    }
+    $root = Get-LocalSetting 'QKVM_QT_DIR'
+    if (-not $root) { throw 'local.cmake does not say where Qt is. Run tools\fetch_qt.ps1 again.' }
+    return $root
+}
+
+function Get-DepsRoot {
+    <#
+    Where the libraries of others are that a build for $Arch links: .deps for x64; for ARM64 .deps\arm64, or where
+    local.cmake says (QKVM_DEPS_ARM64), as CMakeLists.txt finds them.
+    #>
+    param([ValidateSet('x64', 'arm64')] [string] $Arch = 'x64')
+    if ($Arch -eq 'x64') { return (Join-Path $DesktopRoot '.deps') }
+    $root = Get-LocalSetting 'QKVM_DEPS_ARM64'
+    if ($root) { return $root }
+    return (Join-Path $DesktopRoot '.deps\arm64')
 }
 
 function Enter-BuildEnvironment {
@@ -60,32 +91,49 @@ function Enter-BuildEnvironment {
     Microsoft's compiler, the CMake, Ninja and clang tools that come with it, and the DLLs of Qt and
     FFmpeg, all on the path. Does nothing when it was done before in the same PowerShell.
 
+    With -Arch arm64, the compiler makes ARM64 programs: Visual Studio's "x64_arm64 Cross Tools" on an x64 PC (where
+    the DLLs of the ARM64 Qt and FFmpeg cannot be loaded, and the x64 Qt's tools are on the path instead), its "ARM64
+    Native Tools" on Windows on ARM. A PowerShell that entered one stays in it: another is refused.
+
     $Versions is which Visual Studio will do: Qt 6.12 is built with the compiler of 2022 and
     refuses an older one.
     #>
-    param([string] $Versions = '[17.0,18.0)')
-    if ($env:QKVM_BUILD_ENVIRONMENT) { return }
+    param([string] $Versions = '[17.0,18.0)', [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64')
+    if ($env:QKVM_BUILD_ENVIRONMENT) {
+        $entered = if ($env:QKVM_BUILD_ARCH) { $env:QKVM_BUILD_ARCH } else { 'x64' }
+        if ($entered -ne $Arch) { throw "This PowerShell has the build's environment for $entered already: start a new one for $Arch." }
+        return
+    }
+    $onArm = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     $vs = $null
+    $part = if ($Arch -eq 'arm64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
     if (Test-Path -LiteralPath $vswhere) {
-        $vs = & $vswhere -latest -products * -version $Versions -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        $vs = & $vswhere -latest -products * -version $Versions -requires $part -property installationPath
     }
-    if (-not $vs) { throw 'No Build Tools for Visual Studio 2022 with the C++ tools is installed (README.md, Building).' }
+    if (-not $vs) { throw "No Build Tools for Visual Studio 2022 with the C++ tools for $Arch is installed (README.md, Building)." }
 
     # vcvars64.bat sets up a cmd of its own; what it set there is read back and taken over here.
-    $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+    $batch = if ($Arch -eq 'x64') { 'vcvars64.bat' } elseif ($onArm) { 'vcvarsarm64.bat' } else { 'vcvarsamd64_arm64.bat' }
+    $vcvars = Join-Path $vs "VC\Auxiliary\Build\$batch"
     $lines = & $env:ComSpec /d /c "`"$vcvars`" >nul 2>&1 && set"
-    if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat of $vs failed (exit code $LASTEXITCODE)." }
+    if ($LASTEXITCODE -ne 0) { throw "$batch of $vs failed (exit code $LASTEXITCODE)." }
     foreach ($line in $lines) {
         $name, $value = $line -split '=', 2
         if ($name -and $null -ne $value) { Set-Item -LiteralPath "Env:$name" -Value $value }
     }
 
     # clang-format and clang-tidy come with the "C++ Clang tools" part, which does not put them on the path.
-    $llvm = Join-Path $vs 'VC\Tools\Llvm\x64\bin'
-    $ffmpeg = Join-Path $DesktopRoot '.deps\ffmpeg\bin'
-    $env:PATH = "$llvm;$(Get-QtRoot)\bin;$ffmpeg;$env:PATH"
+    $llvm = Join-Path $vs "VC\Tools\Llvm\$(if ($onArm) { 'ARM64' } else { 'x64' })\bin"
+    if ($Arch -eq 'arm64' -and -not $onArm) {
+        # (A cross-build: only the x64 Qt's tools can run here.)
+        $env:PATH = "$llvm;$(Get-QtRoot)\bin;$env:PATH"
+    } else {
+        $ffmpeg = Join-Path (Get-DepsRoot -Arch $Arch) 'ffmpeg\bin'
+        $env:PATH = "$llvm;$(Get-QtRoot -Arch $Arch)\bin;$ffmpeg;$env:PATH"
+    }
     $env:QKVM_BUILD_ENVIRONMENT = $vs
+    $env:QKVM_BUILD_ARCH = $Arch
 }
 
 # What this PowerShell may run on, kept while Use-FastCores holds it to less; nothing: it is not held.

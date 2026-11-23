@@ -80,6 +80,10 @@ base::Result<void> passwordFrom(const QString& typed);
 // by itself (one that runs kvmd, a JetKVM, a server's management controller: familyOf) is signed in
 // to, and of one this is not asked.
 base::Error whyNotSignedInTo(KvmProbe::Kind kind);
+// The same of all that was found: where something else answered at a plain address that sends everybody on to HTTPS
+// at the same host (Found::sentOnTo), "https_only" with that address, which is offered (kvm::httpsOnly), as the web
+// says it of a kvmd it found by asking (detect_kind, web 0.3.2). No password goes the plain way to say so.
+base::Error whyNotSignedInTo(const KvmProbe::Found& found);
 // What the asking of what answers at an address finds of a KVM of a family (OwnKvm::kind); nothing
 // for a family this build does not speak to by itself, which nothing found is. Of every family that
 // OwnKvm::namesAFamily names, something.
@@ -266,6 +270,8 @@ public:
         std::optional<JetKvmDevice::Pace> jetkvm;
         // A server's controller's; none: alike the kvmd's (DriverPaces::alike).
         std::optional<RedfishDevice::Pace> redfish;
+        // A VNC server's; none: the web's own, its sign-ins counted where the kvmd's are.
+        std::optional<VncDevice::Pace> vnc;
         // Where a JetKVM's other way is (kvm::otherWayOf). A test has two stand-ins at two ports be
         // one JetKVM's two ways.
         std::function<std::optional<QUrl>(const QUrl&)> otherWay = kvm::otherWayOf;
@@ -295,6 +301,10 @@ private:
     // One of the two ways has answered; once both have, the way is chosen (kvm::wayOf).
     void askedOneWay();
     void probed(const KvmProbe::Found& found);
+    // A vncs:// server's certificate, read with nothing sent: what it is known by from now on.
+    void certificateShown(const base::Result<vnc::Certificate>& shown);
+    // The one sign-in, by a driver of its family, at the way chosen and held to what it is known by.
+    void signIn();
     void identified(const base::Result<OneSignIn::Said>& who);
     void letTheDriverGo();
     void finish(base::Result<Added> result);

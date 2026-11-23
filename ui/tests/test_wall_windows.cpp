@@ -92,6 +92,19 @@ core::WallWindow windowIn(int columns)
     return windowAt(std::nullopt, {}, {}, columns);
 }
 
+// Whether the menu open in a window offers this row, to be chosen.
+bool offers(const ui::ActionsView& actions, const QString& row)
+{
+    for (const QVariant& section : actions.menu().value(u"sections"_s).toList()) {
+        for (const QVariant& one : section.toMap().value(u"rows"_s).toList()) {
+            if (one.toMap().value(u"id"_s).toString() == row) {
+                return one.toMap().value(u"enabled"_s).toBool();
+            }
+        }
+    }
+    return false;
+}
+
 // A window that can ask for another, as the program's screens can.
 class AskingWindow : public QQuickWindow {
     Q_OBJECT
@@ -681,6 +694,9 @@ private slots:
         // A start into BIOS setup through the server, sent from a window and not answered yet.
         ui::ActionsView& actions = *desk.windows.actions(0);
         actions.open(Desk::key(u"srv"_s));
+        // (Offered once the server has said what the machine can: its status may come after its tile and the
+        // account's leave to act. Chosen before that, it asked nothing, once in a gate on the loaded build box.)
+        QTRY_VERIFY(offers(actions, u"power:bios_setup"_s));
         actions.choose(u"power:bios_setup"_s);
         QVERIFY(!actions.question().isEmpty());
         actions.answer(true);

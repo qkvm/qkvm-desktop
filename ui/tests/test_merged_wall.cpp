@@ -395,6 +395,7 @@ class NotedStream final : public engine::Stream {
 public:
     void push(const engine::Packet& /*packet*/) override { ++pushed; }
     void shownAt(engine::SizePx /*onScreen*/, engine::Importance /*importance*/) override {}
+    void shownAsACard(bool shown) override { card = shown; }
     bool takeKeyFrameWish() override { return false; }
     engine::Stats stats() const override
     {
@@ -404,6 +405,7 @@ public:
     }
 
     int pushed = 0;
+    bool card = false;
 };
 
 // A window's engine that draws nothing: it notes which streams it was given and which were taken
@@ -855,7 +857,7 @@ private slots:
         actions.open(u"one/a"_s);
         actions.choose(u"media"_s);
         QVERIFY(actions.media()->opened());
-        QCOMPARE(actions.media()->client(), &client);
+        QCOMPARE(actions.media()->place(), static_cast<core::MediaPlace*>(&client));
         // No longer an admin there: the box goes.
         server.tellWho(operating);
         QVERIFY(!actions.media()->opened());
@@ -1824,6 +1826,40 @@ private slots:
             QVERIFY(window->scene.streams.empty());
         }
         QTRY_VERIFY(!made.stand->isStreaming());
+    }
+
+    // A machine's stream in a window is a card of the wall there (engine::Stream::shownAsACard: its still kept at the
+    // size drawn), but where its machine is the one shown large in that window: drawn from it until its picture live
+    // comes, and a copy of its screen made of it, it keeps its still whole (the review of f513c8e6, M1). In each window
+    // by itself, and a card again once it is no longer shown large.
+    void aMachinesStreamIsACardButWhereItsMachineIsShownLarge()
+    {
+        Desk desk;
+        Window& one = desk.window(true);
+        Window& two = desk.window(true);
+        desk.comeToAll();
+        const QString a = key(desk.first, u"a"_s);
+        const QString b = key(desk.first, u"b"_s);
+        QTRY_VERIFY(keysOf(one.wall).contains(a) && keysOf(one.wall).contains(b));
+        const auto isACard = [](Window& window, const QString& machine) {
+            const quint32 id = onTheCardOf(window.wall, machine, ui::WallModel::StreamRole).toUInt();
+            const auto found = window.scene.streams.find(id);
+            return found != window.scene.streams.end() && found->second->card;
+        };
+        for (Window* window : {&one, &two}) {
+            QVERIFY(isACard(*window, a));
+            QVERIFY(isACard(*window, b));
+        }
+        one.wall.enlarge(a);
+        QVERIFY(!isACard(one, a));
+        QVERIFY(isACard(one, b));
+        QVERIFY(isACard(two, a));
+        one.wall.enlarge(b);
+        QVERIFY(isACard(one, a));
+        QVERIFY(!isACard(one, b));
+        one.wall.closeEnlarged();
+        QVERIFY(isACard(one, a));
+        QVERIFY(isACard(one, b));
     }
 
     // --- a wall screen: from the moment a display link is used until a person signs it out ---

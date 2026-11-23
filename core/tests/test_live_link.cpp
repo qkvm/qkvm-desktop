@@ -8,6 +8,7 @@
 #include <utility>
 
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -192,6 +193,8 @@ public:
         send('\x82', message + "a JPEG");
     }
     void sendWord() { send('\x81', R"({"t":"state","state":"online"})"); }
+    // The line holds keyboard and mouse, as a server says it.
+    void giveControl() { send('\x81', R"({"t":"control","on":true})"); }
     void sendWire(const QByteArray& frames)
     {
         for (QTcpSocket* line : std::as_const(m_lines))
@@ -690,7 +693,7 @@ private slots:
         QFETCH(bool, destroy);
         SilentServer server(SilentServer::Does::TakesTheLine);
         // No pings (askEvery 60 s); silence and lateness after 1.5 s; room enough that nothing ends for size.
-        Line line(server.address(), {}, LiveLink::Watch{5000, 60'000, 1500, qsizetype{16} * 1024 * 1024});
+        Line line(server.address(), {}, LiveLink::Watch{5000, 60'000, 1500, qsizetype{16} * 1024 * 1024, 1500});
         QTRY_COMPARE(line.opened->count(), 1);
         const QByteArray grant = "{\"t\":\"control\",\"on\":true}";
         server.sendWire(QByteArray(1, '\x81') + QByteArray(1, static_cast<char>(grant.size())) + grant);
@@ -709,7 +712,9 @@ private slots:
                 QCoreApplication::processEvents();
         }
         QCOMPARE(line.closed->count(), 0); // precondition: still open
-        QTest::qWait(2000);                // what waits is now older than lateAfterMs (1.5 s)
+        // What waits is now older than lateAfterMs (1.5 s), this program busy meanwhile: where its loop ran, the line
+        // would have ended by itself at 1.5 s (DeviceLine's watch, outside review 2.6).
+        QThread::msleep(2000);
         QCOMPARE(line.closed->count(), 0); // precondition: nothing ended it meanwhile
         const qsizetype controlBefore = line.control->count();
         if (destroy)
@@ -1424,6 +1429,38 @@ private slots:
         QCOMPARE(line.closed->at(0).at(0).toString(), QString::fromLatin1(core::ServerClient::unreachable));
         QCOMPARE(line.closed->at(0).at(1).toString(),
                  u"qKVM stopped taking what is sent on the live picture's line."_s);
+    }
+
+    void aKeyThatWaitedLongerThanAQuarterOfASecondEndsTheLine()
+    {
+        // (Outside review 2.6; the merged review of 0.2.0, B-M2, and the owner's decision of 2026-11-19.) The live
+        // link is held to the limit of every other line: what was said and has waited in this program for longer than
+        // a quarter of a second ends the line there and then, and goes with it, never pressed when the way comes
+        // back. Before, its limit was its watch for silence (nine seconds; here set far longer, and the room for what
+        // waits too, so that neither is what ends it).
+        SilentServer server(SilentServer::Does::TakesTheLine);
+        const Line line(server.address(), {}, LiveLink::Watch{5000, 100, 60'000, qsizetype{64} * 1024 * 1024});
+        QTRY_COMPARE(line.opened->count(), 1);
+        server.giveControl();
+        QTRY_VERIFY(line.link->hasControl());
+        server.stopReading();
+        // More than Windows keeps for a line that nobody reads, said for a second and a half at the most: keys wait in
+        // this program. The line ends within a few seconds of the first of them, long before nine seconds (where a
+        // slow build took longer than that to say them all, a limit of nine seconds ended it too).
+        QElapsedTimer since;
+        since.start();
+        for (int said = 0; said < 200'000 && since.elapsed() < 1500 && line.closed->count() == 0; ++said) {
+            line.link->key(0x04, said % 2 == 0);
+            if (said % 2000 == 1999) {
+                QCoreApplication::processEvents();
+            }
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(line.closed->count(), 1, 3000);
+        QVERIFY2(since.elapsed() < 6000, QByteArray::number(since.elapsed()).constData());
+        QCOMPARE(line.closed->at(0).at(0).toString(), QString::fromLatin1(core::ServerClient::unreachable));
+        QCOMPARE(line.closed->at(0).at(1).toString(),
+                 u"qKVM stopped taking what is sent on the live picture's line."_s);
+        QVERIFY(!line.link->hasControl());
     }
 
     void aServerThatAnswersIsNotTakenForGoneHoweverStillItsScreen()

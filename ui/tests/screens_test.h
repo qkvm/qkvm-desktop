@@ -11,6 +11,9 @@
 #include <QElapsedTimer>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQmlError>
@@ -1024,16 +1027,64 @@ protected:
     }
 };
 
-// The start of each of the three programs.
+// The start of each of the three programs. `scales`: screens beside the one the windows open on, each at one of
+// Windows' scales in percent (125: a monitor set to 125 %), as Windows tells Qt of them, by their dots to the inch
+// against 96, and as the off-screen platform is told to show them (Qt's own tests of scaling do the same). A window
+// moved onto one of them is drawn and laid out as at that scale.
 template <typename Tests>
-int runScreensTests(int argc, char* argv[])
+int runScreensTests(int argc, char* argv[], const QList<int>& scales = {})
 {
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    QByteArray platform = "offscreen";
+    std::optional<QTemporaryDir> described;
+    if (!scales.isEmpty()) {
+        // (The platform is told where its description is after a colon, and its words are cut at every colon, a
+        // drive's too: the description lies under the folder the program runs in, and is named from there. It is
+        // read once, as the platform starts.)
+        described.emplace(QDir::current().filePath(u"qkvm-screens-XXXXXX"_s));
+        if (!described->isValid()) {
+            qCritical("no folder for the screens' description here");
+            return 1;
+        }
+        QJsonArray screens{QJsonObject{{u"name"_s, u"at100"_s},
+                                       {u"x"_s, 0},
+                                       {u"y"_s, 0},
+                                       {u"width"_s, 1920},
+                                       {u"height"_s, 1200},
+                                       {u"logicalDpi"_s, 96},
+                                       {u"logicalBaseDpi"_s, 96},
+                                       {u"dpr"_s, 1}}};
+        for (const int percent : scales) {
+            // (Each far below the others, so that no window comes to stand on two; as large as 1920 by 1200 at it.)
+            screens.append(QJsonObject{{u"name"_s, u"at%1"_s.arg(percent)},
+                                       {u"x"_s, 0},
+                                       {u"y"_s, 10000 * static_cast<int>(screens.size())},
+                                       {u"width"_s, 1920 * percent / 100},
+                                       {u"height"_s, 1200 * percent / 100},
+                                       {u"logicalDpi"_s, 96 * percent / 100.0},
+                                       {u"logicalBaseDpi"_s, 96},
+                                       {u"dpr"_s, 1}});
+        }
+        QFile file(described->filePath(u"screens.json"_s));
+        if (!file.open(QIODevice::WriteOnly) ||
+            file.write(QJsonDocument(QJsonObject{{u"screens"_s, screens}}).toJson()) <= 0) {
+            qCritical("the screens' description could not be written");
+            return 1;
+        }
+        file.close();
+        platform += ":configfile=" + QDir::current().relativeFilePath(file.fileName()).toUtf8();
+    }
+    qputenv("QT_QPA_PLATFORM", platform);
     qputenv("QT_QUICK_BACKEND", "software");
     // The off-screen platform knows no fonts but those in a folder it is shown: without Windows' own,
     // every letter is an empty box, and no line of text is as long as it will be.
     qputenv("QT_QPA_FONTDIR", qgetenv("SystemRoot") + "/Fonts");
     QGuiApplication app(argc, argv);
+    if (described.has_value() && QGuiApplication::screens().size() != scales.size() + 1) {
+        qCritical("the off-screen platform shows %lld screens, not %lld",
+                  static_cast<long long>(QGuiApplication::screens().size()), static_cast<long long>(scales.size() + 1));
+        return 1;
+    }
+    described.reset();
     qkvm::ui::prepareApplication();
     Tests test;
     return QTest::qExec(&test, argc, argv);

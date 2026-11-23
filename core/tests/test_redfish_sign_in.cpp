@@ -249,8 +249,10 @@ private slots:
 
     void aControllerThatWentAwayIsNotSaidGoodbyeTo()
     {
-        // (redfish.py:640) Where it was away the last time it was asked, nothing is sent after it.
+        // (redfish.py:640) Where it was away the last time it was asked, nothing is sent after it. (It closes every
+        // line after its answer: one it kept would still be answered on once it takes no new ones.)
         RedfishByHand bmc;
+        bmc.stand->closesSilently = true;
         const RedfishDevice::Pace pace = quick();
         auto device = std::make_unique<RedfishDevice>(at(bmc), u"secret"_s, pace);
         QVERIFY(identified(*device));
@@ -701,27 +703,19 @@ private slots:
         QVERIFY(pace.pacing->waitLeftMs(mark) > 0);
     }
 
-    void aLineTheControllerClosedWithoutAWordIsNoSignInThatCameToNothing_data()
-    {
-        QTest::addColumn<bool>("encrypted");
-        QTest::newRow("in the clear") << false;
-        QTest::newRow("over TLS") << true;
-    }
-
     void aLineTheControllerClosedWithoutAWordIsNoSignInThatCameToNothing()
     {
-        // A controller that closes the line right after its root, without saying it would (no "Connection: close"):
-        // the line looks kept. The password goes once, a session comes, and nothing is held back. (Qt finds the line
-        // closed before the sign-in goes: the close comes with the root's answer.)
-        QFETCH(const bool, encrypted);
-        RedfishByHand bmc(RedfishByHand::Layout::Ami, encrypted ? std::optional<Tls>(tls("first")) : std::nullopt);
+        // In the clear, a controller that closes the line right after its root, without saying it would (no
+        // "Connection: close"): the line looks kept. The password goes once, a session comes, and nothing is held back.
+        // (Qt finds the line closed before the sign-in goes: the close comes with the root's answer.) Over plain HTTP
+        // nothing tells that before the password goes, and it goes on the new line: the gap SPEC section 8 names. Over
+        // TLS it is stopped before a byte goes since the outside review of 0.2.0, 5.4 (where this test had a row over
+        // TLS too: thePasswordGoesOnlyOnTheConnectionItsRootWasReadOn).
+        RedfishByHand bmc;
         bmc.beServer(aSystem, aRoot);
         bmc.stand->closesSilently = true;
         RedfishDevice::Pace pace = quick();
-        pace.connectWithinMs = 5000; // (a TLS handshake under the address sanitizer on a busy PC)
         RedfishDevice::Where where = keptAs(bmc, markOf(aSystem) + digestOf(aRoot));
-        where.knownByCertificate = encrypted;
-        where.certificate = encrypted ? sha256Of("first") : QByteArray();
         RedfishDevice device(where, u"secret"_s, pace);
         const auto what = identified(device);
         QVERIFY2(what, what ? "" : what.error().message.c_str());
@@ -729,6 +723,89 @@ private slots:
         QCOMPARE(bmc.sessions.size(), 1);
         QVERIFY(!pace.pacing->standing(SignInPacing::what(u"login", bmc.address(), u"admin"_s, u"secret"_s)));
         QVERIFY(bmc.stand->lines > 1);
+    }
+
+    void thePasswordGoesOnlyOnTheConnectionItsRootWasReadOn_data()
+    {
+        QTest::addColumn<bool>("encrypted");
+        QTest::addColumn<bool>("silently");
+        QTest::newRow("over TLS, the line closed without a word") << true << true;
+        QTest::newRow("over TLS, the line said to be closed") << true << false;
+        QTest::newRow("in the clear, the line said to be closed") << false << false;
+    }
+
+    void thePasswordGoesOnlyOnTheConnectionItsRootWasReadOn()
+    {
+        // (Outside review of 0.2.0, area 5, MEDIUM 5.4.) Which controller answers is asked on the connection the
+        // password then goes on: one that closes the connection after its root, and after every answer, cannot be asked
+        // so. The password is not sent on a connection made anew for it (over TLS: stopped as the two agree how to
+        // speak, before a byte of it goes; where the root's answer says the line ends: not sent at all); the root is
+        // read once more, on a new connection, and where that one closes too, nothing goes, and that is said (before:
+        // the password went on a new connection, which a clash of leases may give to another board of the same
+        // certificate).
+        QFETCH(const bool, encrypted);
+        QFETCH(const bool, silently);
+        RedfishByHand bmc(RedfishByHand::Layout::Ami, encrypted ? std::optional<Tls>(tls("first")) : std::nullopt);
+        bmc.beServer(aSystem, aRoot);
+        if (silently) {
+            bmc.stand->closesSilently = true;
+        } else {
+            bmc.stand->keepsLines = false;
+        }
+        RedfishDevice::Pace pace = quick();
+        pace.connectWithinMs = 5000; // (a TLS handshake under the address sanitizer on a busy PC)
+        RedfishDevice::Where where = keptAs(bmc, markOf(aSystem) + digestOf(aRoot));
+        where.knownByCertificate = encrypted;
+        where.certificate = encrypted ? sha256Of("first") : QByteArray();
+        RedfishDevice device(where, u"secret"_s, pace);
+        const auto what = identified(device);
+        QCOMPARE(codeOf(what), std::string("no_sign_in"));
+        QVERIFY2(QString::fromStdString(what.error().message).contains(u"closes the connection after every answer"_s),
+                 what.error().message.c_str());
+        QCOMPARE(bmc.logins, 0);
+        QVERIFY(bmc.loginBodies.isEmpty());
+        QCOMPARE(bmc.rootsUnsigned, 2);
+        // Nothing went, and nothing is held back: kept again, the controller is signed in to at the next asking.
+        const SignInPacing::Mark mark = SignInPacing::what(u"login", bmc.address(), u"admin"_s, u"secret"_s);
+        QVERIFY(!pace.pacing->standing(mark));
+        bmc.stand->closesSilently = false;
+        bmc.stand->keepsLines = true;
+        QVERIFY(identified(device));
+        QCOMPARE(bmc.logins, 1);
+    }
+
+    void aNewLeaseBetweenTheRootAndThePasswordGetsNothing()
+    {
+        // (5.4, the scenario of the outside review.) Over TLS, two boards of one certificate at one address (a clash of
+        // leases): A answers the root and closes the connection without a word, and the next connection reaches B. The
+        // password is not sent on that connection; B's root, read on it, is another controller's, and B is sent
+        // nothing.
+        RedfishByHand bmc(RedfishByHand::Layout::Ami, tls("first"));
+        bmc.beServer(aSystem, aRoot);
+        bool once = false;
+        bmc.whenAsked = [&](const Asked& asked) {
+            if (!once && asked.method == "GET" && asked.path == "/redfish/v1/" &&
+                !asked.headers.contains("x-auth-token")) {
+                once = true;
+                bmc.stand->closesSilently = true; // (this answer closes its line)
+                QTimer::singleShot(0, &bmc, [&bmc] {
+                    bmc.stand->closesSilently = false;
+                    bmc.beServer(bSystem, bRoot);
+                });
+            }
+        };
+        RedfishDevice::Pace pace = quick();
+        pace.connectWithinMs = 5000;
+        RedfishDevice::Where where = keptAs(bmc, markOf(aSystem) + digestOf(aRoot));
+        where.knownByCertificate = true;
+        where.certificate = sha256Of("first");
+        RedfishDevice device(where, u"secret"_s, pace);
+        const auto what = identified(device);
+        QCOMPARE(codeOf(what), std::string("another_machine"));
+        QCOMPARE(what.error().message, RedfishDevice::anotherController().message);
+        QCOMPARE(bmc.logins, 0);
+        QCOMPARE(bmc.rootsUnsigned, 2);
+        bmc.whenAsked = nullptr;
     }
 
     void aSignInThatNothingReachedKeepsNothing()

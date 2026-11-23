@@ -32,7 +32,10 @@ struct WallTile {
     // How large its screen is in its own pixels, as its status says; nothing where it does not say (b10:
     // what its large view is drawn by at a scale).
     QSize pictureSize;
-    QString note;       // what this PC's own wall says of it in its details (Machine::note)
+    QString note; // what this PC's own wall says of it in its details (Machine::note)
+    // Why its power is unknown where its card says "Power unknown" and the wall can say (Status::powerNote): said whole
+    // in its Details, as the page says it there; empty otherwise.
+    QString powerNote;
     QVariantList ports; // a KVM with several computers behind it: {label, hint, shown, empty} for each
     // A server seen through its controller has no picture and shows how it is doing instead:
     // {power: "on" or "off", tone: "ok", "warn" or "bad", tag, locating, hardware,
@@ -86,6 +89,7 @@ public:
         LargeMetaRole,
         AmtViewRole,
         PictureSizeRole,
+        PowerNoteRole, // why its power is unknown, for its Details (WallTile::powerNote)
     };
 
     explicit WallModel(QObject* parent = nullptr);

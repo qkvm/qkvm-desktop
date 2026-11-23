@@ -180,7 +180,7 @@ Section {
             readonly property var saidUnder: [twins !== "" ? {
                     "said": Words.sameDeviceAs.arg(twins),
                     "tone": "bad"
-                } : null, !noPassword ? null : family === "jetkvm" ? {
+                } : null, !noPassword ? null : family === "jetkvm" || family === "vnc" ? {
                     "said": Words.noPasswordFineWithout,
                     "tone": ""
                 } : {
@@ -198,10 +198,10 @@ Section {
                 },
                 {
                     "text": host,
-                    "under": [family === "jetkvm" ? Words.jetKvmKind : family === "redfish" ? Words.serverControllerKind : Words.kvmdKind]
+                    "under": [family === "jetkvm" ? Words.jetKvmKind : family === "redfish" ? Words.serverControllerKind : family === "vnc" ? Words.vncServerKind : family === "proxmox" ? Words.proxmoxGuestKind : Words.kvmdKind]
                 },
                 {
-                    "text": way === "certificate" ? Words.knownByItsCertificate : way === "windows" ? Words.knownByWindowsWord : Words.plainHttpInTheClear
+                    "text": way === "certificate" ? Words.knownByItsCertificate : way === "windows" ? Words.knownByWindowsWord : family === "vnc" ? Words.plainVncUnencrypted : Words.plainHttpInTheClear
                 }
             ]
 

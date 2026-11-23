@@ -252,6 +252,12 @@ std::optional<bool> powerSaid(const QJsonObject& atx)
         }
         return std::nullopt;
     }
+    // Stock kvmd's two lights (a PiKVM's ATX board), the same two a JetKVM's extension has: a lit disk light is a
+    // machine that is on, whatever its power light says, as a JetKVM's restart has it (a power light whose lead is not
+    // connected always reads off; the owner's decision of 2026-11-19, review cx4-2 L5). A dark disk light says nothing.
+    if (flag(at(atx, {"leds"_L1, "hdd"_L1})) == std::optional<bool>(true)) {
+        return true;
+    }
     return flag(at(atx, {"leds"_L1, "power"_L1}));
 }
 
@@ -284,8 +290,10 @@ std::optional<QJsonObject> boardHeard(const QByteArray& message)
             word == QJsonValue(u"on"_s) || word == QJsonValue(u"off"_s) || word == QJsonValue(u"sleep"_s);
         board.insert(u"power"_s, known ? word : QJsonValue());
     }
+    // (Both lights: a lit disk light is a machine that is on, powerSaid.)
     const QJsonValue lights = event.value("leds"_L1);
-    board.insert(u"leds"_s, lights.isObject() ? QJsonObject{{u"power"_s, kept(lights.toObject().value("power"_L1))}}
+    board.insert(u"leds"_s, lights.isObject() ? QJsonObject{{u"power"_s, kept(lights.toObject().value("power"_L1))},
+                                                            {u"hdd"_s, kept(lights.toObject().value("hdd"_L1))}}
                                               : QJsonObject{});
     return board;
 }

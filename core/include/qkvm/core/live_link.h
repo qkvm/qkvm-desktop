@@ -57,12 +57,17 @@ class LiveLink : public Live {
 public:
     // How the line is watched: the server is asked every so often whether it is there, and one
     // of which nothing has come for so long is taken to be gone. So is one that takes nothing
-    // off the line, once this much waits to be sent to it. A test waits less.
+    // off the line, once this much waits to be sent to it. A test waits less. (And one on which
+    // something said has waited in this program for longer than lateAfterMs, every line's limit,
+    // a quarter of a second: a key from then is not pressed now.)
     struct Watch {
         int openWithinMs = 10'000;
         int askEveryMs = 3000;
         int silentAfterMs = 9000;
         qsizetype mostUnsentBytes = qsizetype{1024} * 1024;
+        // The longest that what was said may wait in this program to leave: every line's limit (DeviceLine's
+        // Limits::lateAfterMs), apart from the watch for silence. A test may give it longer.
+        int lateAfterMs = 250;
     };
 
     // `request`: where the line goes, with what every call carries. `pass`: what the server gave

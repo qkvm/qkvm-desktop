@@ -99,7 +99,10 @@
 // "address;group", with commas between several), with the password in QKVM_RIG_KVM_PASSWORD: made-up
 // ones on this PC's own address only (tools/stand_in_kvm.py). A real KVM is added only where its
 // owner named it for this run: its host stands in QKVM_RIG_NAMED_BY_THE_OWNER (several with commas
-// between), and what is not named there, and is not this PC's own address, is passed by.
+// between), and what is not named there, and is not this PC's own address, is passed by. One the box
+// could not add (on a loaded PC a made-up KVM answered too late: "Device is unreachable") is tried
+// again after the others, three times in all. With QKVM_RIG_MEASURE as well, the wall settles from
+// when it has every KVM named there (bench/wall_measure.h).
 // QKVM_RIG_STAND_IN names, for one that was started elsewhere. Never at 8787, where a QKVM that
 // somebody uses listens unless it was told otherwise.
 
@@ -112,6 +115,7 @@
 
 #include <QByteArray>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -357,6 +361,14 @@ int run(int argc, char** argv)
     onTheCard.choice = card == "power-saving"_L1 ? engine::AdapterChoice::PowerSaving
                        : card == "windows"_L1    ? engine::AdapterChoice::AsWindowsChooses
                                                  : engine::AdapterChoice::MostPowerful;
+    // With QKVM_RIG_STILLS set to a number, so many card stills that are key frames are decoded at once (0: no limit,
+    // as before PERF-2); and the wall's measuring says what the line of them came to.
+    bool stillsGiven = false;
+    const int stillsAsked = qEnvironmentVariable("QKVM_RIG_STILLS").toInt(&stillsGiven);
+    if (stillsGiven) {
+        onTheCard.stillsAtOnce = stillsAsked;
+    }
+    engine::Gpu* firstGpu = nullptr;
     makers.gpu = [&] {
         base::Result<std::unique_ptr<engine::Gpu>> made = engine::Gpu::create(onTheCard);
         if (!made) {
@@ -364,6 +376,9 @@ int run(int argc, char** argv)
             return std::unique_ptr<engine::Gpu>();
         }
         reached("the engine had its graphics device");
+        if (firstGpu == nullptr) {
+            firstGpu = made.value().get();
+        }
         return std::move(made).value();
     };
     // Keyboard and mouse of a machine, as the program has them: every key of this PC's keyboard,
@@ -550,9 +565,14 @@ int run(int argc, char** argv)
         // has been told of. Only what is on this PC's own address: a made-up KVM.
         auto toAdd =
             std::make_shared<QStringList>(qEnvironmentVariable("QKVM_RIG_ADD").split(u',', Qt::SkipEmptyParts));
-        const auto next = [&adding, toAdd] {
+        // The one being added, and how often each was tried: one that the box could not add (a made-up KVM that
+        // answered too late on a loaded PC: "Device is unreachable") is tried again after the others, twice at most.
+        auto adds = std::make_shared<std::pair<QString, QHash<QString, int>>>();
+        const auto next = [&adding, toAdd, adds] {
             while (!toAdd->isEmpty() && !adding.busy()) {
-                const QStringList parts = toAdd->takeFirst().split(u';');
+                adds->first = toAdd->takeFirst();
+                ++adds->second[adds->first];
+                const QStringList parts = adds->first.split(u';');
                 // (Read as the box reads an address, and then only this PC's own, or a KVM its owner
                 // named for this run: a password goes nowhere else.)
                 const base::Result<QUrl> where = core::kvm::addressFrom(parts.at(0));
@@ -566,9 +586,14 @@ int run(int argc, char** argv)
                 adding.add(parts.at(0), QString(), qEnvironmentVariable("QKVM_RIG_KVM_PASSWORD"), parts.value(1));
             }
         };
-        QObject::connect(&adding, &ui::AddKvmView::changed, &app, [&adding, next] {
+        QObject::connect(&adding, &ui::AddKvmView::changed, &app, [&adding, next, toAdd, adds] {
             if (!adding.busy()) {
                 std::fprintf(stderr, "added: %s%s\n", qPrintable(adding.added()), qPrintable(adding.problem()));
+                if (!adding.problem().isEmpty() && !adds->first.isEmpty() && adds->second.value(adds->first) < 3) {
+                    std::fprintf(stderr, "tried again later: %s\n", qPrintable(adds->first));
+                    toAdd->append(adds->first);
+                }
+                adds->first.clear();
                 next();
             }
         });
@@ -584,6 +609,30 @@ int run(int argc, char** argv)
             window->setGeometry(place.at(0).toInt(), place.at(1).toInt(), place.at(2).toInt(), place.at(3).toInt());
         });
     }
+    // With QKVM_RIG_DRAG set to a number of seconds: as the wall's measuring begins (QKVM_RIG_MEASURE), the window is
+    // made narrower by 4 pixels every 16 ms, and wider again, 400 pixels each way, for so long: as a person drags its
+    // edge, and every card's size changes on most frames (the review of f513c8e6, M3).
+    QTimer dragSteps;
+    QElapsedTimer dragClock;
+    std::function<void()> drags;
+    if (const int dragSeconds = qEnvironmentVariable("QKVM_RIG_DRAG").toInt(); dragSeconds > 0) {
+        const qint64 forMs = qint64{dragSeconds} * 1000;
+        drags = [&dragSteps, &dragClock, window, forMs] {
+            dragClock.start();
+            const int from = window->width();
+            QObject::connect(&dragSteps, &QTimer::timeout, window, [&dragSteps, &dragClock, window, from, forMs] {
+                if (dragClock.elapsed() >= forMs) {
+                    dragSteps.stop();
+                    window->resize(from, window->height());
+                    return;
+                }
+                // (Up and down again, 400 pixels each way, 4 at a time.)
+                const qint64 step = dragClock.elapsed() / 16 % 200;
+                window->resize(from - static_cast<int>(4 * (step < 100 ? step : 200 - step)), window->height());
+            });
+            dragSteps.start(16);
+        };
+    }
     if (const QString how = qEnvironmentVariable("QKVM_RIG_WINDOW"); !how.isEmpty()) {
         QTimer::singleShot(3000, &app, [window, how] {
             if (how == "maximized"_L1) {
@@ -597,8 +646,36 @@ int run(int argc, char** argv)
     std::unique_ptr<bench::WallMeasure> measure;
     if (const QStringList how = qEnvironmentVariable("QKVM_RIG_MEASURE").split(u','); how.size() == 3) {
         reached("the window was shown");
+        // (Settled from when the wall has every KVM the rig adds to it, where it adds some.)
+        const auto toAdd = static_cast<int>(
+            showsOwn ? qEnvironmentVariable("QKVM_RIG_ADD").split(u',', Qt::SkipEmptyParts).size() : 0);
         measure = std::make_unique<bench::WallMeasure>(
-            *window, wall, how.at(0), how.at(1).toInt(), how.at(2).toInt(), [] { QCoreApplication::quit(); }, moments);
+            *window, wall, how.at(0), how.at(1).toInt(), how.at(2).toInt(), [] { QCoreApplication::quit(); }, moments,
+            toAdd);
+        if (drags) {
+            measure->whenItBegins(drags);
+        }
+        // What the line of card stills that are key frames came to while it measured (Gpu::Options::stillsAtOnce).
+        measure->addToReport([&firstGpu, &onTheCard](bool atTheEnd) {
+            const engine::Gpu::Stills stills = firstGpu != nullptr ? firstGpu->stillsSeen() : engine::Gpu::Stills{};
+            if (!atTheEnd) {
+                return QString();
+            }
+            const QString said =
+                u"card stills that are key frames decoded at once, at the most (of %1, 0 for no limit): "
+                u"%2\nms the longest of them waited for its turn: %3\ncard stills that waited for their "
+                u"turn: %4\ncard stills that a newer one took the place of while they waited: %5\n"
+                u"card stills handed in, and decoded: %6, %7\nplaces held, and cards in line, at the end: %8, %9\n"_s;
+            return said.arg(onTheCard.stillsAtOnce)
+                .arg(stills.mostAtOnce)
+                .arg(stills.longestWaitMs, 0, 'f', 1)
+                .arg(stills.waited)
+                .arg(stills.replacedWaiting)
+                .arg(stills.handedIn)
+                .arg(stills.decoded)
+                .arg(stills.holdingNow)
+                .arg(stills.inLineNow);
+        });
     }
     std::unique_ptr<bench::LiveMeasure> liveMeasure;
     if (const QStringList how = qEnvironmentVariable("QKVM_RIG_LIVE_MEASURE").split(u','); how.size() == 3) {

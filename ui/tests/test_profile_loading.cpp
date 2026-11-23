@@ -12,6 +12,7 @@
 #include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QVersionNumber>
 
 #include <qkvm/core/profile.h>
 
@@ -28,11 +29,36 @@ using namespace qkvm;
 // Manager of whoever runs this.
 namespace {
 
-const QString version = u"0.1.2"_s;
+// The published versions whose profile a person left (a wall screen's is never loaded: the VM step loads a person's).
+const QStringList published{u"0.1.0"_s, u"0.1.1"_s, u"0.1.2"_s};
 
-QString fixtureFolder()
+// A version after every published one, as the one that upgrades them starts, and after every version that made a
+// fixture here: a release's own fixture is made with its maker before its version is in `published`, and the version
+// that upgrades it is the next (the merged release review, part C, M1: "0.2.0" written here by hand was no later
+// version once 0.2.0 was published).
+QString aLaterVersion()
 {
-    return QStringLiteral(QKVM_PROFILE_FIXTURES) + u"/0.1.1"_s;
+    QVersionNumber last;
+    for (const QString& one : published) {
+        last = std::max(last, QVersionNumber::fromString(one));
+    }
+    const QDir all(QStringLiteral(QKVM_PROFILE_FIXTURES));
+    for (const QString& name : all.entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        QFile made(all.filePath(name + u"/made.json"_s));
+        if (made.open(QIODevice::ReadOnly)) {
+            const QJsonObject said = QJsonDocument::fromJson(made.readAll()).object();
+            last = std::max(last, QVersionNumber::fromString(said["made_by"_L1]["version"_L1].toString()));
+        }
+    }
+    return QVersionNumber(last.majorVersion(), last.minorVersion() + 1, 0).toString();
+}
+const QString version = aLaterVersion();
+
+// A published version's fixture; none: the newest, which holds the most (from 0.1.2 on: the settings name their
+// writer, the start is recorded, and a setup override is marked queued).
+QString fixtureFolder(const QString& of = published.back())
+{
+    return QStringLiteral(QKVM_PROFILE_FIXTURES) + u'/' + of;
 }
 
 bool write(const QString& file, const QByteArray& bytes)
@@ -43,7 +69,7 @@ bool write(const QString& file, const QByteArray& bytes)
 
 // A fixture loaded, and a first start of this version over it as the program makes one (its record and its copy).
 struct Loaded {
-    Loaded() : fixture(fixtureFolder())
+    explicit Loaded(const QString& of = published.back()) : fixture(fixtureFolder(of))
     {
         folder = home.filePath(u"QKVM Desktop"_s);
         settings = QDir(folder).filePath(u"settings.json"_s);
@@ -76,9 +102,26 @@ class TestProfileLoading : public QObject {
     Q_OBJECT
 
 private slots:
+    // Each published version's: the copy of its settings named as that version's start leaves it (by the version that
+    // wrote them, from 0.1.2 on; else as found before this one), and the version before recorded where it kept one.
+    void aFixtureIsPutInPlaceByteForByteAndAnUpgradeThatKeptItPasses_data()
+    {
+        QTest::addColumn<QString>("of");
+        QTest::addColumn<QString>("keptAs");
+        QTest::addColumn<QString>("previous");
+        for (const QString& one : published) {
+            const bool namesItsWriter = one != u"0.1.0"_s && one != u"0.1.1"_s;
+            QTest::newRow(qPrintable(one))
+                << one << u"settings.json.%1.bak"_s.arg(namesItsWriter ? one : u"before-"_s + version)
+                << (namesItsWriter ? one : QString());
+        }
+    }
     void aFixtureIsPutInPlaceByteForByteAndAnUpgradeThatKeptItPasses()
     {
-        Loaded loaded;
+        QFETCH(QString, of);
+        QFETCH(QString, keptAs);
+        QFETCH(QString, previous);
+        Loaded loaded(of);
         QVERIFY(loaded.fixture.whole());
         QVERIFY2(loaded.wrong.isEmpty(), qPrintable(loaded.wrong.join(u"; "_s)));
         QVERIFY(loaded.started);
@@ -91,13 +134,19 @@ private slots:
         QVERIFY(std::ranges::any_of(loaded.fixture.files(),
                                     [](const QString& file) { return file.startsWith(u"alert-pictures/"_s); }));
         for (const QString& file : loaded.fixture.files()) {
+            // (But the record of the start, which this version's start wrote anew.)
+            if (file == QFileInfo(core::profile::versionFile(loaded.settings)).fileName()) {
+                continue;
+            }
             QCOMPARE(testing::profiles::bytesOf(QDir(loaded.folder).filePath(file)),
                      testing::profiles::bytesOf(QDir(loaded.fixture.profileFolder()).filePath(file)));
         }
         const QJsonObject report = loaded.check();
         QVERIFY2(report["passed"_L1].toBool(), qPrintable(failuresOf(report)));
         QVERIFY(report["kept_whole"_L1].toBool());
+        QCOMPARE(report["kept_as"_L1].toString(), keptAs);
         QCOMPARE(report["recorded"_L1]["version"_L1].toString(), version);
+        QCOMPARE(report["recorded"_L1]["previous"_L1].toString(), previous);
         QVERIFY(report["windows_moved"_L1].toArray().isEmpty());
         // (Nothing of a secret is in what it says: the passwords, the session, the text, the key. The setup marker is
         // the one byte "1", which is no secret, and is in any count.)
@@ -151,6 +200,10 @@ private slots:
         QTest::newRow("the alerts gone") << 10 << u"alert"_s;
         QTest::newRow("the setup override gone") << 11 << u"setup override"_s;
         QTest::newRow("a file gone") << 12 << u"settings.json.setup-overrides is gone"_s;
+        QTest::newRow("the queued mark of a setup override gone") << 13 << u"setup override"_s;
+        QTest::newRow("the version before not recorded")
+            << 14 << u"version before is not recorded as "_s + published.back();
+        QTest::newRow("the settings said to be written by another") << 15 << u"settings.json lost written_by"_s;
     }
     void everyLossIsSeen()
     {
@@ -165,6 +218,10 @@ private slots:
             return write(settings, QJsonDocument(now).toJson());
         };
         const QString lab = loaded.fixture.made["kvms"_L1][1]["id"_L1].toString();
+        // (The newest fixture's settings name their writer: the copy is named by it.)
+        QVERIFY(!loaded.fixture.writer().isEmpty());
+        const QString keptAs = settings + u'.' + loaded.fixture.writer() + u".bak"_s;
+        QVERIFY(QFile::exists(keptAs));
         switch (loss) {
         case 0:
             loaded.store.all[u"kvm:"_s + lab] = "QKVM-KVM-2\nhttp://192.0.2.11:8080\nnone\nanother";
@@ -185,10 +242,10 @@ private slots:
             }));
             break;
         case 4:
-            QVERIFY(QFile::remove(settings + u".before-"_s + version + u".bak"_s));
+            QVERIFY(QFile::remove(keptAs));
             break;
         case 5:
-            QVERIFY(write(settings + u".before-"_s + version + u".bak"_s, "{}"));
+            QVERIFY(write(keptAs, "{}"));
             break;
         case 6:
             QVERIFY(QFile::remove(core::profile::versionFile(settings)));
@@ -219,6 +276,28 @@ private slots:
             break;
         case 12:
             QVERIFY(QFile::remove(core::profile::setupOverridesFile(settings)));
+            break;
+        case 13: {
+            // (As a build that drops the mark would write the record again.)
+            QJsonObject now = testing::profiles::jsonIn(core::profile::setupOverridesFile(settings));
+            QJsonArray servers = now[u"servers"_s].toArray();
+            QVERIFY(!servers.isEmpty() && servers.at(0)[u"queued"_s].toBool());
+            QJsonObject first = servers.at(0).toObject();
+            first.remove(u"queued"_s);
+            servers.replace(0, first);
+            now[u"servers"_s] = servers;
+            QVERIFY(write(core::profile::setupOverridesFile(settings), QJsonDocument(now).toJson()));
+            break;
+        }
+        case 14: {
+            QJsonObject now = testing::profiles::jsonIn(core::profile::versionFile(settings));
+            QCOMPARE(now[u"previous"_s].toString(), loaded.fixture.recorded());
+            now[u"previous"_s] = QString();
+            QVERIFY(write(core::profile::versionFile(settings), QJsonDocument(now).toJson()));
+            break;
+        }
+        case 15:
+            QVERIFY(rewritten([](QJsonObject& now) { now[u"written_by"_s] = u"0.1.1"_s; }));
             break;
         default:
             QFAIL("no such loss");

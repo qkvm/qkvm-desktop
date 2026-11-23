@@ -443,6 +443,106 @@ private slots:
         QVERIFY(!core::Settings(folder.filePath(u"none.json"_s)).wasUnreadable());
     }
 
+    // Whether settings that could not be read at a start stand put aside beside these (at this start or one before):
+    // their list of KVMs may be put back, as the notice invites, and with it the cards whose servers' notes the prune
+    // is not to let go (SetupOverrides::prune, outside review of the fuzz work, round 3, M2). Looked at anew at each
+    // asking: once whoever looks after the PC takes them away, they stand no more.
+    void whatWasPutAsideIsSeenBesideTheSettingsUntilItIsGone()
+    {
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        write(file, "{");
+        core::Settings started(file);
+        QVERIFY(!started.keepsAsideWhatCouldNotBeRead());
+        QVERIFY(started.putAsideWhatCouldNotBeRead().ok());
+        QVERIFY(started.keepsAsideWhatCouldNotBeRead());
+        core::Remembered what;
+        what.theme = u"dark"_s;
+        QVERIFY(started.remember(what).ok());
+        const core::Settings next(file);
+        QVERIFY(next.listReadWhole());
+        QVERIFY2(next.keepsAsideWhatCouldNotBeRead(), "the start after one whose settings were put aside missed them");
+        QVERIFY(QFile::rename(folder.filePath(u"settings.unreadable.json"_s),
+                              folder.filePath(u"settings.unreadable-7.json"_s)));
+        QVERIFY(next.keepsAsideWhatCouldNotBeRead());
+        QVERIFY(QFile::remove(folder.filePath(u"settings.unreadable-7.json"_s)));
+        QVERIFY(!next.keepsAsideWhatCouldNotBeRead());
+        // (Another file's put-aside is none of these settings'.)
+        write(folder.filePath(u"settings.json.sign-ins.unreadable"_s), "{");
+        QVERIFY(!next.keepsAsideWhatCouldNotBeRead());
+    }
+
+    // Whether the list of this PC's own KVMs was read whole at the start: only then does a server on no card of it say
+    // that it is on no card of the wall (SetupOverrides::prune, outside review of the prune, M2). Not where the file
+    // could not be read, nor where it was read and its list is no list, holds an entry this build does not read (a
+    // later version's), or lost one in its reading (no entry the program wrote, an id twice, one past the most). A file
+    // with no list, and no file, are read whole: there is nothing else. Settings remembered later change nothing of it:
+    // it is the start's.
+    void aListOfKvmsIsReadWholeOnlyWhereNothingOfItWasLeftAside()
+    {
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        QVERIFY(core::Settings(file).listReadWhole());
+        core::Remembered two;
+        core::OwnKvm kvm;
+        kvm.id = u"0123abcd"_s;
+        kvm.kind = u"redfish"_s;
+        kvm.address = u"https://127.0.0.1:8443"_s;
+        kvm.name = u"One"_s;
+        two.kvms.append(kvm);
+        kvm.id = u"4567cdef"_s;
+        kvm.address = u"https://127.0.0.1:9443"_s;
+        kvm.name = u"Two"_s;
+        two.kvms.append(kvm);
+        {
+            core::Settings writer(file);
+            QVERIFY(writer.remember(two).ok());
+        }
+        const QJsonObject written = QJsonDocument::fromJson(read(file)).object();
+        QCOMPARE(core::Settings(file).remembered().kvms.size(), 2);
+        QVERIFY(core::Settings(file).listReadWhole());
+        const auto whole = [&file](const QByteArray& content) {
+            write(file, content);
+            return core::Settings(file).listReadWhole();
+        };
+        const auto withList = [&written](const QJsonValue& list) {
+            QJsonObject said = written;
+            said.insert(u"kvms"_s, list);
+            return QJsonDocument(said).toJson();
+        };
+        const QJsonArray list = written.value(u"kvms"_s).toArray();
+        QVERIFY(whole(QByteArray(R"({"theme": "dark"})")));
+        QVERIFY(!whole("{\"kvms\": [{\"id\": "));
+        QVERIFY(!whole(withList(5)));
+        QVERIFY(!whole(withList(QJsonValue::Null)));
+        QJsonArray more = list;
+        more.append(QJsonObject{
+            {u"id"_s, u"89abcdef"_s}, {u"kind"_s, u"of-a-later-version"_s}, {u"address"_s, u"https://127.0.0.1:1"_s}});
+        QVERIFY2(!whole(withList(more)), "a list that held a KVM this build does not read was read whole");
+        QCOMPARE(core::Settings(file).remembered().kvmsItDoesNotRead.size(), 1);
+        more = list;
+        more.append(QJsonObject{{u"id"_s, u"not one"_s}, {u"kind"_s, u"redfish"_s}});
+        QVERIFY2(!whole(withList(more)), "a list that lost an entry in its reading was read whole");
+        more = list;
+        more.append(list.at(0));
+        QVERIFY2(!whole(withList(more)), "a list that holds an id twice was read whole");
+        // (One past the most, each a KVM of an id of its own.)
+        more = list;
+        for (int number = 1; more.size() <= core::Remembered::mostKvms; ++number) {
+            QJsonObject another = list.at(0).toObject();
+            another.insert(u"id"_s, u"%1"_s.arg(number, 8, 16, QChar(u'0')));
+            more.append(another);
+        }
+        QVERIFY2(!whole(withList(more)), "a list past the most was read whole");
+        // (The start's: what is remembered later is the program's own.)
+        write(file, withList(5));
+        core::Settings started(file);
+        QVERIFY(!started.listReadWhole());
+        QVERIFY(started.remember(two).ok());
+        QVERIFY(!started.listReadWhole());
+        QVERIFY(core::Settings(file).listReadWhole());
+    }
+
     void whereAnUnreadableFileCannotBePutAsideNothingIsWritten()
     {
         const QTemporaryDir folder;
@@ -1004,6 +1104,280 @@ private slots:
         QCOMPARE(taken, (QList<bool>{true, false, false, false, false, false, false}));
     }
 
+    void aVncServerIsReadAndWrittenBackUnchanged()
+    {
+        // Desktop 0.2.0 (c9a): "vnc" is a family this build reads, with its own addresses (vnc://, vncs:// as the
+        // web's vnc_url writes them), the usual fields, and for vncs:// the certificate it is known by, as a kvmd
+        // KVM's HTTPS one. A profile holding one opens unchanged: read, and written back as it was.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const QJsonObject asWritten{
+            {u"id"_s, u"5c0ffee1"_s},
+            {u"kind"_s, u"vnc"_s},
+            {u"name"_s, u"Build box"_s},
+            {u"address"_s, u"vncs://box.lan:5901"_s},
+            {u"user"_s, u"admin"_s},
+            {u"group"_s, u"Lab"_s},
+            {u"known_by_certificate"_s, true},
+            {u"certificate"_s, QString::fromLatin1(QByteArray(32, '\x5a').toHex())},
+            {u"asked"_s, true},
+            {u"number"_s, u""_s},
+            {u"machine"_s, u""_s},
+            {u"secret_kept"_s, true},
+        };
+        const QJsonObject plain{{u"id"_s, u"5c0ffee2"_s},
+                                {u"kind"_s, u"vnc"_s},
+                                {u"name"_s, u"Guest"_s},
+                                {u"address"_s, u"vnc://192.168.1.40"_s},
+                                {u"user"_s, u"admin"_s},
+                                {u"group"_s, u""_s},
+                                {u"known_by_certificate"_s, false},
+                                {u"certificate"_s, u""_s},
+                                {u"asked"_s, false},
+                                {u"number"_s, u""_s},
+                                {u"machine"_s, u""_s},
+                                {u"secret_kept"_s, false}};
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{asWritten, plain}}}).toJson());
+        core::Settings byHand(file);
+        QVERIFY(!byHand.wasUnreadable());
+        QVERIFY(!byHand.heldKvmsItDoesNotRead());
+        const QList<core::OwnKvm> kvms = byHand.remembered().kvms;
+        QCOMPARE(kvms.size(), 2);
+        QCOMPARE(kvms.at(0).kind, u"vnc"_s);
+        QCOMPARE(kvms.at(0).address, u"vncs://box.lan:5901"_s);
+        QVERIFY(kvms.at(0).knownByCertificate);
+        QCOMPARE(kvms.at(0).certificate, QByteArray(32, '\x5a'));
+        QCOMPARE(kvms.at(0).name, u"Build box"_s);
+        QCOMPARE(kvms.at(0).group, u"Lab"_s);
+        QVERIFY(byHand.remembered().kvmPasswordsKept.contains(u"5c0ffee1"_s));
+        QCOMPARE(kvms.at(1).address, u"vnc://192.168.1.40"_s);
+        // Written back, it is what it was.
+        QVERIFY(byHand.remember(byHand.remembered()).ok());
+        const QJsonArray after = QJsonDocument::fromJson(read(file)).object()[u"kvms"_s].toArray();
+        QCOMPARE(after.size(), 2);
+        QCOMPARE(after.at(0).toObject(), asWritten);
+        QCOMPARE(after.at(1).toObject(), plain);
+        // Its address only as the family writes it, and only of its family: anything else is no entry this build can
+        // read, which is not on the wall, and is kept as it stands (anEntryThisBuildCannotReadIsKeptAsItStands).
+        const QList<std::pair<QString, QString>> notOne{
+            {u"vnc"_s, u"vnc://Box.lan"_s},   {u"vnc"_s, u"vnc://box.lan:5900"_s},
+            {u"vnc"_s, u"https://box.lan"_s}, {u"vnc"_s, u"vnc://box.lan/path"_s},
+            {u"kvmd"_s, u"vnc://box.lan"_s},  {u"jetkvm"_s, u"vncs://box.lan"_s}};
+        for (const auto& [kind, address] : notOne) {
+            QJsonObject odd = plain;
+            odd.insert(u"kind"_s, kind);
+            odd.insert(u"address"_s, address);
+            write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{odd}}}).toJson());
+            const core::Settings taken(file);
+            QVERIFY2(taken.remembered().kvms.isEmpty(), qPrintable(kind + u' ' + address));
+            QVERIFY2(taken.heldKvmsItDoesNotRead(), qPrintable(kind + u' ' + address));
+        }
+    }
+
+    void anEntryThisBuildCannotReadIsKeptAsItStands_data()
+    {
+        QTest::addColumn<QString>("kind");
+        QTest::addColumn<QString>("address");
+        // The example of a family of later that the profiles of 0.1.0 and 0.1.1 hold: a VNC server at an https://
+        // address, which this build reads as a family of its own and cannot read so.
+        QTest::newRow("vnc at an https address") << u"vnc"_s << u"https://198.51.100.32"_s;
+        QTest::newRow("vnc not written the one way") << u"vnc"_s << u"vnc://Box.lan:5900"_s;
+        QTest::newRow("vnc with a dot after its host") << u"vnc"_s << u"vnc://xn--mnchen-3ya.lan."_s;
+        QTest::newRow("kvmd at a vnc address") << u"kvmd"_s << u"vnc://box.lan"_s;
+        QTest::newRow("kvmd at its port written") << u"kvmd"_s << u"https://192.168.1.22:443"_s;
+        QTest::newRow("kvmd with a path") << u"kvmd"_s << u"https://192.168.1.25/kvm"_s;
+        QTest::newRow("jetkvm at a vncs address") << u"jetkvm"_s << u"vncs://box.lan"_s;
+        QTest::newRow("jetkvm in capitals") << u"jetkvm"_s << u"HTTP://192.168.1.26"_s;
+        QTest::newRow("redfish at a later scheme") << u"redfish"_s << u"redfish+tls://bmc.lan"_s;
+        QTest::newRow("redfish without an address") << u"redfish"_s << QString();
+        // (A Proxmox guest's, by the same rule: at an address with a path, or a VNC server's.)
+        QTest::newRow("proxmox with a path") << u"proxmox"_s << u"https://pve.lan:8006/pve/100"_s;
+        QTest::newRow("proxmox at a vnc address") << u"proxmox"_s << u"vnc://pve.lan"_s;
+    }
+
+    void anEntryThisBuildCannotReadIsKeptAsItStands()
+    {
+        // The coordinator's rule of 2026-11-16 (the gate at 58a7095a: the profiles of 0.1.0 and 0.1.1 lost their
+        // example of a family of later, kind "vnc" at an https:// address, once this build read "vnc"): an entry of a
+        // family this build speaks to that it cannot read as one of that family is not dropped. It is kept as it
+        // stands, never on the wall, and written back as it stood behind the wall's own, as an entry of a family this
+        // build does not speak to is: a later version may write a family of today in a form of its own, and going
+        // back to this one loses nothing of it. (Its id taken, and its place: the wall adds nothing there.)
+        QFETCH(QString, kind);
+        QFETCH(QString, address);
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        QJsonObject entry{{u"id"_s, u"0f1e2d3c"_s},  {u"kind"_s, kind},         {u"name"_s, u"A family of later"_s},
+                          {u"user"_s, u"admin"_s},   {u"group"_s, u"Rack B"_s}, {u"known_by_certificate"_s, false},
+                          {u"certificate"_s, u""_s}, {u"asked"_s, false},       {u"number"_s, u""_s},
+                          {u"machine"_s, u""_s},     {u"display"_s, 2}};
+        if (!address.isNull()) {
+            entry.insert(u"address"_s, address);
+        }
+        const QJsonObject own{{u"id"_s, u"0a1b2c3d"_s},
+                              {u"kind"_s, u"kvmd"_s},
+                              {u"name"_s, u"Rack"_s},
+                              {u"address"_s, u"https://192.168.1.20"_s},
+                              {u"user"_s, u"admin"_s},
+                              {u"group"_s, u""_s},
+                              {u"known_by_certificate"_s, false},
+                              {u"certificate"_s, u""_s},
+                              {u"asked"_s, false},
+                              {u"number"_s, u""_s},
+                              {u"machine"_s, u""_s},
+                              {u"secret_kept"_s, true}};
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{entry, own}}}).toJson());
+        core::Settings byHand(file);
+        QVERIFY(!byHand.wasUnreadable());
+        QCOMPARE(byHand.remembered().kvms.size(), 1);
+        QCOMPARE(byHand.remembered().kvms.constFirst().id, u"0a1b2c3d"_s);
+        QVERIFY(byHand.heldKvmsItDoesNotRead());
+        QCOMPARE(byHand.remembered().kvmsItDoesNotRead, QJsonArray{entry});
+        // Written back as it stood, behind the wall's own, whatever became of those; and so at every writing.
+        core::Remembered renamed = byHand.remembered();
+        renamed.kvms.first().name = u"Renamed"_s;
+        QVERIFY(byHand.remember(renamed).ok());
+        QVERIFY(byHand.remember(byHand.remembered()).ok());
+        const QJsonArray after = QJsonDocument::fromJson(read(file)).object()[u"kvms"_s].toArray();
+        QCOMPARE(after.size(), 2);
+        QCOMPARE(after.at(0).toObject().value(u"name"_s), QJsonValue(u"Renamed"_s));
+        QCOMPARE(after.at(1).toObject(), entry);
+        const core::Settings again(file);
+        QCOMPARE(again.remembered().kvmsItDoesNotRead, QJsonArray{entry});
+        QCOMPARE(again.remembered().kvms.size(), 1);
+        // Held to the size an entry is, as every entry kept as it stands.
+        QJsonObject huge = entry;
+        huge.insert(u"junk"_s, QString(qsizetype{70} * 1024, u'x'));
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{huge, own}}}).toJson());
+        QVERIFY(!core::Settings(file).heldKvmsItDoesNotRead());
+    }
+
+    void anEntryOfAFamilyThisBuildDoesNotSpeakToIsKeptWhateverItsAddress()
+    {
+        // From 0.2.0 (the coordinator's rule of 2026-11-15): a later version's new kinds survive a person going back to
+        // this one. An entry of a family this build does not speak to is kept as it stands whatever its address says,
+        // or without one, where its id has the program's shape and it is of the size an entry is.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const QJsonObject amt{{u"id"_s, u"0a1b2c40"_s},
+                              {u"kind"_s, u"amt-next"_s},
+                              {u"address"_s, u"amt+tls://pc.lan:16993"_s},
+                              {u"view"_s, u"stills"_s}};
+        // (Of "proxmox", a family since 0.2.0's guests, at an address none of a guest's: kept by the same rule for
+        // a family this build speaks to, aGuestsEntryInAShapeThisBuildDoesNotReadIsKeptAsItStands.)
+        const QJsonObject guest{{u"id"_s, u"0a1b2c41"_s},
+                                {u"kind"_s, u"proxmox"_s},
+                                {u"address"_s, u"https://pve.lan:8006/pve/100"_s},
+                                {u"uuid"_s, u"6a1f..."_s}};
+        const QJsonObject bare{{u"id"_s, u"0a1b2c42"_s}, {u"kind"_s, u"somewhere-else"_s}};
+        const QJsonObject huge{{u"id"_s, u"0a1b2c43"_s},
+                               {u"kind"_s, u"amt-next"_s},
+                               {u"address"_s, u"amt://pc"_s},
+                               {u"blob"_s, QString(qsizetype{70} * 1024, u'x')}};
+        const QJsonObject unshaped{{u"id"_s, u"not-an-id"_s}, {u"kind"_s, u"amt-next"_s}};
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{amt, guest, bare, huge, unshaped}}}).toJson());
+        core::Settings byHand(file);
+        QVERIFY(!byHand.wasUnreadable());
+        QVERIFY(byHand.remembered().kvms.isEmpty());
+        QCOMPARE(byHand.remembered().kvmsItDoesNotRead, (QJsonArray{amt, guest, bare}));
+        // Written back as they stood, behind the wall's own.
+        core::Remembered more = byHand.remembered();
+        core::OwnKvm one;
+        one.id = u"0a1b2c3d"_s;
+        one.address = u"https://192.168.1.20"_s;
+        more.kvms = {one};
+        QVERIFY(byHand.remember(more).ok());
+        const QJsonArray after = QJsonDocument::fromJson(read(file)).object()[u"kvms"_s].toArray();
+        QCOMPARE(after.size(), 4);
+        QCOMPARE(after.at(1).toObject(), amt);
+        QCOMPARE(after.at(2).toObject(), guest);
+        QCOMPARE(after.at(3).toObject(), bare);
+        QCOMPARE(core::Settings(file).remembered().kvmsItDoesNotRead, (QJsonArray{amt, guest, bare}));
+    }
+
+    void aGuestsEntryInAShapeThisBuildDoesNotReadIsKeptAsItStands()
+    {
+        // The one rule for an entry of a family this build speaks to that it cannot read as one of it
+        // (anEntryThisBuildCannotReadIsKeptAsItStands), a Proxmox guest's among them: "proxmox" is a family since the
+        // guests' step 5a (the VNC servers' test took a "proxmox" entry with a path in its address as its example of a
+        // later kind), and an entry of it in a shape this build does not read, by its address or by what a guest alone
+        // has (its node, its number, plain HTTP, its boot order from before), is not read, and is kept as it stands and
+        // written back so, where it is of the size an entry is (64 KiB, outside review L2 of the VNC servers), on each
+        // road; as a kvmd at an address of no shape is beside it.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const QJsonObject byAPath{{u"id"_s, u"0a1b2c41"_s},
+                                  {u"kind"_s, u"proxmox"_s},
+                                  {u"address"_s, u"https://pve.lan:8006/pve/100"_s},
+                                  {u"node"_s, u"pve"_s},
+                                  {u"vmid"_s, 100}};
+        const QJsonObject inTheClear{{u"id"_s, u"0a1b2c44"_s},
+                                     {u"kind"_s, u"proxmox"_s},
+                                     {u"address"_s, u"http://pve.lan:8006"_s},
+                                     {u"node"_s, u"pve"_s},
+                                     {u"vmid"_s, 100}};
+        const QJsonObject withoutANode{{u"id"_s, u"0a1b2c45"_s},
+                                       {u"kind"_s, u"proxmox"_s},
+                                       {u"address"_s, u"https://pve.lan:8006"_s},
+                                       {u"vmid"_s, 100}};
+        QJsonObject ofAnOddOrder = withoutANode;
+        ofAnOddOrder.insert(u"id"_s, u"0a1b2c4b"_s);
+        ofAnOddOrder.insert(u"node"_s, u"pve"_s);
+        ofAnOddOrder.insert(u"boot_order_was"_s, u"no"_s);
+        // Too large to be kept, on each road: none.
+        const QString blob(qsizetype{70} * 1024, u'x');
+        QJsonObject byAPathTooLarge = byAPath;
+        byAPathTooLarge.insert(u"id"_s, u"0a1b2c49"_s);
+        byAPathTooLarge.insert(u"blob"_s, blob);
+        QJsonObject withoutANodeTooLarge = withoutANode;
+        withoutANodeTooLarge.insert(u"id"_s, u"0a1b2c48"_s);
+        withoutANodeTooLarge.insert(u"blob"_s, blob);
+        QJsonObject ofAnOddOrderTooLarge = ofAnOddOrder;
+        ofAnOddOrderTooLarge.insert(u"id"_s, u"0a1b2c4c"_s);
+        ofAnOddOrderTooLarge.insert(u"blob"_s, blob);
+        const QJsonObject kvmdAtAPath{
+            {u"id"_s, u"0a1b2c4a"_s}, {u"kind"_s, u"kvmd"_s}, {u"address"_s, u"https://kvm.lan/path"_s}};
+        const QJsonArray all{byAPath,         inTheClear,           withoutANode,         ofAnOddOrder,
+                             byAPathTooLarge, withoutANodeTooLarge, ofAnOddOrderTooLarge, kvmdAtAPath};
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, all}}).toJson());
+        core::Settings byHand(file);
+        QVERIFY(!byHand.wasUnreadable());
+        QVERIFY(byHand.remembered().kvms.isEmpty());
+        const QJsonArray kept{byAPath, inTheClear, withoutANode, ofAnOddOrder, kvmdAtAPath};
+        QCOMPARE(byHand.remembered().kvmsItDoesNotRead, kept);
+        // Written back as they stood, behind the wall's own; and read so again.
+        core::Remembered more = byHand.remembered();
+        core::OwnKvm one;
+        one.id = u"0a1b2c3d"_s;
+        one.address = u"https://192.168.1.20"_s;
+        more.kvms = {one};
+        QVERIFY(byHand.remember(more).ok());
+        const QJsonArray after = QJsonDocument::fromJson(read(file)).object()[u"kvms"_s].toArray();
+        QCOMPARE(after.size(), 1 + kept.size());
+        for (qsizetype at = 0; at < kept.size(); ++at) {
+            QCOMPARE(after.at(at + 1).toObject(), kept.at(at).toObject());
+        }
+        QCOMPARE(core::Settings(file).remembered().kvmsItDoesNotRead, kept);
+    }
+
+    void anEntryKeptAsItStandsForItsMachineIsHeldToTheSizeAnEntryIs()
+    {
+        // Outside review L2: every entry that is kept as it stands is held to the 64 KiB of SPEC 11.1, also one of a
+        // family this build reads that is kept for a `machine` of no such shape.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const QJsonObject small{{u"id"_s, u"0a1b2c3d"_s},
+                                {u"kind"_s, u"kvmd"_s},
+                                {u"address"_s, u"https://192.168.1.20"_s},
+                                {u"machine"_s, 1}};
+        QJsonObject huge = small;
+        huge.insert(u"id"_s, u"0a1b2c3e"_s);
+        huge.insert(u"junk"_s, QString(qsizetype{70} * 1024, u'x'));
+        write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{small, huge}}}).toJson());
+        const core::Settings byHand(file);
+        QCOMPARE(byHand.remembered().kvmsItDoesNotRead, QJsonArray{small});
+    }
+
     void aServersControllerIsReadWithTheMarkItsServerIsKeptBy()
     {
         // M7 1b-i (W6): "redfish" is a family this build reads, in its own spelling; the mark its server is kept by
@@ -1064,6 +1438,83 @@ private slots:
         write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{shouted}}}).toJson());
         QVERIFY(core::Settings(file).remembered().kvms.isEmpty());
         QVERIFY(core::Settings(file).heldKvmsItDoesNotRead());
+    }
+
+    void whereAServersControllerKeepsItsComputerIsKeptWithItsCard()
+    {
+        // From 0.2.0 (outside review of 0.2.0's Redfish fixes, M1): where its controller keeps the server's computer
+        // and whether it was seen to list several (OwnKvm::serverPlace), written beside the mark and read back as it
+        // was; in the file only where something is kept. One of any other shape is not taken for "none" (a computer
+        // that gives no number would pass for the card's wherever it is listed alone): read as one of several, and the
+        // card stays on the wall.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        core::OwnKvm server;
+        server.id = u"0a1b2c3d"_s;
+        server.address = u"https://192.168.1.30"_s;
+        server.kind = u"redfish"_s;
+        server.machine = u"server:0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210"_s;
+        server.serverPlace = core::ServerPlace{u"/redfish/v1/Systems/Self"_s, true};
+        core::Remembered what;
+        what.kvms = {server};
+        QVERIFY(core::Settings(file).remember(what).ok());
+        const QJsonObject written = QJsonDocument::fromJson(read(file)).object()[u"kvms"_s].toArray().at(0).toObject();
+        QCOMPARE(written.value(u"server_place"_s),
+                 QJsonValue(QJsonObject{{u"place"_s, u"/redfish/v1/Systems/Self"_s}, {u"among_several"_s, true}}));
+        QCOMPARE(core::Settings(file).remembered().kvms, what.kvms);
+        // Of one listed alone, and of one known only to be among several.
+        for (const core::ServerPlace& kept :
+             {core::ServerPlace{u"/redfish/v1/Systems/1"_s, false}, core::ServerPlace{QString(), true}}) {
+            what.kvms.first().serverPlace = kept;
+            QVERIFY(core::Settings(file).remember(what).ok());
+            QCOMPARE(core::Settings(file).remembered().kvms, what.kvms);
+        }
+        // None kept: not in the file, and none read where the file says none.
+        what.kvms.first().serverPlace = {};
+        QVERIFY(core::Settings(file).remember(what).ok());
+        QVERIFY(!QJsonDocument::fromJson(read(file))
+                     .object()[u"kvms"_s]
+                     .toArray()
+                     .at(0)
+                     .toObject()
+                     .contains(u"server_place"_s));
+        QCOMPARE(core::Settings(file).remembered().kvms, what.kvms);
+        // Of no shape the program writes: one of several, nothing else lost.
+        const QList<QJsonValue> notOne{
+            QJsonValue(u"/redfish/v1/Systems/Self"_s),
+            QJsonValue(true),
+            QJsonValue(QJsonValue::Null),
+            QJsonValue(QJsonObject{{u"place"_s, u"/redfish/v1/Systems/Self"_s}}),
+            QJsonValue(QJsonObject{{u"place"_s, u"/redfish/v1/Systems/Self"_s}, {u"among_several"_s, u"no"_s}}),
+            QJsonValue(QJsonObject{{u"place"_s, 7}, {u"among_several"_s, false}}),
+            QJsonValue(QJsonObject{{u"place"_s, u"/redfish/v1/../v2/Systems/Self"_s}, {u"among_several"_s, false}}),
+            QJsonValue(QJsonObject{{u"place"_s, u"https://elsewhere.example/redfish/v1/Systems/Self"_s},
+                                   {u"among_several"_s, false}})};
+        for (const QJsonValue& said : notOne) {
+            QJsonObject kvm = written;
+            kvm.insert(u"server_place"_s, said);
+            write(file, QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{kvm}}}).toJson());
+            const core::Settings byHand(file);
+            const QByteArray asSaid = QJsonDocument(QJsonArray{said}).toJson();
+            QVERIFY2(!byHand.heldKvmsItDoesNotRead(), asSaid.constData());
+            QCOMPARE(byHand.remembered().kvms.size(), 1);
+            QVERIFY2(byHand.remembered().kvms.constFirst().serverPlace == (core::ServerPlace{QString(), true}),
+                     asSaid.constData());
+            QCOMPARE(byHand.remembered().kvms.constFirst().machine, server.machine);
+        }
+        // Of a KVM, nothing of it is read, nor written.
+        core::OwnKvm kvm = server;
+        kvm.kind = u"kvmd"_s;
+        kvm.machine.clear();
+        what.kvms = {kvm};
+        QVERIFY(core::Settings(file).remember(what).ok());
+        QVERIFY(!QJsonDocument::fromJson(read(file))
+                     .object()[u"kvms"_s]
+                     .toArray()
+                     .at(0)
+                     .toObject()
+                     .contains(u"server_place"_s));
+        QVERIFY(core::Settings(file).remembered().kvms.constFirst().serverPlace == core::ServerPlace{});
     }
 
     void aKvmOfTheFileIsReadOnlyWhereTheFileSaysItsFamily()
@@ -1414,6 +1865,16 @@ private slots:
         }
         QCOMPARE(taken,
                  (QStringList{u"https://192.168.1.20"_s, u"http://192.168.1.21:8080"_s, u"https://kvm.example"_s}));
+        // The rest are not on the wall, and are kept as they stand, in their order (the coordinator's rule of
+        // 2026-11-16: an entry this build cannot read is never dropped).
+        QJsonArray kept;
+        for (const auto& one : std::as_const(kvms)) {
+            if (!taken.contains(one.toObject()[u"address"_s].toString())) {
+                kept.append(one);
+            }
+        }
+        QCOMPARE(kept.size(), 9);
+        QCOMPARE(settings.remembered().kvmsItDoesNotRead, kept);
     }
 
     void noMoreKvmsThanAWallHolds()

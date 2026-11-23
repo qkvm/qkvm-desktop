@@ -30,6 +30,12 @@ struct ColourRows {
 // one for the rest.
 ColourRows colourRowsFor(const AVFrame& frame) noexcept;
 
+// A picture decoded in software made smaller, to `size` (a card's still, PERF-2), each of its planes by itself;
+// nothing where it is of a kind the engine does not draw, or larger than the picture, or where there is no memory
+// for it. What it says of its colours goes with it; where it says nothing of its standard, it says the one its own
+// size had it read by (colourRowsFor).
+FramePtr shrunkTo(const AVFrame& from, SizePx size);
+
 // What the scene draws for a stream: the planes to sample, which part of them is picture, and how
 // to turn them into colours. `planes` is 0 while there is nothing to draw, 2 for a picture on the
 // card (luma, and the two differences together), 3 for one decoded in software.
@@ -58,6 +64,7 @@ public:
 
     void push(const Packet& packet) override;
     void shownAt(SizePx onScreen, Importance importance) override;
+    void shownAsACard(bool card) override;
     bool takeKeyFrameWish() override;
     Stats stats() const override;
 
@@ -91,6 +98,11 @@ public:
     // Taken away from its scene: what waits goes, nothing more is decoded, and it is urgent no more
     // (2d's reading). Any thread; before the pool is handed it to end.
     void retire();
+    // Where its scene draws it now, the largest of its places, in the monitor's own pixels (Scene::place), with the
+    // device's lock held. A still is kept at the size it is drawn at (keptSizeFor: PERF-2), and the last one is decoded
+    // again where it is drawn larger than it was kept at. (A stream that is not drawn is told nothing, and keeps the
+    // size it was last told; one never told is kept whole.)
+    void placedAt(SizePx size);
 
 private:
     struct Waiting {
@@ -101,6 +113,9 @@ private:
         // No packet of its own: the last picture decoded is decoded again (m_lastStill), as it is
         // when this is come to.
         bool again = false;
+        // ...because it is drawn larger than it was kept at (placedAt): the picture of it that waits to be drawn is
+        // taken the place of, and that counts as no picture that made way.
+        bool larger = false;
     };
     struct Plane {
         ComPtr<ID3D11Texture2D> texture;
@@ -117,6 +132,17 @@ private:
 
     // A stream of stills, of either kind (Codec::Still, Codec::KeyFrameStill).
     bool still() const noexcept { return m_codec == Codec::Still || m_codec == Codec::KeyFrameStill; }
+    // Stills that are key frames of H.264, each decoded by a decoder of its own (a JetKVM's card).
+    bool keyFrameStills() const noexcept { return m_codec == Codec::KeyFrameStill; }
+    // Those of a card of a wall (shownAsACard): handed in through the stills' line (StillsGate,
+    // Gpu::Options::stillsAtOnce). Every other stream, a machine live or shown large among them, wakes the pool itself,
+    // as before. (A card that comes to be shown large is out of the line from then on, in the step that makes it no
+    // card: StillsGate::setCard; a place it holds is given back as it lets go, whatever it is by then:
+    // letGoOfDecoding.)
+    bool gated() const noexcept { return keyFrameStills() && m_member.card.load(std::memory_order_relaxed); }
+    // It has something to decode: the pool is woken, or for a card's key frames the stills' line is handed it (`fresh`:
+    // a still that came, and not the last one again; for what is said of the line).
+    void handIn(bool fresh = false);
     // A screen sent as what changed of it (Codec::Rgb).
     bool changes() const noexcept { return m_codec == Codec::Rgb; }
     // Applies one packet of changes to the screen as it stands (on the decoding's thread).
@@ -139,7 +165,17 @@ private:
     // no next one. (A try_to_lock that fails is taken to mean that somebody holds it: Windows' own
     // locks, which std::mutex is here, do not fail otherwise.)
     void letGoOfDecoding(std::unique_lock<std::mutex>& decoding);
-    void publish(Picture picture, double decodeMs, Decoding how);
+    // `size`: the stream's own (a still's before it was kept smaller); `remade`: the same still again, larger.
+    void publish(Picture picture, double decodeMs, Decoding how, SizePx size, bool remade);
+    // The size a still of this size is kept at to be drawn where it is placed now (PERF-2): the largest that fits its
+    // place with its shape; its own where it is drawn at more than half of that (shown large), or where nothing is
+    // known of its place. Any thread.
+    SizePx keptSizeFor(SizePx picture) const noexcept;
+    // The last still was kept smaller than it is to be drawn now, and nothing newer waits or is being decoded: it is
+    // to be decoded again, and true (whoever asked wakes the pool for it). With `onceItHoldsStill`, only once its place
+    // has not changed for a moment (a window's edge dragged: the review of f513c8e6, M3); before that nothing, and
+    // `dueUs` says when to look again (whoever asked wakes the pool then, DecodePool::wakeAt). Under the inbox's lock.
+    bool decodeAgainIfLarger(bool onceItHoldsStill, std::int64_t& dueUs);
     bool copyToTheCard(const AVFrame& frame);
     bool makePlanes(const AVFrame& frame, int count, int shiftX, int shiftY);
     bool drawFromTheCard(Picture& picture);
@@ -161,6 +197,18 @@ private:
     // A still stream's packet is being decoded (taken from the inbox, not yet kept or let go): one that
     // comes meanwhile is newer than whatever m_lastStill holds. Under the inbox's lock.
     bool m_stillInHand = false;
+    // m_lastStill's picture: its own size, and the size it was kept at to be drawn (PERF-2). Under the inbox's lock.
+    SizePx m_lastStillWhole;
+    SizePx m_lastStillKept;
+    // Where the scene draws a still stream, the largest of its places, in the monitor's pixels (placedAt); 0: not told.
+    std::atomic<int> m_placedWidth{0};
+    std::atomic<int> m_placedHeight{0};
+    // This stream as the stills' line knows it (a card's key frames are handed in there: gated), and whether it is a
+    // card of a wall (shownAsACard, m_member.card, which the line changes under its lock): only a card's stills are
+    // kept at the size drawn.
+    StillsGate::Member m_member{*this};
+    // When its place last changed (placedAt), by base::steadyNowUs.
+    std::atomic<std::int64_t> m_placedAtUs{0};
     // m_lastStill's picture could not be copied to the card, with the device as it was: it is not on
     // the screen, and the same still again is decoded again. Under the inbox's lock.
     bool m_lastStillUndrawn = false;

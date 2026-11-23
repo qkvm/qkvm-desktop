@@ -94,6 +94,18 @@ public:
         const std::lock_guard guard(m_gpu.lock());
         m_placed.assign(placed.begin(), placed.end());
         m_changed = true;
+        // Each stream is told where it is drawn, the largest of its places where it has several: a still is kept at
+        // that size (StreamCore::placedAt, PERF-2).
+        std::map<StreamId, SizePx> largest;
+        for (const Placed& one : m_placed) {
+            SizePx& size = largest[one.stream];
+            size = {std::max(size.width, one.where.width), std::max(size.height, one.where.height)};
+        }
+        for (const auto& [id, size] : largest) {
+            if (const auto found = m_streams.find(id); found != m_streams.end()) {
+                found->second->placedAt(size);
+            }
+        }
     }
 
     bool draw(const Target& target) override

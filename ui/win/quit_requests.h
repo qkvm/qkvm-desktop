@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -79,6 +80,10 @@ public:
     bool listens() const;
     // The answer window's title now (empty where there is no window).
     QString answer() const;
+    // How many requests the waiting thread has noted the coming of so far (each as it came, before the interface thread
+    // hears it): what a test waits for, rather than for a time, before it stalls the interface (outside review of
+    // 0.2.0, 1.10).
+    quint32 noted() const { return m_noted.load(); }
 
 private:
     void hear(std::chrono::steady_clock::time_point made);
@@ -96,6 +101,7 @@ private:
     std::function<QString()> m_holds;
     std::function<void()> m_end;
     quint32 m_heard = 0;
+    std::atomic<quint32> m_noted{0};
     bool m_ending = false;
 };
 

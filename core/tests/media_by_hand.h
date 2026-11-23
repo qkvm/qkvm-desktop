@@ -39,6 +39,10 @@ public:
         // The line hung up on once this much came; and reading stopped once this much came (the line kept).
         qint64 hangUpAfter = -1;
         qint64 stopAfter = -1;
+        // As a server 0.3.2 (server.py, media_moved): the mark of the machine the tile is at now. An upload whose
+        // address names another `listed` is refused at once, 409 "moved", before a byte of it is read; one that names
+        // none is served as before. Empty: a server 0.3.1, which reads no `listed`.
+        QByteArray listed;
     };
 
     explicit UploadByHand(Way way) : m_way(std::move(way))
@@ -147,6 +151,22 @@ private:
         pace->start();
     }
 
+    // What the question's address says of `name` (as it was written: escapes left in); null where it names none.
+    static QByteArray said(const QByteArray& first, const QByteArray& name)
+    {
+        const QByteArray target = first.split(' ').value(1);
+        const qsizetype mark = target.indexOf('?');
+        if (mark < 0) {
+            return {};
+        }
+        for (const QByteArray& part : target.mid(mark + 1).split('&')) {
+            if (part.startsWith(name + '=')) {
+                return part.mid(name.size() + 1);
+            }
+        }
+        return {};
+    }
+
     void answer(QTcpSocket* line, int status, const QByteArray& body)
     {
         line->write("HTTP/1.1 " + QByteArray::number(status) +
@@ -183,12 +203,23 @@ private:
                                    : QByteArray(R"({"uploading": null})"));
                 return;
             }
+            // (Before any other answer: a 404 in a server's words is a refusal, not contact lost. Outside review 4.9:
+            // this came after the 404 once, and was never reached.)
+            if (first.startsWith("GET /api/v1/status")) {
+                line->abort();
+                return;
+            }
             if (!first.startsWith("POST ") || !first.contains("/media/upload?")) {
                 answer(line, 404, R"({"code": "not_found", "message": "Unknown"})");
                 return;
             }
-            if (first.startsWith("GET /api/v1/status")) {
-                line->abort();
+            if (const QByteArray sent = said(first, "listed");
+                !m_way.listed.isEmpty() && !sent.isNull() && sent != m_way.listed) {
+                answer(
+                    line, 409,
+                    R"({"code": "moved", "message": "Build server is not the machine its images were listed for any )"
+                    R"(more: its address, or what qKVM knows of the machine there, was changed since. Nothing was )"
+                    R"(uploaded: list its images again."})");
                 return;
             }
             if (m_way.refusal != 0 && !m_way.refusesAtTheEnd) {

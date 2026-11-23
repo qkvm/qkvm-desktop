@@ -1,5 +1,6 @@
 #include <qkvm/core/kvmd_device.h>
 #include <qkvm/core/kvmd_live.h>
+#include <qkvm/core/kvmd_media.h>
 
 #include <algorithm>
 #include <memory>
@@ -18,6 +19,7 @@
 #include <qkvm/core/tls.h>
 
 #include <qkvm/core/kvm_certificate.h>
+#include <qkvm/core/kvm_probe.h>
 
 using namespace Qt::StringLiterals;
 
@@ -70,6 +72,7 @@ struct KvmdDevice::SignInOut {
     SignInPacing::Mark mark;
     SignInPacing::Steps steps;
     SignInPacing::Sent sent;
+    QUrl address; // the KVM's, where its answer may send it on to HTTPS (kvm::httpsInstead)
 };
 
 // What a sign-in came to, as the pacing was told it (cameOf).
@@ -183,7 +186,10 @@ std::optional<base::Error> KvmdDevice::whyNoAnswer(const QNetworkReply* reply)
 
 void KvmdDevice::send(const Ask& question, const QByteArray& token, std::function<void(base::Result<Reply>)> done)
 {
-    m_asker.send(question, token, [done = std::move(done)](base::Result<DeviceAsker::Reply> reply) {
+    // (Where a redirect says to go is read of every answer: kvm::httpsInstead.)
+    Ask asked = question;
+    asked.headersAsSent.append("location"_ba);
+    m_asker.send(asked, token, [done = std::move(done)](base::Result<DeviceAsker::Reply> reply) {
         if (!reply) {
             done(reply.error());
             return;
@@ -194,8 +200,20 @@ void KvmdDevice::send(const Ask& question, const QByteArray& token, std::functio
         said.kind = reply.value().kind;
         said.online = reply.value().headers.value("x-ustreamer-online"_ba);
         said.cookies = reply.value().cookies;
+        said.location = reply.value().headersAsSent.value("location"_ba);
         done(std::move(said));
     });
+}
+
+std::optional<base::Error> KvmdDevice::sentOn(int status, const QByteArray& location) const
+{
+    // (The web's https_instead and on_https, web 0.3.2: its plain address sends everybody on to HTTPS at the same host,
+    // a web server's before kvmd once HTTPS is its only way in. Said, with that address, which an edit offers; never
+    // followed: the password would go wherever a redirect says.)
+    if (const std::optional<QUrl> to = kvm::httpsInstead(m_where.address, status, location)) {
+        return kvm::httpsOnly(*to);
+    }
+    return std::nullopt;
 }
 
 void KvmdDevice::request(const Ask& question, std::function<void(base::Result<Reply>)> done)
@@ -211,7 +229,25 @@ void KvmdDevice::request(const Ask& question, std::function<void(base::Result<Re
             return;
         }
     }
-    withToken([this, question, tries, done = std::move(done)](const base::Result<QByteArray>& token) mutable {
+    // A typing waits among those that a stop answers at once (stopTyping) until it is handed to its line: one answered
+    // so is never handed to it. (Again where it is asked a second time, signed in anew.)
+    std::shared_ptr<std::function<void(base::Result<Reply>)>> typing;
+    if (question.types) {
+        typing = std::make_shared<std::function<void(base::Result<Reply>)>>(std::move(done));
+        m_typingsWaiting.append(typing);
+        done = [typing](base::Result<Reply> reply) {
+            if (*typing) {
+                std::exchange(*typing, {})(std::move(reply));
+            }
+        };
+    }
+    withToken([this, question, tries, typing, done = std::move(done)](const base::Result<QByteArray>& token) mutable {
+        if (typing != nullptr) {
+            m_typingsWaiting.removeOne(typing);
+            if (!*typing) {
+                return; // (answered "stopped" while it waited: nothing of it goes)
+            }
+        }
         if (!token) {
             done(token.error());
             return;
@@ -226,6 +262,22 @@ void KvmdDevice::request(const Ask& question, std::function<void(base::Result<Re
                 return;
             }
             answered();
+            // Its plain address sends everybody on to HTTPS since it was signed in to (HTTPS made its only way in):
+            // said, with that address, and not followed. The card says so ("error": it is there), and an edit offers
+            // it. And its pass goes on nothing more the plain way: let go of here, and what needs one is held back as
+            // the sign-in's own https_only holds it (signIn), until a sign-in that asks first with no password, however
+            // lately the KVM was heard, says it again or finds kvmd there (the merged review of 0.2.0, B-M1: the pass
+            // went in the clear at every look, to an address that only sends everybody on).
+            if (std::optional<base::Error> onto = sentOn(reply.value().status, reply.value().location)) {
+                m_sentOnToHttps = true;
+                if (m_token == used) {
+                    m_token.clear();
+                    m_signInError = *onto;
+                    m_signInRetryAt = now() + m_pace.signInRetryMs;
+                }
+                done(std::move(*onto));
+                return;
+            }
             if (reply.value().status != 401 && reply.value().status != 403) {
                 done(std::move(reply));
                 return;
@@ -400,19 +452,34 @@ void KvmdDevice::signIn()
     // that came after the usual wait was heard as none, and the password went out again at the next
     // look (the web's SIGN_IN_PATIENCE).
     login.quietMs = m_pace.quietMs * 5 / 2;
+    // (And where its answer says to go: cameOf.)
+    login.headersAsSent.append("location"_ba);
     // A password goes only on a line shown to be up (DeviceAsker::whenUp): where nothing of the KVM's was heard just
     // now, whether it signs this program in is asked first with nothing to sign in with, under the guess that tells
     // a KVM that is not there. Nothing is counted or sent where that is not answered. Both go on a line made for this
     // sign-in, held to what the KVM is known by, which outlives this driver while the sign-in is out (~KvmdDevice).
     Ask up;
     up.path = u"/api/auth/check"_s;
+    // (And where it says to go: a plain address that sends everybody on to HTTPS is said before the password goes the
+    // plain way to be sent on, as the web asks its API with no credentials first, sent_on_to_https of web 0.3.2.)
+    up.headersAsSent.append("location"_ba);
     auto* line =
         new DeviceAsker(DeviceAsker::Where{m_where.address, m_where.knownByCertificate, m_where.certificate},
                         DeviceAsker::Times{m_pace.connectWithinMs, m_pace.quietMs, m_pace.transferMs}, "auth_token"_ba,
                         this); // NOLINT(cppcoreguidelines-owning-memory): this driver's, or the program's (~KvmdDevice)
     connect(line, &DeviceAsker::showedItsCertificate, this, &KvmdDevice::showed);
-    const auto then = [this, line, login](const std::optional<base::Error>& down) {
-        heardOn(*line, !down);
+    const auto then = [this, line, login](const std::optional<base::Error>& down, bool heard) {
+        heardOn(*line, heard);
+        if (down && down->code == "https_only") {
+            // Nothing was sent, and nothing is asked again at every look: held as a session refused is (withToken).
+            line->deleteLater();
+            answered();
+            m_sentOnToHttps = true;
+            m_signInError = *down;
+            m_signInRetryAt = now() + m_pace.signInRetryMs;
+            signedIn(*m_signInError);
+            return;
+        }
         if (down) {
             line->deleteLater();
             signedIn(failed(*down, false));
@@ -420,12 +487,20 @@ void KvmdDevice::signIn()
         }
         sendSignIn(line, login);
     };
-    // (Heard just now, on this driver's own line or a sign-in's, the KVM is there: as before, nothing is asked first.)
-    if (heardJustNow()) {
-        later([then] { then(std::nullopt); });
+    // (Heard just now, on this driver's own line or a sign-in's, the KVM is there: as before, nothing is asked first.
+    // But not where what it said last was that its plain address sends everybody on to HTTPS: m_sentOnToHttps.)
+    if (heardJustNow() && !m_sentOnToHttps) {
+        later([then] { then(std::nullopt, true); });
         return;
     }
-    line->whenUp(up, then);
+    // (As DeviceAsker::whenUp asks it, on a line that heard nothing yet, and its answer read.)
+    line->send(up, {}, [this, then](const base::Result<DeviceAsker::Reply>& reply) {
+        if (!reply) {
+            then(reply.error(), false);
+            return;
+        }
+        then(sentOn(reply.value().status, reply.value().headersAsSent.value("location"_ba)), true);
+    });
 }
 
 void KvmdDevice::sendSignIn(DeviceAsker* line, const Ask& login)
@@ -449,6 +524,7 @@ void KvmdDevice::sendSignIn(DeviceAsker* line, const Ask& login)
     out->pacing = m_pace.pacing;
     out->mark = offered();
     out->steps = steps();
+    out->address = m_where.address;
     out->sent = pacing().sent(out->mark, out->steps);
     m_signInOut = out;
     // Made once, of the password as it is held, as it goes: nothing of it in a text made on the way (F5), and no copy
@@ -509,6 +585,16 @@ KvmdDevice::SignInCame KvmdDevice::cameOf(const SignInOut& out, const base::Resu
     }
     came.heard = true;
     const int status = reply.value().status;
+    if (const std::optional<QUrl> to =
+            kvm::httpsInstead(out.address, status, reply.value().headersAsSent.value("location"_ba))) {
+        // Its plain address sends everybody on to HTTPS at the same host. Not followed: said, with that address, and
+        // held back as a sign-in that was neither yes nor no, so that the password does not go out the plain way at
+        // every look (the web's login, 0.3.2).
+        pacing.unanswered(out.mark, out.steps, out.sent);
+        came.kind = SignInCame::Kind::Neither;
+        came.why = kvm::httpsOnly(*to);
+        return came;
+    }
     if (status == 401 || status == 403) {
         // Every look ends up here: a password the KVM has refused is not hammered at it, and is offered again later
         // each time it is refused once more (SignInPacing).
@@ -546,7 +632,10 @@ void KvmdDevice::signInCame(const SignInCame& came)
         // (The web's `_held_back`.) Not sent again at every look, and said as what stands from now on: whether the KVM
         // is there is asked apart (stillThere), and a question that waited for this sign-in was never sent, which "no
         // answer" would say may have been done.
-        m_signInError = pacing().times(mark) > 0 ? passwordRefused() : notSigningIn(came.why.message);
+        m_sentOnToHttps = m_sentOnToHttps || came.why.code == "https_only";
+        m_signInError = came.why.code == "https_only" ? came.why
+                        : pacing().times(mark) > 0    ? passwordRefused()
+                                                      : notSigningIn(came.why.message);
         m_heldAs = pacing().standing(mark);
         m_signInRetryAt = 0;
         signedIn(*m_signInError);
@@ -562,6 +651,7 @@ void KvmdDevice::signInCame(const SignInCame& came)
     }
     m_signInError.reset();
     m_heldAs.reset();
+    m_sentOnToHttps = false; // (kvmd itself signed it in there)
     m_token = came.token;
     // (The first pass after a line's refusal had the one before forgotten: passWasRefused. And what was noted of a pass
     // before this one is not kept beyond it.)
@@ -661,6 +751,11 @@ Status KvmdDevice::status() const
     }
     // (As the KVM said last on a line to its events, whichever driver of it heard it.)
     status.fingerbot = fingerbotNow();
+    // What is in its drive, and whether it has one, as it was last said (kvmd_media.cpp): of a KVM that answered.
+    if (m_status && m_status->errorCode.isEmpty() && m_msd) {
+        status.media = kvmd::mountedOf(*m_msd, kvmd::MediaNotes::program(), mediaKey());
+        status.offersMedia = mediaOffer().has_value();
+    }
     return status;
 }
 
@@ -685,7 +780,7 @@ void KvmdDevice::look()
             return;
         }
         const base::Error& why = said.error();
-        if (why.code == "auth_failed" || why.code == "no_sign_in") {
+        if (why.code == "auth_failed" || why.code == "no_sign_in" || why.code == "https_only") {
             // Nothing was asked that needs a sign-in, and so nothing said whether the KVM is there. (Not
             // where no password is saved, as the web does: a KVM of this wall that has none hears
             // nothing at all, withoutAPasswordNothingIsSent.)
@@ -701,8 +796,8 @@ void KvmdDevice::lookFailed(const base::Error& why)
     Status status;
     if (why.code == "auth_failed" || why.code == "no_password") {
         status.state = u"auth"_s;
-    } else if (why.code == "no_sign_in" || why.code == "cert_mismatch" || why.code == "cert_invalid" ||
-               why.code == tlsDamaged) {
+    } else if (why.code == "no_sign_in" || why.code == "https_only" || why.code == "cert_mismatch" ||
+               why.code == "cert_invalid" || why.code == tlsDamaged) {
         // (Something for whoever sits here to look at, and not a KVM that is away: one that is there
         // and does not sign this program in is not "offline", which an alert tells as gone.)
         status.state = u"error"_s;
@@ -738,6 +833,11 @@ void KvmdDevice::stillThere(std::function<void(std::optional<base::Error>)> then
         }
         if (reply) {
             answered();
+            // (A redirect heard here is heard as one a question with a pass heard: the next sign-in asks first with no
+            // password, however lately this answer came. Round 2 of the merged review of 0.2.0, L1.)
+            if (sentOn(reply.value().status, reply.value().location)) {
+                m_sentOnToHttps = true;
+            }
         }
         then(std::nullopt);
     });
@@ -836,6 +936,19 @@ void KvmdDevice::lookFurther(const QJsonObject& streamer)
             came();
         });
     }
+    // Its drive (what is mounted, and whether it has one), where its line has not said it of late and it was not asked
+    // within Pace::msdEveryMs; one that did not answer is asked again after that pause, not at every look. Asked beside
+    // the look, last, and not waited for: a GL.iNet KVM looks at its storage's partitions for every such answer, and
+    // the card is told when what it says of the drive changes (driveSaid).
+    if (!m_askingTheDrive && driveIsDue()) {
+        m_askingTheDrive = true;
+        askTheDrive(false, false, [this](const base::Result<QJsonObject>& said) {
+            m_askingTheDrive = false;
+            if (!said) {
+                m_msdAt = now();
+            }
+        });
+    }
     came();
 }
 
@@ -880,6 +993,43 @@ void KvmdDevice::keepTheBoard(Status& status)
     }
 }
 
+void KvmdDevice::keepWith(std::shared_ptr<KvmdKept> kept)
+{
+    m_kept = std::move(kept);
+    if (m_kept && !m_kept->shownSeveralBy.isEmpty() && m_kept->shownSeveralBy == keptKey()) {
+        m_shownSeveral = true;
+    }
+}
+
+QByteArray KvmdDevice::keptKey() const
+{
+    return m_where.address.toString(QUrl::FullyEncoded).toUtf8() + ' ' +
+           (m_where.knownByCertificate ? m_where.certificate.toHex() : "windows"_ba);
+}
+
+void KvmdDevice::noteThePower(Status& status)
+{
+    // (The web's POWER_LED_UNWIRED, web 0.3.2.) A board that says the computer is off (its light, or GLKVM's word)
+    // while the computer sends a picture is no witness of the power: its card says neither on nor off then. Why, in
+    // the wall's words, beside the board's word. Not on a KVM that has ever shown this driver several inputs (this
+    // look's among them): its board may be wired to another computer than the one on screen, and the wires may be as
+    // they should; nor after one answer of its switch that was no yes, which has it taken for a KVM of one input for a
+    // while (Pace::aboutFreshMs). Its card says "Power unknown" there, without a why, while the look says its inputs,
+    // and nothing of the power after such an answer. Its short press is refused all the same (noWitnessOfThePower).
+    if (!status.ports.isEmpty()) {
+        m_shownSeveral = true;
+        if (m_kept) {
+            m_kept->shownSeveralBy = keptKey();
+        }
+    }
+    if (status.powerIsKnown && status.power == std::optional<bool>(false) &&
+        status.signal == std::optional<bool>(true) && !m_shownSeveral) {
+        status.powerNoteCode = u"power_led_unwired"_s;
+        status.powerNote = u"The KVM's board says the power light is off while the screen shows a picture: its "
+                           "power-LED wires are probably not connected."_s;
+    }
+}
+
 void KvmdDevice::lookOver(Status status)
 {
     // What the KVM's state said of its video, and what it left unsaid: there what the last
@@ -888,6 +1038,8 @@ void KvmdDevice::lookOver(Status status)
     m_stateSaysSignal = answered && status.signal.has_value();
     m_stateSaysSize = answered && status.width > 0 && status.height > 0;
     static_cast<void>(standIn(status));
+    // (By what the look and the last picture say of the picture.)
+    noteThePower(status);
     m_status = std::move(status);
     m_statusAt = now();
     if (m_boardWords != m_boardWordsAtLook) {
@@ -1243,7 +1395,8 @@ void KvmdDevice::keepAwake()
     // It is the KVM's line for events: its power board says its state there, which a look reads there and does not
     // ask (boardOnTheLine). What a line before it said is no word of this one's.
     m_lineBoard.reset();
-    line->hearWhatItSays(kvmd::mostBoardWord, m_pace.eventsPingMs);
+    // (Up to the longest state of its drive: kvmd_media.h.)
+    line->hearWhatItSays(kvmd::mostMsdWord, m_pace.eventsPingMs);
     connect(line, &AwakeLine::heard, this, [this, line] {
         if (m_awake.get() == line) {
             m_eventsHeardAt = now();
@@ -1265,8 +1418,43 @@ void KvmdDevice::keepAwake()
     m_awakeTimer.start();
 }
 
+bool KvmdDevice::noWitnessOfThePower(std::optional<bool> boardSays) const
+{
+    // Off, beside a picture (by the last look): its power light probably not wired (the card's "Power unknown" with its
+    // why, noteThePower), or, on a KVM that has shown several inputs, its board perhaps wired to another computer than
+    // the one on screen (the card's "Power unknown" alone, or nothing of the power where its switch did not answer the
+    // last look). (The merged review of 0.2.0, A-M1: the second was pressed.)
+    return boardSays == std::optional<bool>(false) && m_status && m_status->signal == std::optional<bool>(true);
+}
+
+base::Error KvmdDevice::powerUnknown() const
+{
+    if (m_shownSeveral) {
+        return {"power_unknown",
+                "Nothing was pressed: whether this machine is on is not known. Its KVM's board says the power light is "
+                "off while the screen shows a picture, and on a KVM with several inputs the board may be wired to "
+                "another computer than the one on screen, so a press of the power button could shut a running machine "
+                "down. A hold of the power button still goes; to switch on the computer the board is wired to, show "
+                "its input first and press again."};
+    }
+    return {"power_unknown",
+            "Nothing was pressed: whether this machine is on is not known. Its KVM's board says the power light is off "
+            "while the screen shows a picture, so its power-LED wires are probably not connected, and a press of the "
+            "power button could shut a running machine down."};
+}
+
 void KvmdDevice::act(const Action& what, std::function<void(base::Result<Done>)> done)
 {
+    // (The owner's rule of 2026-11-19, stricter than the web.) Where its board is no witness of the power (the board
+    // says off beside a picture: noWitnessOfThePower), a short press of the power button, its board's or its
+    // Fingerbot's, may shut a running machine down where it was to switch it on: refused, with nothing sent. A hold of
+    // the power button cuts the power, and a reset resets, whatever the machine is doing: those go as before. (kvmd's
+    // own /api/atx/power, on, off, off_hard and reset_hard, is never asked: kvmd_answers.cpp.)
+    if ((what.kind == "atx_power"_L1 || what.kind == "fingerbot_power"_L1) && m_status && m_status->powerIsKnown &&
+        noWitnessOfThePower(m_status->power)) {
+        later([done = std::move(done), why = powerUnknown()] { done(why); });
+        return;
+    }
     if (pressesTheFingerbot(what.kind)) {
         pressFingerbot(what.kind, std::move(done));
         return;
@@ -1285,6 +1473,7 @@ void KvmdDevice::act(const Action& what, std::function<void(base::Result<Done>)>
     question.quietMs = call.value().quietMs;
     question.urgent = true;
     question.doesSomething = true;
+    question.types = what.kind == "text"_L1 || what.kind == "keys"_L1 || what.kind == "ctrl_alt_del"_L1;
     if (pressesTheBoard(what.kind)) {
         pressBoard(what.kind, std::move(question), std::move(done));
         return;
@@ -1330,6 +1519,18 @@ void KvmdDevice::act(const Action& what, std::function<void(base::Result<Done>)>
             });
 }
 
+void KvmdDevice::stopTyping()
+{
+    // (From a list of their own: whoever is answered may ask for another, which waits as this one did.)
+    const base::Error stopped{"stopped", "It was not done: whoever asked for it may no longer do that"};
+    const auto waiting = std::exchange(m_typingsWaiting, {});
+    for (const auto& typing : waiting) {
+        if (*typing) {
+            std::exchange(*typing, {})(stopped);
+        }
+    }
+}
+
 std::unique_ptr<OwnLive> KvmdDevice::makeLive()
 {
     return std::make_unique<KvmdLive>(*this);
@@ -1369,7 +1570,9 @@ void KvmdDevice::openVideoLine(std::function<void(base::Result<std::unique_ptr<D
             keepAwake();
         });
         connect(line.get(), &DeviceLine::ended, this, [this, pass](DeviceLine::End why) {
-            if (why == DeviceLine::End::SignedOut && m_token == pass && now() >= m_videoAuthRetryAt) {
+            // (The web's _line: a session refused as not signed in, or as not allowed, is replaced once.)
+            const bool refused = why == DeviceLine::End::SignedOut || why == DeviceLine::End::Refused;
+            if (refused && m_token == pass && now() >= m_videoAuthRetryAt) {
                 m_token.clear();
                 m_videoAuthRetryAt = now() + m_pace.refusedHoldMs;
             }

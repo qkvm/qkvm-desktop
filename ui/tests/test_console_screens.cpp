@@ -1,9 +1,151 @@
 #include "screens_test.h"
 
+#include <QAccessible>
+#include <QHash>
+#include <QQmlListReference>
+#include <QScopeGuard>
+#include <QThread>
+
 // A machine shown large: its bar, its picture, its keyboard and mouse and what is asked before
 // keys go, its details, and how it fits the window.
 class TestConsoleScreens : public ScreensTest {
     Q_OBJECT
+
+    // What a machine shown large is handed, and its window, kept by a test until it is over: the second machine of
+    // the pretended wall (its console can be opened), with Actions allowed.
+    struct ShownLarge {
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        QList<qkvm::ui::WallTile> tiles = qkvm::ui::pretendWall();
+        qkvm::ui::SessionView session;
+        qkvm::ui::ActionsView actions;
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = nullptr;
+    };
+
+    // Shows it large in a window this wide, its keyboard and mouse as `shown` says: whether it came up, its header
+    // laid out and drawn.
+    bool showLarge(ShownLarge& large, int width, const qkvm::ui::ControlView::Shown& shown)
+    {
+        large.wall.machines()->setTiles(large.tiles);
+        large.session.show(signedIn());
+        large.actions.setAllowed(true);
+        large.window = load(large.engine, large.about, large.session, large.wall, &large.actions);
+        if (large.window == nullptr) {
+            return false;
+        }
+        large.window->resize(width, 500);
+        if (!bringUp(large.window) || !QTest::qWaitFor([&] { return large.window->width() == width; })) {
+            return false;
+        }
+        large.wall.enlarge(large.tiles[1].key);
+        m_control.show(shown);
+        if (!QTest::qWaitFor([&] { return seenNamed(large.window, u"enlargedClose"_s) == 1; })) {
+            return false;
+        }
+        letTheWallComeToRest(large.window);
+        return true;
+    }
+
+    // The window made this wide, as its edge is dragged there, and its rows laid out and drawn so.
+    static bool makeWide(QQuickWindow* window, int width)
+    {
+        window->resize(width, window->height());
+        const bool done = QTest::qWaitFor([&] { return window->width() == width; });
+        letTheWallComeToRest(window);
+        return done;
+    }
+
+    // Keyboard and mouse that can be taken.
+    static qkvm::ui::ControlView::Shown takable()
+    {
+        qkvm::ui::ControlView::Shown shown;
+        shown.possible = true;
+        return shown;
+    }
+
+    // Whether the header's tool of this name stands in its row, and not in More.
+    static bool inTheRow(const QQuickWindow* window, const QString& name)
+    {
+        const QQuickItem* row = theOne(window, u"consoleHeaderRow"_s);
+        const QQuickItem* item = theOne(window, name);
+        return row != nullptr && item != nullptr && isSeen(item) && row->isAncestorOf(item);
+    }
+
+    // The tools of a row that can be seen under an item (each has its priority).
+    static void entriesUnder(QQuickItem* under, QList<QQuickItem*>& found)
+    {
+        if (under->property("priority").isValid() && isSeen(under)) {
+            found.append(under);
+            return;
+        }
+        const QList<QQuickItem*> children = under->childItems();
+        for (QQuickItem* child : children) {
+            entriesUnder(child, found);
+        }
+    }
+
+    // What is not so of where a row's tools stand: each in a place of its own, the places in the row's order, in the
+    // row or in More, and the last one's after More. Empty where all is so.
+    static QString whatIsWrongWithThePlaces(QQuickItem* shelf)
+    {
+        if (shelf == nullptr) {
+            return u"no row"_s;
+        }
+        const QQmlListReference items(shelf, "items");
+        const QQuickItem* more = nullptr;
+        for (const QQuickItem* child : shelf->childItems()) {
+            if (child->objectName().endsWith(u"MoreButton"_s)) {
+                more = child;
+            }
+        }
+        if (!items.isValid() || items.count() == 0 || more == nullptr) {
+            return u"no tools, or no More"_s;
+        }
+        QList<const QQuickItem*> places;
+        QHash<const QQuickItem*, qsizetype> was; // (the place before, in the row and in More)
+        for (qsizetype one = 0; one < items.count(); ++one) {
+            const auto* tool = qobject_cast<QQuickItem*>(items.at(one));
+            const QQuickItem* place = tool != nullptr ? tool->parentItem() : nullptr;
+            const QQuickItem* in = place != nullptr ? place->parentItem() : nullptr;
+            if (place == nullptr || in == nullptr || place == shelf || places.contains(place) ||
+                place->property("priority").isValid()) {
+                return u"%1 has no place of its own"_s.arg(tool != nullptr ? tool->objectName() : QString());
+            }
+            places.append(place);
+            if (in != shelf && shelf->isAncestorOf(tool)) {
+                return u"%1 stands in the row outside a place"_s.arg(tool->objectName());
+            }
+            const qsizetype at = in->childItems().indexOf(place);
+            if (was.contains(in) && at <= was.value(in)) {
+                return u"%1 stands before the one before it"_s.arg(tool->objectName());
+            }
+            was.insert(in, at);
+            if (in == shelf && tool->property("last").toBool() && at < shelf->childItems().indexOf(more)) {
+                return u"%1 stands before More"_s.arg(tool->objectName());
+            }
+        }
+        return {};
+    }
+
+    // What a screen reader reads under an accessible thing: each button by its name, in their order.
+    static void readOut(QAccessibleInterface* under, QStringList& read)
+    {
+        if (under == nullptr) {
+            return;
+        }
+        for (int child = 0; child < under->childCount(); ++child) {
+            QAccessibleInterface* one = under->child(child);
+            if (one == nullptr) {
+                continue;
+            }
+            if (one->role() == QAccessible::Button) {
+                read.append(one->text(QAccessible::Name));
+            } else {
+                readOut(one, read);
+            }
+        }
+    }
 
 private slots:
     // After each test, when its windows are gone: what they were handed goes too.
@@ -985,7 +1127,7 @@ private slots:
         letTheWallComeToRest(window);
         if (before != 0) {
             QTRY_VERIFY(isSeen(theOne(window, u"consoleMoreButton"_s)));
-            // (With the keys on Control, which keep there while the row is put in order again.)
+            // (With the keys on Control, which keep there while what was in More comes back.)
             QVERIFY(tabTo(window->contentItem(), u"enlargedControl"_s));
             window->resize(width, 500);
         }
@@ -1029,10 +1171,10 @@ private slots:
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
-    // Where something leaves the row and what was in More comes back, the row is put in the order
-    // it is seen while a tool of it has the keys: they stay on that tool, outlined as they were. (At
-    // 700 px Previous, Next and Fullscreen are in More; without Actions they all have room.)
-    void theKeysStayOnAToolWhileTheRowIsPutInOrder()
+    // Where something leaves the row and what was in More comes back to it, each to its own place in
+    // the order it is seen, while a tool of it has the keys: they stay on that tool, outlined as they
+    // were. (At 700 px Previous, Next and Fullscreen are in More; without Actions they all have room.)
+    void theKeysStayOnAToolWhileWhatWasInMoreComesBack()
     {
         qkvm::ui::AboutModel about;
         qkvm::ui::WallView wall;
@@ -1072,6 +1214,434 @@ private slots:
         QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
     }
 
+    // ...and a key held down on that tool is not let go of meanwhile: Space held on Control while what was in More
+    // comes back is still Control's when it comes up, and asks. (The row was put in Tab's order by moving each of its
+    // tools away and back again: the keys left Control for a moment, and a Space held on it was let go of with them.
+    // The gates on the build box met that a moment after a machine was shown large: see the test after the next.)
+    void aKeyHeldOnAToolIsNotLetGoOfWhileWhatWasInMoreComesBack()
+    {
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        const auto tiles = qkvm::ui::pretendWall();
+        wall.machines()->setTiles(tiles);
+        qkvm::ui::SessionView session;
+        session.show(signedIn());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        QQmlApplicationEngine engine;
+        auto* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        window->resize(700, 500);
+        QVERIFY(bringUp(window));
+        QTRY_COMPARE(window->width(), 700);
+        wall.enlarge(tiles[1].key);
+        qkvm::ui::ControlView::Shown shown;
+        shown.possible = true;
+        m_control.show(shown);
+        QTRY_COMPARE(seenNamed(window, u"enlargedControl"_s), 1);
+        letTheWallComeToRest(window);
+        QTRY_VERIFY(isSeen(theOne(window, u"consoleMoreButton"_s)));
+        QVERIFY(tabTo(window->contentItem(), u"enlargedControl"_s));
+        const QQuickItem* control = theOne(window, u"enlargedControl"_s);
+        const QSignalSpy takeAsked(&m_control, &qkvm::ui::ControlView::takeAsked);
+        const QSignalSpy keys(control, &QQuickItem::activeFocusChanged);
+        const QSignalSpy canceled(control, SIGNAL(canceled()));
+        QTest::keyPress(window, Qt::Key_Space);
+        QVERIFY(control->property("pressed").toBool());
+        // Actions goes, and what was in More comes back to the row, while Space is down.
+        actions.setAllowed(false);
+        QTRY_COMPARE(seenNamed(window, u"enlargedFullscreen"_s), 1);
+        QTRY_VERIFY(!isSeen(theOne(window, u"consoleMoreButton"_s)));
+        letTheWallComeToRest(window);
+        QCOMPARE(keys.count(), 0);
+        QCOMPARE(canceled.count(), 0);
+        QVERIFY(control->property("pressed").toBool());
+        QCOMPARE(takeAsked.count(), 0);
+        QTest::keyRelease(window, Qt::Key_Space);
+        QTRY_COMPARE(takeAsked.count(), 1);
+        QCOMPARE(window->activeFocusItem(), control);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // ...and the same where it comes back as the window is made wider (from 700 px to 800), with Space held on Control:
+    // the row is fitted then as it is laid out, inside the frame, and still nothing moves Control.
+    void aKeyHeldOnAToolIsNotLetGoOfAsTheWindowWidens()
+    {
+        ShownLarge large;
+        QVERIFY(showLarge(large, 700, takable()));
+        QQuickWindow* window = large.window;
+        QVERIFY(isSeen(theOne(window, u"consoleMoreButton"_s)));
+        QVERIFY(!inTheRow(window, u"enlargedFullscreen"_s));
+        QVERIFY(tabTo(window->contentItem(), u"enlargedControl"_s));
+        const QQuickItem* control = theOne(window, u"enlargedControl"_s);
+        const QSignalSpy takeAsked(&m_control, &qkvm::ui::ControlView::takeAsked);
+        const QSignalSpy keys(control, &QQuickItem::activeFocusChanged);
+        const QSignalSpy canceled(control, SIGNAL(canceled()));
+        QTest::keyPress(window, Qt::Key_Space);
+        QVERIFY(control->property("pressed").toBool());
+        QVERIFY(makeWide(window, 800));
+        QVERIFY(!isSeen(theOne(window, u"consoleMoreButton"_s)));
+        QVERIFY(inTheRow(window, u"enlargedFullscreen"_s));
+        QCOMPARE(keys.count(), 0);
+        QCOMPARE(canceled.count(), 0);
+        QVERIFY(control->property("pressed").toBool());
+        QCOMPARE(takeAsked.count(), 0);
+        QTest::keyRelease(window, Qt::Key_Space);
+        QTRY_COMPARE(takeAsked.count(), 1);
+        QCOMPARE(window->activeFocusItem(), control);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // The header's row is fitted as it is laid out, before it is drawn: from the first frame of a machine shown large
+    // its tools stand packed at the right, and none goes into More where the row has room for them all. (It was fitted
+    // a turn after it was laid out, so its first frame was drawn before it was fitted; and where that turn came first,
+    // as it did on a fast PC, it was fitted with no width at all: every tool that may go went into More, and More stood
+    // over Actions. A turn later they came back, and the row was put in Tab's order again. The build box met that turn:
+    // a click on Actions opened More, and Space on Control was let go of, as in the tests before.)
+    void theHeaderIsFittedAsItIsLaidOutBeforeItIsDrawn()
+    {
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        const auto tiles = qkvm::ui::pretendWall();
+        wall.machines()->setTiles(tiles);
+        qkvm::ui::SessionView session;
+        session.show(signedIn());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        QQmlApplicationEngine engine;
+        auto* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        window->resize(1280, 500);
+        QVERIFY(bringUp(window));
+        QTRY_COMPARE(window->width(), 1280);
+        letTheWallComeToRest(window);
+        qkvm::ui::ControlView::Shown shown;
+        shown.possible = true;
+        m_control.show(shown);
+        wall.enlarge(tiles[1].key);
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        QVERIFY(more != nullptr);
+        const QSignalSpy cameAndWent(more, &QQuickItem::visibleChanged);
+        // Each frame as it is drawn (Qt Quick drawing in software draws in this thread; anywhere else the row would be
+        // read as it changes): its tools as they stand.
+        QStringList misfitted;
+        int frames = 0;
+        bool elsewhere = false;
+        const QMetaObject::Connection drawing = connect(
+            window, &QQuickWindow::beforeSynchronizing, this,
+            [&] {
+                if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+                    elsewhere = true;
+                    return;
+                }
+                ++frames;
+                if (!theToolsStandAtTheRight(window) || isSeen(more)) {
+                    misfitted.append(u"frame %1: %2"_s.arg(frames).arg(whereTheToolsStand(window).join(u", "_s)));
+                }
+            },
+            Qt::DirectConnection);
+        const auto stopLooking = qScopeGuard([&] { disconnect(drawing); });
+        letTheWallComeToRest(window);
+        QVERIFY(!elsewhere);
+        QVERIFY(frames > 0);
+        QVERIFY2(misfitted.isEmpty(), qPrintable(misfitted.join(u'\n')));
+        QCOMPARE(cameAndWent.count(), 0);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // The keys go into More with a tool of the header that goes there, and come back with it: Tab on Fullscreen at
+    // 800 px, the window narrower (Fullscreen in More), and wide again. Outlined all the way, as they came by Tab.
+    // (More was given them with no outline, and kept them, hidden, once all came back: Tab went on from a place nobody
+    // saw, and Space on it asked an empty menu to open.)
+    void theKeysGoIntoMoreWithAToolOfTheHeaderAndComeBackWithIt()
+    {
+        ShownLarge large;
+        QVERIFY(showLarge(large, 800, takable()));
+        QQuickWindow* window = large.window;
+        QVERIFY(inTheRow(window, u"enlargedFullscreen"_s));
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        const QQuickItem* fullscreen = theOne(window, u"enlargedFullscreen"_s);
+        QVERIFY(!isSeen(more));
+        QVERIFY(tabTo(window->contentItem(), u"enlargedFullscreen"_s));
+        QVERIFY(fullscreen->property("visualFocus").toBool());
+        QVERIFY(makeWide(window, 700));
+        QVERIFY(isSeen(more));
+        QVERIFY(!inTheRow(window, u"enlargedFullscreen"_s));
+        QCOMPARE(window->activeFocusItem(), more);
+        QVERIFY(more->property("visualFocus").toBool());
+        QVERIFY(makeWide(window, 800));
+        QVERIFY(!isSeen(more));
+        QVERIFY(inTheRow(window, u"enlargedFullscreen"_s));
+        QCOMPARE(window->activeFocusItem(), fullscreen);
+        QVERIFY(fullscreen->property("visualFocus").toBool());
+        QVERIFY(!more->hasActiveFocus());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Where the keys were put on More itself and it goes, as all it held comes back (Actions no longer allowed, at
+    // 700 px), they go to the next control in Tab's order, Close, outlined as they were: never to nowhere, nor to More
+    // unseen. And not to a tool that gave More the keys before: they left More since. (Fullscreen gave them going into
+    // More; Shift+Tab and Tab took them to Open console and back.)
+    void whereMoreGoesWithTheKeysTheyGoToTheNextControl()
+    {
+        ShownLarge large;
+        QVERIFY(showLarge(large, 800, takable()));
+        QQuickWindow* window = large.window;
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        QVERIFY(tabTo(window->contentItem(), u"enlargedFullscreen"_s));
+        QVERIFY(makeWide(window, 700));
+        QVERIFY(isSeen(more));
+        QCOMPARE(window->activeFocusItem(), more);
+        QTest::keyClick(window, Qt::Key_Backtab);
+        QCOMPARE(window->activeFocusItem(), theOne(window, u"enlargedConsole"_s));
+        QTest::keyClick(window, Qt::Key_Tab);
+        QCOMPARE(window->activeFocusItem(), more);
+        QVERIFY(more->property("visualFocus").toBool());
+        large.actions.setAllowed(false);
+        QTRY_VERIFY(!isSeen(more));
+        letTheWallComeToRest(window);
+        const QQuickItem* close = theOne(window, u"enlargedClose"_s);
+        QCOMPARE(window->activeFocusItem(), close);
+        QVERIFY(isSeen(close));
+        QVERIFY(close->property("visualFocus").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Space on a More that holds nothing opens nothing, however the keys came to rest on it unseen.
+    void spaceOnAMoreThatHoldsNothingOpensNothing()
+    {
+        ShownLarge large;
+        QVERIFY(showLarge(large, 1280, takable()));
+        QQuickWindow* window = large.window;
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        const QObject* menu = window->findChild<QObject*>(u"consoleMore"_s);
+        QVERIFY(menu != nullptr);
+        QVERIFY(!isSeen(more));
+        QVERIFY(tabTo(window->contentItem(), u"consoleMoreButton"_s));
+        QCOMPARE(window->activeFocusItem(), more);
+        QTest::keyClick(window, Qt::Key_Space);
+        letTheWallComeToRest(window);
+        QVERIFY(!menu->property("visible").toBool());
+        QVERIFY(!menu->property("opened").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // An entry of an open More that comes back to the header's row with the keys keeps them there, outlined, and the
+    // menu stays open with the rest, as the page's does. (They went to the menu itself, on no entry.) The holder's name
+    // makes Control wide enough that at 700 px Open console is in More with Previous, Next and Fullscreen, and at
+    // 820 px back in the row.
+    void anEntryOfAnOpenMoreThatComesBackToTheRowKeepsTheKeys()
+    {
+        ShownLarge large;
+        qkvm::ui::ControlView::Shown shown = takable();
+        shown.ownerName = QString(200, u'W');
+        shown.takeoverPossible = true;
+        QVERIFY(showLarge(large, 1280, shown));
+        QQuickWindow* window = large.window;
+        QVERIFY(makeWide(window, 700));
+        QVERIFY(!inTheRow(window, u"enlargedConsole"_s));
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        const QObject* menu = window->findChild<QObject*>(u"consoleMore"_s);
+        QVERIFY(menu != nullptr);
+        clickOn(window, more);
+        QTRY_VERIFY(menu->property("opened").toBool());
+        QVERIFY(tabTo(window->contentItem(), u"enlargedConsole"_s));
+        const QQuickItem* console = theOne(window, u"enlargedConsole"_s);
+        QCOMPARE(window->activeFocusItem(), console);
+        QVERIFY(makeWide(window, 820));
+        QVERIFY(inTheRow(window, u"enlargedConsole"_s));
+        QVERIFY(isSeen(more));
+        QVERIFY(menu->property("opened").toBool());
+        QCOMPARE(window->activeFocusItem(), console);
+        QVERIFY(console->property("visualFocus").toBool());
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    void anOpenMoreIsReadInTheOrderItShows_data()
+    {
+        QTest::addColumn<QString>("more");
+        QTest::addColumn<QString>("menu");
+        QTest::addColumn<QList<int>>("widths");
+        // (With the holder's name making Control wide: Previous, Next and Fullscreen go into it at 820 px, and Open
+        // console after them at 700, above Fullscreen.)
+        QTest::newRow("the header") << u"consoleMoreButton"_s << u"consoleMore"_s << QList<int>{1280, 820, 700};
+        // (One at a time, the least needed first.)
+        QList<int> narrower;
+        for (int width = 1280; width >= 640; width -= 40) {
+            narrower.append(width);
+        }
+        QTest::newRow("the tools under it") << u"inputMoreButton"_s << u"inputMore"_s << narrower;
+    }
+
+    // An open More is read in the order it shows its entries, from the top, by Tab and by a screen reader alike,
+    // whatever order they went into it in as the window got narrower. (They were read in the order they came.)
+    void anOpenMoreIsReadInTheOrderItShows()
+    {
+        QFETCH(QString, more);
+        QFETCH(QString, menu);
+        QFETCH(QList<int>, widths);
+        QAccessible::setActive(true);
+        const auto quiet = qScopeGuard([] { QAccessible::setActive(false); });
+        ShownLarge large;
+        large.wall.setFavorites({}, true);
+        qkvm::ui::ControlView::Shown shown = takable();
+        shown.ownerName = QString(200, u'W');
+        shown.takeoverPossible = true;
+        QVERIFY(showLarge(large, widths.constFirst(), shown));
+        QQuickWindow* window = large.window;
+        for (const int width : std::as_const(widths)) {
+            QVERIFY(makeWide(window, width));
+        }
+        const QObject* opened = window->findChild<QObject*>(menu);
+        QVERIFY(opened != nullptr);
+        QVERIFY(tabTo(window->contentItem(), more));
+        QTest::keyClick(window, Qt::Key_Space);
+        QTRY_VERIFY(opened->property("opened").toBool());
+        letTheWallComeToRest(window);
+        auto* content = opened->property("contentItem").value<QQuickItem*>();
+        QVERIFY(content != nullptr);
+        // As it shows them, from the top.
+        QList<QQuickItem*> entries;
+        entriesUnder(content, entries);
+        std::ranges::sort(entries, {}, [](const QQuickItem* item) { return item->mapToScene(QPointF(0, 0)).y(); });
+        QStringList asShown;
+        QStringList enabled;
+        QStringList named;
+        for (QQuickItem* entry : std::as_const(entries)) {
+            asShown.append(entry->objectName());
+            if (entry->isEnabled()) {
+                enabled.append(entry->objectName());
+            }
+            QAccessibleInterface* one = QAccessible::queryAccessibleInterface(entry);
+            named.append(one != nullptr ? one->text(QAccessible::Name) : QString());
+        }
+        QVERIFY2(asShown.size() >= 2, qPrintable(asShown.join(u", "_s)));
+        if (more == u"consoleMoreButton"_s) {
+            QCOMPARE(asShown, (QStringList{u"enlargedPrevious"_s, u"enlargedNext"_s, u"enlargedConsole"_s,
+                                           u"enlargedFullscreen"_s}));
+        }
+        // By Tab, from the first.
+        QStringList byTab;
+        for (int entry = 0; entry < enabled.size(); ++entry) {
+            if (entry > 0) {
+                QTest::keyClick(window, Qt::Key_Tab);
+            }
+            byTab.append(window->activeFocusItem() != nullptr ? window->activeFocusItem()->objectName() : QString());
+        }
+        QVERIFY2(byTab == enabled,
+                 qPrintable(u"by Tab: %1; as shown: %2"_s.arg(byTab.join(u", "_s), enabled.join(u", "_s))));
+        // And as a screen reader reads the menu: its buttons, in its order.
+        QStringList read;
+        readOut(QAccessible::queryAccessibleInterface(content), read);
+        QVERIFY2(read == named, qPrintable(u"read: %1; as shown: %2"_s.arg(read.join(u", "_s), named.join(u", "_s))));
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Space held on a tool of the header as it goes into More (the window narrower, from 800 px to 700): its press
+    // is let go of with the tool, More has the keys, and the key's repeat, as Windows sends it while the key is held,
+    // and its release press nothing there: More does not open, and Next does nothing. (The repeat pressed More, and
+    // the release opened it.)
+    void spaceHeldOnAToolThatGoesIntoMorePressesNothing()
+    {
+        ShownLarge large;
+        QVERIFY(showLarge(large, 800, takable()));
+        QQuickWindow* window = large.window;
+        QVERIFY(inTheRow(window, u"enlargedNext"_s));
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        const QObject* menu = window->findChild<QObject*>(u"consoleMore"_s);
+        QVERIFY(menu != nullptr);
+        QVERIFY(tabTo(window->contentItem(), u"enlargedNext"_s));
+        const QSignalSpy stepped(&large.wall, &qkvm::ui::WallView::enlargedChanged);
+        QTest::keyPress(window, Qt::Key_Space);
+        QVERIFY(theOne(window, u"enlargedNext"_s)->property("pressed").toBool());
+        QVERIFY(makeWide(window, 700));
+        QVERIFY(!inTheRow(window, u"enlargedNext"_s));
+        QCOMPARE(window->activeFocusItem(), more);
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            qt_handleKeyEvent(window, QEvent::KeyPress, Qt::Key_Space, Qt::NoModifier, u" "_s, true);
+            QVERIFY(!more->property("pressed").toBool());
+        }
+        QTest::keyRelease(window, Qt::Key_Space);
+        letTheWallComeToRest(window);
+        QVERIFY(!menu->property("visible").toBool());
+        QCOMPARE(stepped.count(), 0);
+        QCOMPARE(window->activeFocusItem(), more);
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // A tool of the row under the header whose words change is as wide as they are from the first frame drawn so, and
+    // none of the row's tools stands over another: Add favorite becoming Remove favorite. (The row was fitted a turn
+    // after the words changed, and a frame was drawn before that: Remove favorite over Relative mouse.)
+    void aToolWhoseWordsChangeIsAsWideAsThemFromItsFirstFrame()
+    {
+        ShownLarge large;
+        large.wall.setFavorites({}, true);
+        QVERIFY(showLarge(large, 1280, takable()));
+        QQuickWindow* window = large.window;
+        auto* row = window->findChild<QQuickItem*>(u"consoleTools"_s);
+        const QQuickItem* favorite = theOne(window, u"enlargedFavorite"_s);
+        QVERIFY(row != nullptr && favorite != nullptr && isSeen(favorite));
+        QCOMPARE(favorite->property("text").toString(), u"Add favorite"_s);
+        QStringList misdrawn;
+        int frames = 0;
+        bool elsewhere = false;
+        // Each frame as it is drawn: the row's tools as they stand then. (Qt Quick drawing in software draws in the
+        // window's own thread; anywhere else the row would be read as it changes.)
+        const QMetaObject::Connection drawing = connect(
+            window, &QQuickWindow::beforeSynchronizing, this,
+            [&] {
+                if (QThread::currentThread() != QCoreApplication::instance()->thread()) {
+                    elsewhere = true;
+                    return;
+                }
+                ++frames;
+                QList<QQuickItem*> tools;
+                entriesUnder(row, tools);
+                std::ranges::sort(tools, {}, [](const QQuickItem* item) { return item->x(); });
+                for (qsizetype one = 0; one < tools.size(); ++one) {
+                    const QQuickItem* tool = tools.at(one);
+                    if (std::abs(tool->width() - tool->implicitWidth()) > 0.5) {
+                        misdrawn.append(u"frame %1: %2 %3 wide, its words %4"_s.arg(frames)
+                                            .arg(tool->objectName())
+                                            .arg(tool->width())
+                                            .arg(tool->implicitWidth()));
+                    }
+                    if (one > 0 && tool->x() < tools.at(one - 1)->x() + tools.at(one - 1)->width() + 6 - 0.5) {
+                        misdrawn.append(u"frame %1: %2 over %3"_s.arg(frames).arg(tools.at(one - 1)->objectName(),
+                                                                                  tool->objectName()));
+                    }
+                }
+            },
+            Qt::DirectConnection);
+        const auto stopLooking = qScopeGuard([&] { disconnect(drawing); });
+        large.wall.setFavorites({large.tiles[1].key}, true);
+        QTRY_COMPARE(favorite->property("text").toString(), u"Remove favorite"_s);
+        letTheWallComeToRest(window);
+        QVERIFY(!elsewhere);
+        QVERIFY(frames > 0);
+        QVERIFY2(misdrawn.isEmpty(), qPrintable(misdrawn.join(u'\n')));
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
+    // Every tool of both rows stands in a place of its own, in its row's order, in the row and in More alike, as a
+    // machine is shown large and as the window is made narrower and wide again. (One that stood in the row itself would
+    // come after Close to Tab, and be moved again at each fit, the keys and a key held on it let go of.)
+    void everyToolStandsInAPlaceOfItsOwn()
+    {
+        ShownLarge large;
+        large.wall.setFavorites({}, true);
+        QVERIFY(showLarge(large, 1280, takable()));
+        QQuickWindow* window = large.window;
+        for (const int width : {1280, 640, 1280}) {
+            QVERIFY(makeWide(window, width));
+            for (const QString& name : {u"consoleHeaderTools"_s, u"consoleTools"_s}) {
+                const QString said = whatIsWrongWithThePlaces(window->findChild<QQuickItem*>(name));
+                QVERIFY2(said.isEmpty(), qPrintable(u"%1 px, %2: %3"_s.arg(width).arg(name, said)));
+            }
+        }
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
+
     // Control is one button, as the page's: Space on it asks, and it says Asking... with the keys
     // still on it, so that Space again stops the asking. (Two buttons, one for each, hid the one
     // that had the keys: they left the header, and a second Space did nothing.)
@@ -1099,8 +1669,9 @@ private slots:
         const QSignalSpy takeAsked(&m_control, &qkvm::ui::ControlView::takeAsked);
         const QSignalSpy giveBackAsked(&m_control, &qkvm::ui::ControlView::giveBackAsked);
         // What came to the button and its window between the keys going there and the asking: said where Space
-        // asks nothing. (Gates 34 and 36 saw that, under load, once each; 73 runs on the slow cores beside a build
-        // did not, and saw nothing come between.)
+        // asks nothing. (Gates 34 and 36 saw that once each, and the build box's gates more often: the header's row,
+        // fitted a turn after it was laid out, was put in order again between Space going down and coming up, and
+        // the keys left Control and came back meanwhile. theHeaderIsFittedAsItIsLaidOutBeforeItIsDrawn.)
         const QSignalSpy canceled(button, SIGNAL(canceled()));
         const QSignalSpy pressings(button, SIGNAL(pressedChanged()));
         const QSignalSpy clicks(button, SIGNAL(clicked()));

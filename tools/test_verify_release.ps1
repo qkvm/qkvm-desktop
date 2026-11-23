@@ -27,7 +27,8 @@ function Sign([byte[]] $Data, $Key = $signer) {
 }
 $names = Get-ReleaseFileNames '0.1.0'
 $zipName = 'qKVM-Desktop-0.1.0-windows-x64.zip'
-$setupName = 'qKVM-Desktop-0.1.0-windows-x64-setup.exe'
+$armZipName = 'qKVM-Desktop-0.1.0-windows-arm64.zip'
+$setupName = 'qKVM-Desktop-0.1.0-windows-setup.exe'
 
 # The stand-in host, first: what each case publishes is served from the folder it is written to.
 $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -36,51 +37,128 @@ $host_ = "http://127.0.0.1:$port"
 $python = (Get-Command python -CommandType Application | Select-Object -First 1).Source
 $served = Start-Process -FilePath $python -ArgumentList @('-I', '-m', 'http.server', '--bind', '127.0.0.1', "$port", '--directory', $work) -PassThru -WindowStyle Hidden
 
-function Write-Feed($Context, [string] $File, [hashtable] $Change = @{}, [switch] $Setup) {
-    # (-Setup: installed copies' own feed, stable-setup.json.)
-    $from = if ($Setup) { $Context.SetupPayload } else { $Context.Payload }
+function Write-Feed($Context, [string] $File, [hashtable] $Change = @{}, [switch] $Setup, [switch] $Arm) {
+    # (-Setup: installed copies' own feed, stable-setup.json; -Arm: Windows on Arm's, stable-arm64.json, or with -Setup
+    # stable-arm64-setup.json.)
+    $from = if ($Arm -and $Setup) { $Context.ArmSetupPayload } elseif ($Arm) { $Context.ArmPayload } elseif ($Setup) { $Context.SetupPayload } else { $Context.Payload }
     $payload = [ordered]@{}
     foreach ($key in $from.Keys) { $payload[$key] = $from[$key] }
     foreach ($key in $Change.Keys) { $payload[$key] = $Change[$key] }
     $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($payload | ConvertTo-Json -Compress))
-    $key = if ($Setup) { $Context.SetupFeedKey } else { $Context.FeedKey }
+    $key = if ($Arm -and $Setup) { $Context.ArmSetupFeedKey } elseif ($Arm) { $Context.ArmFeedKey } elseif ($Setup) { $Context.SetupFeedKey } else { $Context.FeedKey }
     [ordered]@{ payload = [Convert]::ToBase64String($bytes); signature = [Convert]::ToBase64String((Sign $bytes $key)) } |
         ConvertTo-Json -Compress | Set-Content -LiteralPath $File -Encoding utf8 -NoNewline
 }
-function New-Published([string] $Name, [scriptblock] $Change = {}) {
+# (-Shipping: what release_commands.ps1 holds a release to besides, review armp-1 M1: each ZIP as package.ps1 makes it,
+# FFmpeg's DLLs and the package manifest in it; the FFmpeg part's record, kept twice of the same pins in a folder of
+# records as build_release.ps1 -Part ffmpeg keeps them, and the run's copy of it; and the setup's record of the
+# packages it was made of.)
+function Get-TextFile([string] $Path, [string] $Text) {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Text)
+    return [ordered]@{ path = $Path; bytes = $bytes.Length; sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+}
+$ffmpegDlls = @{ x64 = [ordered]@{ 'avcodec-63.dll' = 'made-up x64 avcodec'; 'avutil-61.dll' = 'made-up x64 avutil' }
+    arm64 = [ordered]@{ 'avcodec-63.dll' = 'made-up ARM64 avcodec'; 'avutil-61.dll' = 'made-up ARM64 avutil' } }
+function New-KeptFFmpeg([string] $BuiltAt, [string[]] $Reproduces = @()) {
+    $sources = @((Get-TextFile 'ffmpeg-9.0.2.tar.xz' 'made-up ffmpeg source'), (Get-TextFile 'zlib-1.3.2.tar.gz' 'made-up zlib source'))
+    $builds = foreach ($kind in 'x64', 'arm64') {
+        $pins = [ordered]@{ ffmpeg = "$($sources[0].path) $($sources[0].bytes) $($sources[0].sha256)"; zlib = "$($sources[1].path) $($sources[1].bytes) $($sources[1].sha256)"
+            toolchain = @("$kind-made-up-compiler 1234 $('a' * 64)"); scripts = @("build_ffmpeg.ps1 $('b' * 64)", "build_ffmpeg.sh $('c' * 64)") }
+        $dlls = @($ffmpegDlls[$kind].Keys | ForEach-Object { Get-TextFile "bin/$_" $ffmpegDlls[$kind][$_] })
+        [ordered]@{ architecture = $kind; pins = $pins; pinsDigest = Get-FFmpegPinsDigest $pins $kind
+            dlls = @($dlls | ForEach-Object { [ordered]@{ name = $_.path; bytes = $_.bytes; sha256 = $_.sha256 } }); files = $dlls }
+    }
+    return [ordered]@{ schema = 1; part = 'ffmpeg'; version = '0.1.0'; builtAt = $BuiltAt; source = [ordered]@{ commit = 'c' * 40; tree = 'd' * 40 }
+        sources = @($sources | ForEach-Object { [ordered]@{ archive = $_.path; bytes = $_.bytes; sha256 = $_.sha256 } }); builds = @($builds); reproduces = @($Reproduces) }
+}
+function New-ShippingZip([string] $Zip, [string] $Kind) {
+    $folder = Join-Path $work "zip-$([guid]::NewGuid().ToString('N'))/qKVM-Desktop-0.1.0-windows-$Kind"
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    $inside = [ordered]@{ 'qkvm-desktop.exe' = "made-up $Kind program" }
+    foreach ($name in $ffmpegDlls[$Kind].Keys) { $inside[$name] = $ffmpegDlls[$Kind][$name] }
+    foreach ($name in $inside.Keys) { [IO.File]::WriteAllText((Join-Path $folder $name), $inside[$name]) }
+    [ordered]@{ product = 'qKVM'; version = '0.1.0'; architecture = $Kind; files = @($inside.Keys | ForEach-Object { Get-TextFile $_ $inside[$_] }) } |
+        ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $folder 'package-manifest.json') -Encoding utf8
+    [IO.Compression.ZipFile]::CreateFromDirectory($folder, $Zip, [IO.Compression.CompressionLevel]::Optimal, $true)
+    return Get-Sha256 (Join-Path $folder 'package-manifest.json')
+}
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+function New-Published([string] $Name, [scriptblock] $Change = {}, [switch] $Shipping) {
     $case = Join-Path $work $Name
     $run = (New-Item -ItemType Directory -Path "$case/run" -Force).FullName
     $files = (New-Item -ItemType Directory -Path "$case/published" -Force).FullName
-    foreach ($file in $names | Where-Object { $_ -cne 'SHA256SUMS' }) { [IO.File]::WriteAllText((Join-Path $files $file), "made-up $file") }
+    $manifests = [ordered]@{}
+    if ($Shipping) { foreach ($kind in 'x64', 'arm64') { $manifests[$kind] = New-ShippingZip (Join-Path $files "qKVM-Desktop-0.1.0-windows-$kind.zip") $kind } }
+    foreach ($file in $names | Where-Object { $_ -cne 'SHA256SUMS' -and -not ($Shipping -and $_ -like '*-windows-*.zip') }) { [IO.File]::WriteAllText((Join-Path $files $file), "made-up $file") }
     $sums = (($names | Where-Object { $_ -cne 'SHA256SUMS' } | Sort-Object -CaseSensitive |
         ForEach-Object { "$(Get-Sha256 (Join-Path $files $_))  $_`n" }) -join '')
     [IO.File]::WriteAllBytes("$files/SHA256SUMS", [Text.Encoding]::ASCII.GetBytes($sums))
     [IO.File]::WriteAllBytes("$files/SHA256SUMS.sig", (Sign ([IO.File]::ReadAllBytes("$files/SHA256SUMS"))))
     $zip = Join-Path $files $zipName
-    $record = [ordered]@{ schema = 1; version = '0.1.0'; trial = $false; source = [ordered]@{ commit = 'c' * 40 }
+    $armZip = Join-Path $files $armZipName
+    $record = [ordered]@{ schema = 2; version = '0.1.0'; trial = $false; source = [ordered]@{ commit = 'c' * 40 }
         updates = [ordered]@{ publicKey = $publicKey }
-        package = [ordered]@{ archive = $zipName; bytes = (Get-Item $zip).Length; sha256 = Get-Sha256 $zip }
+        packages = @(
+            [ordered]@{ architecture = 'x64'; archive = $zipName; bytes = (Get-Item $zip).Length; sha256 = Get-Sha256 $zip }
+            [ordered]@{ architecture = 'arm64'; archive = $armZipName; bytes = (Get-Item $armZip).Length; sha256 = Get-Sha256 $armZip })
         setup = [ordered]@{ name = $setupName; bytes = (Get-Item (Join-Path $files $setupName)).Length; sha256 = Get-Sha256 (Join-Path $files $setupName) } }
+    $records = "$case/ffmpeg-records"
+    if ($Shipping) {
+        New-Item -ItemType Directory -Force -Path $records | Out-Null
+        $first = New-KeptFFmpeg '2026-11-20T10:00:00.0000000Z'
+        $second = New-KeptFFmpeg '2026-11-20T11:00:00.0000000Z' @('ffmpeg-0.1.0-first.json (x64)', 'ffmpeg-0.1.0-first.json (arm64)')
+        $first | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$records/ffmpeg-0.1.0-first.json" -Encoding utf8
+        $second | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$records/ffmpeg-0.1.0-second.json" -Encoding utf8
+        Copy-Item -LiteralPath "$records/ffmpeg-0.1.0-second.json" -Destination (Join-Path $run $FFmpegRecordName)
+        $record.source['tree'] = 'd' * 40
+        $record['dependencies'] = [ordered]@{ ffmpeg = [ordered]@{ record = $second; recordSha256 = Get-Sha256 (Join-Path $run $FFmpegRecordName) } }
+        $record.packages[0]['manifestSha256'] = $manifests['x64']
+        $record.packages[1]['manifestSha256'] = $manifests['arm64']
+        $record.setup['made'] = [ordered]@{ packages = @([ordered]@{ architecture = 'x64'; manifestSha256 = $manifests['x64'] }, [ordered]@{ architecture = 'arm64'; manifestSha256 = $manifests['arm64'] }) }
+        # (And the record of the ARM64 ZIP's start checks, made on Windows on Arm, as release_files.ps1 keeps it with the
+        # run: review armp-1 M3; made by the export's tools, which the run's build record names: review r2 of arm and
+        # armp, L2.)
+        $startTools = [ordered]@{ 'tools/test_package_archive.ps1' = '5' * 64; 'tools/test_package.ps1' = '6' * 64; 'tools/build_common.ps1' = '7' * 64
+            'tools/image-protections.json' = '8' * 64 }
+        $record['checks'] = [ordered]@{ arm64StartupTools = $startTools }
+        [ordered]@{ schema = 1; product = 'qKVM Desktop'; check = 'tools/test_package_archive.ps1'; tools = $startTools; passed = $true; archive = $armZipName
+            bytes = $record.packages[1].bytes; sha256 = $record.packages[1].sha256; architecture = 'arm64'; version = '0.1.0'
+            windows = [ordered]@{ machine = 'arm64'; process = 'arm64' }; at = '2026-11-22T10:00:00.0000000Z' } |
+            ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $run $Arm64StartupName) -Encoding utf8
+    }
     $written = [ordered]@{ version = '0.1.0'; commit = 'c' * 40; files = @($names | ForEach-Object {
         [ordered]@{ name = $_; bytes = (Get-Item (Join-Path $files $_)).Length; sha256 = Get-Sha256 (Join-Path $files $_) } }) }
     $now = [DateTime]::UtcNow
     $payload = [ordered]@{ schema = 1; product = 'qkvm-desktop'; platform = 'windows-x64-portable'; channel = 'stable'
         version = '0.1.0'; published = $now.AddHours(-1).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
         expires = $now.AddDays(29).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
-        package = "$host_/$Name/published/$zipName"; bytes = $record.package.bytes; sha256 = $record.package.sha256
+        package = "$host_/$Name/published/$zipName"; bytes = $record.packages[0].bytes; sha256 = $record.packages[0].sha256
         notes = 'made-up notes' }
     $setupPayload = [ordered]@{ schema = 1; product = 'qkvm-desktop'; platform = 'windows-x64-setup'; channel = 'stable'
         version = '0.1.0'; published = $payload.published; expires = $payload.expires
         package = "$host_/$Name/published/$setupName"; bytes = $record.setup.bytes; sha256 = $record.setup.sha256
         notes = 'made-up notes' }
-    $context = [pscustomobject]@{ Name = $Name; Case = $case; Run = $run; Files = $files; Record = $record; Written = $written
+    # (Windows on Arm's two: of the ARM64 ZIP, and of the one setup.)
+    $armPayload = [ordered]@{ schema = 1; product = 'qkvm-desktop'; platform = 'windows-arm64-portable'; channel = 'stable'
+        version = '0.1.0'; published = $payload.published; expires = $payload.expires
+        package = "$host_/$Name/published/$armZipName"; bytes = $record.packages[1].bytes; sha256 = $record.packages[1].sha256
+        notes = 'made-up notes' }
+    $armSetupPayload = [ordered]@{ schema = 1; product = 'qkvm-desktop'; platform = 'windows-arm64-setup'; channel = 'stable'
+        version = '0.1.0'; published = $payload.published; expires = $payload.expires
+        package = "$host_/$Name/published/$setupName"; bytes = $record.setup.bytes; sha256 = $record.setup.sha256
+        notes = 'made-up notes' }
+    $context = [pscustomobject]@{ Name = $Name; Case = $case; Run = $run; Files = $files; Record = $record; Written = $written; Records = $records
         Payload = $payload; FeedKey = $signer; Feed = "$case/stable.json"; Served = "$host_/$Name/published"
-        SetupPayload = $setupPayload; SetupFeedKey = $signer; SetupFeed = "$case/stable-setup.json" }
+        SetupPayload = $setupPayload; SetupFeedKey = $signer; SetupFeed = "$case/stable-setup.json"
+        ArmPayload = $armPayload; ArmFeedKey = $signer; ArmFeed = "$case/stable-arm64.json"
+        ArmSetupPayload = $armSetupPayload; ArmSetupFeedKey = $signer; ArmSetupFeed = "$case/stable-arm64-setup.json" }
     & $Change $context
-    $context.Record | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$run/build-record.json" -Encoding utf8
+    $context.Record | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath "$run/build-record.json" -Encoding utf8
     $context.Written | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$run/release-files.json" -Encoding utf8
     Write-Feed $context $context.Feed
     Write-Feed $context $context.SetupFeed -Setup
+    Write-Feed $context $context.ArmFeed -Arm
+    Write-Feed $context $context.ArmSetupFeed -Arm -Setup
     return $context
 }
 function Invoke-Line([string[]] $Arguments) {
@@ -91,7 +169,7 @@ function Invoke-Verify($Context, [string[]] $From, [switch] $RequireSignature, [
     # (As the owner runs it: pwsh -File, and every place in one -From, a comma between them.)
     $arguments = @('-File', "$PSScriptRoot/verify_release.ps1", '-Run', $Context.Run)
     if ($From.Count) { $arguments += @('-From', ($From -join ',')) }
-    if (-not $NoFeed) { $arguments += @('-Feed', $Context.Feed, '-SetupFeed', $Context.SetupFeed) }
+    if (-not $NoFeed) { $arguments += @('-Feed', $Context.Feed, '-SetupFeed', $Context.SetupFeed, '-Arm64Feed', $Context.ArmFeed, '-Arm64SetupFeed', $Context.ArmSetupFeed) }
     if ($RequireSignature) { $arguments += '-RequireSignature' }
     return Invoke-Line $arguments
 }
@@ -110,7 +188,10 @@ try {
     # --- What was built, as published: in a folder and on a host, both in one -From, and the feed.
     $good = New-Published 'good'
     $result = Invoke-Verify $good @($good.Files, $good.Served) -RequireSignature
-    Check ($result.Ended -eq 0 -and $result.Said -match 'What is published is what was built: qKVM Desktop 0\.1\.0, 2 place\(s\) and both feeds') "what was built passes ($($result.Said))"
+    Check ($result.Ended -eq 0 -and $result.Said -match 'What is published is what was built: qKVM Desktop 0\.1\.0, 2 place\(s\) and the four feeds') "what was built passes ($($result.Said))"
+    Check ($result.Said -match 'ok: the ZIP Windows on Arm''s feed names is the one built') 'the ARM64 ZIP Windows on Arm''s feed names is fetched and checked'
+    Check ($result.Said -match 'ok: the setup Windows on Arm''s installed copies'' feed names is the one built') 'the setup Windows on Arm''s installed copies'' feed names is fetched and checked'
+    Check ($result.Said -match 'ok: the arm64 ZIP written is the ZIP built' -and $result.Said -match 'ok: the x64 ZIP written is the ZIP built') 'each kind''s ZIP is checked against the build record'
     Check ($result.Said.Contains("--- $($good.Files)") -and $result.Said.Contains("--- $($good.Served)")) "each place is checked as itself ($($result.Said))"
     Check ($result.Said -match 'ok: the ZIP the feed names is the one built') 'the ZIP the feed names is fetched and checked'
     Check ($result.Said -match 'ok: the setup installed copies'' feed names is the one built') 'the setup installed copies'' feed names is fetched and checked'
@@ -130,7 +211,13 @@ try {
     Expect-Failure (New-Published 'sums' { param($c) [IO.File]::AppendAllText((Join-Path $c.Files 'SHA256SUMS'), "0  extra`n") }) 'SHA256SUMS is the one written' 'a changed SHA256SUMS fails'
     Expect-Failure (New-Published 'missing' { param($c) Remove-Item (Join-Path $c.Files 'qKVM-Desktop-0.1.0-source.zip') }) 'qKVM-Desktop-0.1.0-source.zip is the one written' 'a missing file fails'
     Expect-Failure (New-Published 'extra' { param($c) [IO.File]::WriteAllText((Join-Path $c.Files 'qkvm-setup.exe'), 'x') }) 'the folder holds the release files and nothing else' 'a folder with another file fails'
-    Expect-Failure (New-Published 'built' { param($c) $c.Record.package.sha256 = '0' * 64 }) 'the ZIP written is the ZIP built' 'a ZIP that is not the one built fails'
+    Expect-Failure (New-Published 'built' { param($c) $c.Record.packages[0].sha256 = '0' * 64 }) 'the x64 ZIP written is the ZIP built' 'a ZIP that is not the one built fails'
+    # (Both kinds: Windows on Arm's ZIP as published, and as built.)
+    Expect-Failure (New-Published 'arm-zip' { param($c) [IO.File]::AppendAllText((Join-Path $c.Files $armZipName), 'x') }) "$([regex]::Escape($armZipName)) is the one written" 'a changed ARM64 ZIP fails'
+    Expect-Failure (New-Published 'arm-built' { param($c) $c.Record.packages[1].sha256 = '0' * 64 }) 'the arm64 ZIP written is the ZIP built' 'an ARM64 ZIP that is not the one built fails'
+    Expect-Failure (New-Published 'x64-alone' { param($c) $c.Record.packages = @($c.Record.packages[0]) }) 'the arm64 ZIP written is the ZIP built' 'a run of x64 alone fails'
+    Expect-Failure (New-Published 'schema-1' { param($c) $c.Record.schema = 1 }) 'the run is of both kinds of Windows' 'a record of a run before both kinds fails'
+    Expect-Failure (New-Published 'arm-missing' { param($c) Remove-Item (Join-Path $c.Files $armZipName) }) "$([regex]::Escape($armZipName)) is the one written" 'a missing ARM64 ZIP fails'
     # The setup, as published: the one written, and the one built.
     Expect-Failure (New-Published 'setup' { param($c) [IO.File]::AppendAllText((Join-Path $c.Files $setupName), 'x') }) "$([regex]::Escape($setupName)) is the one written" 'a changed setup fails'
     Expect-Failure (New-Published 'setup-missing' { param($c) Remove-Item (Join-Path $c.Files $setupName) }) "$([regex]::Escape($setupName)) is the one written" 'a missing setup fails'
@@ -187,6 +274,21 @@ try {
     $noSetupFeed = New-Published 'setup-feed-missing'
     Remove-Item -LiteralPath $noSetupFeed.SetupFeed
     Expect-Failure $noSetupFeed 'installed copies'' feed could be read' 'a setup feed that is not there fails'
+    Expect-Failure (New-Published 'setup-feed-of-arm' { param($c) $c.SetupPayload.platform = 'windows-arm64-setup' }) 'installed copies'' feed is of qKVM Desktop.s stable setup' 'an x64 setup feed of Windows on Arm''s platform fails'
+    Expect-Failure (New-Published 'feed-of-arm' { param($c) $c.Payload.platform = 'windows-arm64-portable' }) 'the feed is of qKVM Desktop.s stable portable release' 'an x64 feed of Windows on Arm''s platform fails'
+
+    # --- Windows on Arm's two feeds (stable-arm64.json, stable-arm64-setup.json): the same, of its own platforms, the
+    # ARM64 ZIP and the one setup.
+    Expect-Failure (New-Published 'arm-feed-key' { param($c) $c.ArmFeedKey = $other }) 'Windows on Arm.s feed is signed by the key the program pins' 'an Arm feed signed by another key fails'
+    Expect-Failure (New-Published 'arm-feed-x64' { param($c) $c.ArmPayload.platform = 'windows-x64-portable' }) 'Windows on Arm.s feed is of qKVM Desktop.s stable portable release' 'an Arm feed of x64''s platform fails'
+    Expect-Failure (New-Published 'arm-feed-of-x64-zip' { param($c) $c.ArmPayload.bytes = $c.Payload.bytes; $c.ArmPayload.sha256 = $c.Payload.sha256 }) 'Windows on Arm.s feed names the ZIP built' 'an Arm feed naming the x64 ZIP''s bytes fails'
+    Expect-Failure (New-Published 'arm-feed-name' { param($c) $c.ArmPayload.package = "$host_/arm-feed-name/published/$zipName" }) 'Windows on Arm.s feed names .* at an https address' 'an Arm feed naming the x64 ZIP fails'
+    Expect-Failure (New-Published 'arm-feed-version' { param($c) $c.ArmPayload.version = '0.1.1' }) 'Windows on Arm.s feed offers 0\.1\.0' 'an Arm feed of another version fails'
+    Expect-Failure (New-Published 'arm-feed-gone' { param($c) $c.ArmPayload.package = "$host_/arm-feed-gone/nothing-here/$armZipName" }) 'the ZIP Windows on Arm.s feed names is the one built' 'an Arm feed naming a ZIP that is not there fails'
+    Expect-Failure (New-Published 'arm-setup-feed-key' { param($c) $c.ArmSetupFeedKey = $other }) 'Windows on Arm.s installed copies'' feed is signed by the key the program pins' 'an Arm setup feed signed by another key fails'
+    Expect-Failure (New-Published 'arm-setup-feed-x64' { param($c) $c.ArmSetupPayload.platform = 'windows-x64-setup' }) 'Windows on Arm.s installed copies'' feed is of qKVM Desktop.s stable setup' 'an Arm setup feed of x64''s platform fails'
+    Expect-Failure (New-Published 'arm-setup-feed-sha' { param($c) $c.ArmSetupPayload.sha256 = '0' * 64 }) 'Windows on Arm.s installed copies'' feed names the setup built' 'an Arm setup feed of another setup fails'
+    Expect-Failure (New-Published 'arm-setup-feed-long' { param($c) $c.ArmSetupPayload.expires = [DateTime]::UtcNow.AddDays(40).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'") }) 'Windows on Arm.s installed copies'' feed is valid for no more than 31 days' 'an Arm setup feed valid for longer than a month fails'
 
     # --- A redirect, and a place with nothing.
     $moved = New-Published 'moved' { param($c) Remove-Item (Join-Path $c.Files 'SHA256SUMS'); New-Item -ItemType Directory -Path (Join-Path $c.Files 'SHA256SUMS') | Out-Null }
@@ -197,13 +299,18 @@ try {
 
     # --- The command release_commands.ps1 prints, run as printed: its places (GitHub's and the direct host's) and its
     # feed swapped for this PC's own, every other word as it is.
-    $printed = New-Published 'printed' { param($c) New-Item -ItemType Directory -Path "$($c.Case)/mirror" | Out-Null
+    $printed = New-Published 'printed' -Shipping { param($c) New-Item -ItemType Directory -Path "$($c.Case)/mirror" | Out-Null
         foreach ($file in Get-ChildItem -LiteralPath $c.Files) { Copy-Item -LiteralPath $file.FullName -Destination "$($c.Case)/mirror" } }
     $realFeed = "$($printed.Case)/stable-as-published.json"
     Write-Feed $printed $realFeed @{ package = "https://download.qkvm.com/desktop/0.1.0/$zipName" }
     $realSetupFeed = "$($printed.Case)/stable-setup-as-published.json"
     Write-Feed $printed $realSetupFeed @{ package = "https://download.qkvm.com/desktop/0.1.0/$setupName" } -Setup
-    $commands = Invoke-Line @('-File', "$PSScriptRoot/release_commands.ps1", '-Run', $printed.Run, '-Files', $printed.Files, '-Bucket', 'qkvm-downloads', '-Feed', $realFeed, '-SetupFeed', $realSetupFeed)
+    $realArmFeed = "$($printed.Case)/stable-arm64-as-published.json"
+    Write-Feed $printed $realArmFeed @{ package = "https://download.qkvm.com/desktop/0.1.0/$armZipName" } -Arm
+    $realArmSetupFeed = "$($printed.Case)/stable-arm64-setup-as-published.json"
+    Write-Feed $printed $realArmSetupFeed @{ package = "https://download.qkvm.com/desktop/0.1.0/$setupName" } -Arm -Setup
+    $commands = Invoke-Line @('-File', "$PSScriptRoot/release_commands.ps1", '-Run', $printed.Run, '-Files', $printed.Files, '-Bucket', 'qkvm-downloads', '-Feed', $realFeed, '-SetupFeed', $realSetupFeed,
+        '-Arm64Feed', $realArmFeed, '-Arm64SetupFeed', $realArmSetupFeed, '-Records', $printed.Records)
     $checks = @($commands.Said -split "`n" | Where-Object { $_ -like 'pwsh -File tools\verify_release.ps1 *' })
     $line = @($checks | Where-Object { $_ -like '* -Feed *' })
     $draftLine = @($checks | Where-Object { $_ -notlike '* -Feed *' })
@@ -233,6 +340,8 @@ try {
             'https://download.qkvm.com/desktop/0.1.0' = "$host_/printed/mirror"
             'https://download.qkvm.com/desktop/stable.json' = "$host_/printed/stable.json"
             'https://download.qkvm.com/desktop/stable-setup.json' = "$host_/printed/stable-setup.json"
+            'https://download.qkvm.com/desktop/stable-arm64.json' = "$host_/printed/stable-arm64.json"
+            'https://download.qkvm.com/desktop/stable-arm64-setup.json' = "$host_/printed/stable-arm64-setup.json"
         }
         $asRun = $line[0]
         foreach ($swap in $swaps.GetEnumerator()) {
@@ -243,8 +352,8 @@ try {
         Check ($words[0] -ceq 'pwsh' -and $words[1] -ceq '-File') "the check is run by pwsh -File ($asRun)"
         Push-Location (Split-Path -Parent $PSScriptRoot)
         try { $result = Invoke-Line @($words[1..($words.Count - 1)]) } finally { Pop-Location }
-        Check ($result.Ended -eq 0 -and $result.Said -match '2 place\(s\) and both feeds' -and $result.Said.Contains("--- $($printed.Served)") -and
-            $result.Said.Contains("--- $host_/printed/mirror")) "the check as printed checks both places and both feeds ($($result.Said))"
+        Check ($result.Ended -eq 0 -and $result.Said -match '2 place\(s\) and the four feeds' -and $result.Said.Contains("--- $($printed.Served)") -and
+            $result.Said.Contains("--- $host_/printed/mirror")) "the check as printed checks both places and the four feeds ($($result.Said))"
         [IO.File]::AppendAllText("$($printed.Case)/mirror/$zipName", 'x')
         Push-Location (Split-Path -Parent $PSScriptRoot)
         try { $result = Invoke-Line @($words[1..($words.Count - 1)]) } finally { Pop-Location }

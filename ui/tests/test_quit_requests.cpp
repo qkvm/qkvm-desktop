@@ -135,6 +135,23 @@ private:
         return asked;
     }
 
+    // Whether the waiting thread has noted the coming of `count` requests within `most`, waited for on this thread
+    // without its events being handled (so that the interface hears nothing meanwhile): a stall begins only once a
+    // request is noted, never after a time taken for long enough (outside review of 0.2.0, 1.10: on a loaded runner the
+    // waiting thread may note it late, and the stall then makes it no older).
+    static bool notedWithin(const ui::QuitRequests& requests, quint32 count,
+                            std::chrono::milliseconds most = std::chrono::seconds(20))
+    {
+        const auto until = std::chrono::steady_clock::now() + most;
+        while (requests.noted() < count) {
+            if (std::chrono::steady_clock::now() > until) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return true;
+    }
+
     // The answer windows of the name, of any process, as Setup looks for them.
     static std::vector<HWND> windowsOf(const QString& kind)
     {
@@ -255,6 +272,7 @@ private slots:
         int ended = 0;
         const ui::QuitRequests requests(names(), [] { return QString(); }, [&] { ++ended; }, pace());
         QVERIFY(ask(m_event));
+        QVERIFY(notedWithin(requests, 1));
         // (The interface stalls: nothing of this thread runs.)
         QTest::qSleep(stallMs);
         QVERIFY(!withdraw());
@@ -274,6 +292,8 @@ private slots:
         int ended = 0;
         const ui::QuitRequests requests(names(), [] { return QString(); }, [&] { ++ended; }, pace());
         QVERIFY(ask(m_event));
+        // (Noted as it came, by the waiting thread, before the interface stalls: waited for, never assumed.)
+        QVERIFY(notedWithin(requests, 1));
         QTest::qSleep(stallMs);
         QTRY_VERIFY(requests.answer().startsWith(u"1* "_s));
         QVERIFY(requests.answer().contains(u"too late"_s));
@@ -343,20 +363,28 @@ private slots:
             const ui::QuitRequests requests(names(), [] { return QString(); }, [&] { ++ended; }, pace());
             QVERIFY(ask(m_event));
             std::atomic<bool> taken{false};
-            std::thread setup([this, &taken, round] {
+            std::atomic<bool> withdrawn{false};
+            std::thread setup([this, &taken, &withdrawn, round] {
                 std::this_thread::sleep_for(std::chrono::milliseconds(round % 10));
                 taken = withdraw();
+                withdrawn = true;
             });
             const auto joined = qScopeGuard([&setup] {
                 if (setup.joinable()) {
                     setup.join();
                 }
             });
-            QTest::qWait(150);
+            // (The program heard the request and answered it, and Setup has withdrawn it, both while this thread
+            // handles its events, so that the two still race: waited for, never a time taken for long enough. A round
+            // whose answer had not come was a round that tested nothing; outside review of 0.2.0, 1.10.)
+            QTRY_VERIFY_WITH_TIMEOUT(withdrawn.load() && requests.answer() != u"0"_s, 20'000);
             setup.join();
-            QTest::qWait(50);
-            QVERIFY2((ended == 1) == taken.load(),
-                     qPrintable(u"round %1: ended %2, taken %3"_s.arg(round).arg(ended).arg(taken.load())));
+            const QString answer = requests.answer();
+            QVERIFY2((ended == 1) == taken.load() && (answer == u"1"_s) == taken.load(),
+                     qPrintable(u"round %1: ended %2, taken %3, answered %4"_s.arg(round)
+                                    .arg(ended)
+                                    .arg(taken.load())
+                                    .arg(answer)));
         }
     }
 

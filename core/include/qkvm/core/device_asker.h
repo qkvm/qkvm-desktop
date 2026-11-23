@@ -7,6 +7,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QHostAddress>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkCookie>
@@ -16,8 +17,10 @@
 #include <QUrlQuery>
 
 #include <qkvm/base/result.h>
+#include <qkvm/core/network_end.h>
 #include <qkvm/core/tls.h>
 
+class QIODevice;
 class QNetworkReply;
 
 namespace qkvm::core {
@@ -55,12 +58,18 @@ public:
         int transferMs = 0;
     };
     struct Ask {
-        // "GET", "POST", "PATCH" or "DELETE": a question asked any other way is refused before
-        // anything goes ("invalid").
+        // "GET", "POST", "PATCH", "PUT" or "DELETE": a question asked any other way is refused before
+        // anything goes ("invalid"). A PATCH, a PUT and a DELETE do something, whatever `doesSomething` says. Qt
+        // asks a PUT once more by itself where the line falls before an answer, as it does a GET (HTTP holds a PUT
+        // to be idempotent): only what cannot be done twice by a second one goes as a PUT.
         QByteArray method = QByteArrayLiteral("GET");
         QString path;
         QUrlQuery query;
         QByteArray body;
+        // A body read from this device as it goes, in the place of `body`: of the length it has from where it stands,
+        // said first (Content-Length), and read as the line takes it, never gathered whole first (an image carried to
+        // the KVM: a file read at a place). Whoever asks keeps it until the answer; Qt reads it on this thread.
+        QIODevice* streamed = nullptr;
         QByteArray bodyIs;          // the body's kind, where there is a body
         qsizetype largest = 0;      // of the answer: whoever asks says how much it takes
         int quietMs = 0;            // 0: the usual
@@ -68,6 +77,17 @@ public:
         // The answer never ends: no limit on its whole, neither in time nor in size. Whoever asks
         // reads it as it comes and keeps limits of its own.
         bool endless = false;
+        // The longest the whole may take, from the asking on; 0: to be let in, quietMs and transferMs, as for any.
+        int wholeMs = 0;
+        // Told the reply as it is handed to the line: for whoever follows how far its body has gone (uploadProgress),
+        // or stops it (abort).
+        std::function<void(QNetworkReply*)> handed;
+        // It goes only on a line this asker has open already, the one the question before it was answered on (a
+        // sign-in's password, after the question that asked which device answers there). Over HTTPS, where Qt makes a
+        // new line for it, it is stopped as the two agree on how to speak, before a byte of it goes (lineMadeAnew).
+        // Over plain HTTP nothing tells that before it goes: whoever asks looks at what the answer before said of its
+        // line (Reply::lineEnds). (Outside review of 0.2.0, area 5, MEDIUM 5.4.)
+        bool onItsLine = false;
         // Headers of the question beside the asker's own: only "If-Match" and "Accept", with a
         // value that prints and is one line. Any other, "Authorization", "Cookie" and "Host" among
         // them, and the question is refused before anything goes ("invalid"): nothing of the
@@ -87,7 +107,14 @@ public:
         // Those that were asked for as sent: by their names in small letters, trimmed, as they came.
         QHash<QByteArray, QByteArray> headersAsSent;
         QList<QNetworkCookie> cookies;
+        // The words of its status line after the status ("Not Found"), as they came, mostReasonBytes of them at the
+        // most: where a Proxmox says why it refused (its API's own format puts nothing in the body), and read as
+        // hostile words by whoever reads them (proxmox::saidBy). Empty where there were none.
+        QByteArray reason;
+        // It said that its line ends with it ("Connection: close"): a question after it goes on a new line.
+        bool lineEnds = false;
     };
+    static constexpr qsizetype mostReasonBytes = 1024;
     // How the session goes with every question: in the one cookie the family names (a kvmd's
     // "auth_token", a JetKVM's "authToken"), or in a header of its own (a server's controller's
     // "X-Auth-Token"), with no cookie at all; or, a controller's own web page's (AMI's), in the cookies
@@ -110,6 +137,16 @@ public:
     DeviceAsker& operator=(DeviceAsker&&) = delete;
 
     const Where& where() const { return m_where; }
+    // From now on every question of this asker goes to `at` and to no other address (one its address's name was found
+    // at), whatever Windows would find that name at for a line of its own: its Host header is its address's name and
+    // port as ever, and over HTTPS the certificate is held to that name and the name said to it (SNI), as by its name.
+    // Whether it can be: false for an address no address of the web can be written with (an IPv6 one with a zone), and
+    // then nothing changes.
+    bool onlyTo(const QHostAddress& at);
+    // Every question of this asker on one connection at a time (Qt's manager of HTTP keeps up to six to a device): what
+    // goes only on its line (Ask::onItsLine) then never finds another connection open that a question before made, and
+    // nobody asked anything on. From the first question on.
+    void keepToOneConnection() { m_oneConnection = true; }
 
     // Sends one question out, as every question goes: straight to the KVM, within its limits, the
     // certificate looked at first. The answer is the caller's to read, and to end (deleteLater) when
@@ -150,6 +187,10 @@ public:
     // A question this program does not ask: another way of asking than its four, or a header that
     // is not one of the few it sends. Nothing went.
     static base::Error notFitToBeSent();
+    // A question that goes only on its line (Ask::onItsLine) found that line gone, and a new one made for it: stopped
+    // before a byte of it went.
+    static base::Error lineMadeAnew();
+    static constexpr const char* lineMadeAnewCode = "line_made_anew";
 
 signals:
     // The KVM has shown, on a line of this asker's, the certificate it is known by: the certificate
@@ -164,13 +205,17 @@ private:
     Where m_where;
     Times m_times;
     Carried m_session;
+    // Where every question goes (onlyTo), in the place of its address's host; empty: its address as it is.
+    QString m_onlyTo;
     // Windows' own TLS, as for a QKVM server (ServerClient): the same trust on every PC. Chosen before
     // anything of Qt's that speaks is made, which is why it stands before that here; and where it is
     // not what is in use, nothing goes out to an HTTPS address (sendOut, tls.h).
     const bool m_windowsOwnTls = useWindowsOwnTls();
-    QNetworkAccessManager m_network;
+    // Ended off the interface thread, its questions with it here (network_end.h): its end may wait five seconds.
+    OwnNetwork m_network = ownNetwork();
     QByteArray m_shownCertificate;
     bool m_toldItsCertificate = false; // showedItsCertificate was said
+    bool m_oneConnection = false;      // keepToOneConnection
     QElapsedTimer m_heard;             // since the KVM last answered on this asker; not started: never
 };
 

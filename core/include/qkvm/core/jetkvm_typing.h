@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <vector>
 
@@ -35,8 +36,14 @@ struct TypingPace {
 
 // `text`: the reports type a text (paced so), not keys pressed together. `keyGoes` is said before every key: the
 // connection is in use all that while, whoever looks or does not (the web's _wanted_at before every key: a long text
-// left to count as unwatched was cut in the middle; review 3's LOW 3).
+// left to count as unwatched was cut in the middle; review 3's LOW 3). `stopped` is asked before every key, and while
+// the live line is waited for: where it says so, the typing ends where it stands, the key it pressed let go of as every
+// one is, and no key after it goes, not the Enter after a text either: "stopped" (the program locked, or made a wall
+// screen: OwnDevice::stopTyping; 6.18 of the outside review of the wave 2 desktop, for a JetKVM: review cx6-1, M3).
 void type(QPointer<JetKvmConnection> on, std::vector<typed::Report> reports, bool text, TypingPace pace,
-          std::function<void()> keyGoes, std::function<void(base::Result<Done>)> done);
+          std::function<void()> keyGoes, std::function<bool()> stopped, std::function<void(base::Result<Done>)> done);
+
+// Why a typing was stopped by whoever had it typed (`stopped` above): after `done` keys of `of`, or before any.
+base::Error stoppedTyping(std::size_t done = 0, std::size_t of = 0);
 
 } // namespace qkvm::core::jetkvm

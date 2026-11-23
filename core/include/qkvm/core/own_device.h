@@ -28,6 +28,9 @@ public:
     // The KVM is taken away under whoever has it live: each is told `closed` with this code and
     // sentence a turn of the loop later, and nothing is asked of its driver after this.
     virtual void end(const base::Error& why) = 0;
+    // Whether one it handed a live to holds the KVM's keyboard and mouse at this moment (the web's held_by: somebody
+    // has them over a live line). A family that does not say: never.
+    virtual bool keyboardHeld() const { return false; }
 };
 
 // What a KVM of this PC's own wall is to the wall, of whichever family (OwnKvm::kind): its driver.
@@ -60,6 +63,14 @@ public:
     virtual void askWakeTargets(std::function<void(base::Result<QList<WakeTarget>>)> done) = 0;
     // Lets go of what is only kept for whoever looks, once nobody has for a while.
     virtual void tidy() = 0;
+    // A typing that this driver does key by key (a JetKVM's, or through a console of its own: a VNC server's, a
+    // guest's, a server's), handed to it and still under way, ends where it stands, with nothing down and nothing
+    // after it (not the Enter asked for after a text): whoever had it typed may have it no longer (the program locked,
+    // or this PC made a wall screen: the outside review of the wave 2 desktop, 6.18). Answered "stopped", as is every
+    // typing that waits behind it. A KVM that is handed a text whole and types it itself (a kvmd) is not stopped once
+    // it has it; one it was not handed yet (its driver waits for a sign-in) is answered "stopped" and never sent
+    // (review cx6-2, L3).
+    virtual void stopTyping() {}
     // What has the KVM live for all who show it: made when it is first asked for, and kept for as
     // long as this driver is. It holds this driver, which outlives it, or ends it first (OwnLive::end).
     virtual std::unique_ptr<OwnLive> makeLive() = 0;

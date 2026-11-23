@@ -24,7 +24,9 @@ using core::KvmdDevice;
 using core::testing::Answered;
 using core::testing::good;
 using core::testing::MadeUpKvm;
+using core::testing::oneLineAWaking;
 using core::testing::refusal;
+using core::testing::Waited;
 
 // A GL.iNet Fingerbot paired with a Comet (rule 29 of the web's FOR-THE-DESKTOP-APP, its tests test_a_fingerbot.py):
 // pressed only where the KVM said one is paired, on the line held anyway or on one opened before the press, never for
@@ -88,14 +90,17 @@ private:
         }
         return device.status();
     }
-    // The driver holds the KVM's line for events, as it does while somebody watches its picture.
-    static bool heldAwake(KvmdDevice& device, MadeUpKvm& kvm)
+    // The driver holds the KVM's line for events, as it does while somebody watches its picture, and that line is the
+    // driver's own and in (made_up_kvm.h's heldAwake: asked once, the failing cases' first picture was answered
+    // "Connecting to the KVM" by its patience on the loaded build box, nothing woke the video, and no line came). What
+    // was seen is said where it is not. With how many of its pictures may have begun a line (oneLineAWaking).
+    static Waited heldAwake(KvmdDevice& device, MadeUpKvm& kvm)
     {
-        kvm.restsUntilWatched = true;
-        std::optional<base::Result<core::Snapshot>> first;
-        device.askSnapshot(400, [&first](base::Result<core::Snapshot> came) { first = std::move(came); });
-        return QTest::qWaitFor([&first] { return first.has_value(); }, 10000) &&
-               QTest::qWaitFor([&] { return kvm.stand->live.isConnected() && device.isKeptAwake(); }, 10000);
+        const Waited held = core::testing::heldAwake(device, kvm, quick().connectWithinMs);
+        if (!held) {
+            qWarning("%s", qPrintable(held.why()));
+        }
+        return held;
     }
     // What a Comet says on a line to its events of a Fingerbot paired with it, or of none.
     static QString fingerbotEvent(bool exists)
@@ -123,9 +128,14 @@ private:
         kvm.fingerbot = true;
         kvm.stand->live.greeting = {fingerbotEvent(true)};
     }
-    static bool heardPaired(KvmdDevice& device, MadeUpKvm& kvm)
+    static Waited heardPaired(KvmdDevice& device, MadeUpKvm& kvm)
     {
-        return heldAwake(device, kvm) && QTest::qWaitFor([&] { return device.status().fingerbot.has_value(); }, 5000);
+        Waited held = heldAwake(device, kvm);
+        if (held && !QTest::qWaitFor([&] { return device.status().fingerbot.has_value(); }, 5000)) {
+            held.came = false;
+            held.seen = u"held awake, and nothing said of its Fingerbot within 5 s"_s;
+        }
+        return held;
     }
 
 private slots:
@@ -200,8 +210,13 @@ private slots:
         const auto boards = std::make_shared<BoardHolds>();
         KvmdDevice device(kvm.where(), u"secret"_s, quick(boards));
         QVERIFY(lookedAt(device).fingerbot == std::nullopt);
-        QVERIFY(heardPaired(device, kvm));
-        QCOMPARE(kvm.stand->live.lines, 1);
+        const Waited woken = heardPaired(device, kvm);
+        QVERIFY2(woken, qPrintable(woken.why()));
+        // One line for the waking (made_up_kvm.h's oneLineAWaking: one more for each picture asked again that may
+        // have begun one), and none after it.
+        const int lines = kvm.stand->live.lines;
+        const QString one = oneLineAWaking(lines, woken.wakings);
+        QVERIFY2(one.isEmpty(), qPrintable(one));
         QVERIFY(kvm.stand->live.paths.constFirst().contains("stream=1"));
         // Its battery, asked by a look, once: a full one.
         static_cast<void>(lookedAt(device));
@@ -217,7 +232,7 @@ private slots:
         QCOMPARE(anew.status().fingerbot.value_or(core::Fingerbot{}).battery, std::optional<int>(100));
         static_cast<void>(lookedAt(anew));
         QCOMPARE(kvm.asked("/api/fingerbot/battery"), 1);
-        QCOMPARE(kvm.stand->live.lines, 1);
+        QCOMPARE(kvm.stand->live.lines, lines);
     }
 
     void aLowBatteryIsSaidAndOneUnansweredIsAskedAgainLater()
@@ -252,7 +267,12 @@ private slots:
         kvm.atx = true;
         const auto boards = std::make_shared<BoardHolds>();
         KvmdDevice device(kvm.where(), u"secret"_s, quick(boards));
-        QVERIFY(heardPaired(device, kvm));
+        const Waited woken = heardPaired(device, kvm);
+        QVERIFY2(woken, qPrintable(woken.why()));
+        // (One line for the waking, made_up_kvm.h's oneLineAWaking; and the presses open none.)
+        const int lines = kvm.stand->live.lines;
+        const QString one = oneLineAWaking(lines, woken.wakings);
+        QVERIFY2(one.isEmpty(), qPrintable(one));
         QElapsedTimer took;
         took.start();
         std::optional<base::Result<core::Done>> first;
@@ -279,7 +299,7 @@ private slots:
         QVERIFY2(held.ok(), said(held).c_str());
         QVERIFY2(took.elapsed() >= 600, std::to_string(took.elapsed()).c_str());
         QCOMPARE(kvm.did.count("fingerbot 400 2"_ba), 1);
-        QCOMPARE(kvm.stand->live.lines, 1);
+        QCOMPARE(kvm.stand->live.lines, lines);
     }
 
     void aPressWithNoClearAnswerHoldsBothButtonsForAnyDriver()

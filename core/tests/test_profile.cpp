@@ -70,6 +70,18 @@ bool ageBy(const QString& file, int minutes)
                                                                QFileDevice::FileModificationTime);
 }
 
+// A file given this time of its last change, as the file system tells it (to the millisecond).
+bool modifiedAt(const QString& file, const QDateTime& when)
+{
+    {
+        QFile kept(file);
+        if (!kept.open(QIODevice::ReadWrite) || !kept.setFileTime(when, QFileDevice::FileModificationTime)) {
+            return false;
+        }
+    }
+    return QFileInfo(file).lastModified() == when;
+}
+
 // (A settings file as a version wrote it.)
 const QByteArray aWall =
     QByteArrayLiteral("{\"kvms\": [{\"id\": \"0a1b2c3d\", \"kind\": \"kvmd\", \"address\": \"https://192.0.2.10\"}]}");
@@ -139,6 +151,42 @@ private slots:
         QVERIFY(older);
         QCOMPARE(older.value().previous, u"0.1.3"_s);
         QCOMPARE(older.value().keptAs, settings + u".0.1.3.bak"_s);
+    }
+
+    // A newer version started again over settings it has not written yet (it was quit, or wrote nothing of them before
+    // it ended): they still say the version before wrote them, but this version's own start found them as they are and
+    // kept them then (their time is the one it recorded). No second copy: one at the version's first start, and only
+    // then (the VM step's step 06; seen by the fixture of 0.1.2, whose settings name their writer).
+    //   PASS: one copy.  FAIL (before): a copy at every start until the settings are written.
+    void aNewerVersionStartedAgainBeforeItWroteTheSettingsKeepsNoSecondCopy()
+    {
+        const QTemporaryDir folder;
+        const QString settings = folder.filePath(u"settings.json"_s);
+        const QByteArray left = writtenBy(u"0.1.2"_s);
+        QVERIFY(write(settings, left));
+        QVERIFY(ageBy(settings, 10));
+        const auto first = core::profile::recordStart(settings, u"0.2.0"_s);
+        QVERIFY(first);
+        QVERIFY(first.value().another);
+        QCOMPARE(first.value().keptAs, settings + u".0.1.2.bak"_s);
+        for (int start = 0; start < 3; ++start) {
+            const auto again = core::profile::recordStart(settings, u"0.2.0"_s);
+            QVERIFY(again);
+            QVERIFY(!again.value().another);
+            QCOMPARE(again.value().keptAs, QString());
+            QCOMPARE(again.value().previous, u"0.2.0"_s);
+        }
+        QCOMPARE(copiesIn(folder, false), QStringList{u"settings.json.0.1.2.bak"_s});
+        QCOMPARE(recordOf(settings).version, u"0.2.0"_s);
+        // (No version was recorded before it here: the record of the one before stays none.)
+        QCOMPARE(recordOf(settings).previous, QString());
+        QCOMPARE(bytesOf(settings), left);
+        // But once another version has written them since (a copy of 0.1.2 run from its ZIP), they are its, and kept.
+        QVERIFY(write(settings, writtenBy(u"0.1.2"_s) + ' '));
+        const auto after = core::profile::recordStart(settings, u"0.2.0"_s);
+        QVERIFY(after);
+        QVERIFY(after.value().another);
+        QCOMPARE(after.value().keptAs, settings + u".0.1.2-2.bak"_s);
     }
 
     void aNameThatIsTakenIsNumberedAndWhatHasItStaysAsItIs()
@@ -330,8 +378,16 @@ private slots:
         QVERIFY(write(settings, writtenBy(u"0.1.2"_s)));
         const auto wrote = core::profile::recordStart(settings, u"0.1.2"_s);
         QVERIFY(wrote && wrote.value().keptAs.isEmpty());
-        // Written by a newer one that started here before (and recorded itself): kept under its name.
+        // Written by a newer one that started here before, and recorded itself as it started: kept under its name, by
+        // that record, whatever time the file system stamps on what it wrote. Held here at the one time it may not
+        // tell apart: within a tick of the clock it stamps by, the very time the start recorded (writerOf: "not
+        // written since", the record's version). The ASAN preset's quick run wrote within one tick so in gates box10
+        // and box11, where this step wrote 0.1.3's settings without that record. (A version from before 0.1.2, which
+        // records nothing, is told by the time alone: the 0.1.1 step above, a minute later.)
+        const QDateTime recordedAt = QFileInfo(settings).lastModified();
+        QVERIFY(core::profile::recordStart(settings, u"0.1.3"_s));
         QVERIFY(write(settings, writtenBy(u"0.1.3"_s)));
+        QVERIFY(modifiedAt(settings, recordedAt));
         const auto newer = core::profile::recordStart(settings, u"0.1.2"_s);
         QVERIFY(newer);
         QCOMPARE(QFileInfo(newer.value().keptAs).fileName(), u"settings.json.0.1.3.bak"_s);

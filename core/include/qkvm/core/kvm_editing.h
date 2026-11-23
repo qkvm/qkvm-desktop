@@ -147,6 +147,11 @@ QString fingerprint(const QByteArray& sha256);
 //        the save.
 //      A KVM that is spoken to over plain HTTP already, at another plain-HTTP address, gives
 //      nothing up: it is asked what answers there and signed in to, as before.
+//      A VNC server from vncs:// to vnc:// at another place is held to the same rule, with its
+//      family's sentence (the same code), and its yes is to the whole vnc:// address that is
+//      handed over, vnc:// and all. A bare address is a vnc:// one, and so is asked so; and its own
+//      machine written another way (its name for its number) is another place, and asked so too.
+//      With none kept and none typed, it is asked the same.
 //      Adding a KVM anew is not held to this (kvm_adding.h): there is nothing it was known by
 //      to put beside what it shows, and what it showed is shown once it is on the wall.
 //    * The address, and no password was typed (of a KVM that was asked what it is; of one that
@@ -201,7 +206,8 @@ QString fingerprint(const QByteArray& sha256);
 //   server forgets the certificate with the address, and knows the device by what it shows
 //   there. So with plain HTTP at another address for a KVM that is spoken to over HTTPS: until
 //   somebody has seen what is given up there and said yes, nothing goes to that address
-//   ("plain_http_there", a code of this program's own).
+//   ("plain_http_there", a code of this program's own). And so with a VNC server from vncs://
+//   to vnc:// at another place, which the server makes a change like any other.
 // * There is one way a KVM is known and none to choose between (section 8), so none is typed.
 // * At a new address only what answered as a KVM of its family is signed in to, as when adding.
 // * Where it is signed in to first, it is signed in to twice, as when adding: here, and once
@@ -238,12 +244,15 @@ public:
         // What somebody was shown for this change, beside what the KVM is known by, and said
         // yes to: the certificate that was shown at the new address, by its SHA-256; and
         // whether the yes was to the KVM's being known by Windows' word there, which trusts
-        // that certificate, and not by the certificate itself. Empty: no yes. (Step 4.)
+        // that certificate, and not by the certificate itself. Empty: no yes. (Step 4.) A VNC
+        // server's yes is for a vncs:// address alone: with one, a vnc:// address is refused
+        // ("no_certificate") before anything goes there.
         QByteArray saidYesTo;
         bool saidYesOnWindowsWord = false;
         // And the yes where the KVM is spoken to over HTTPS and the address that was typed is
         // plain HTTP: somebody was shown what is given up there, and said yes to that. The
-        // address it was said for, as it was handed over (Outcome::presentedAt); it is a yes
+        // address it was said for, as it was handed over (Outcome::presentedAt): a KVM's host
+        // and port, a VNC server's whole vnc:// address (where it is vncs:// now); it is a yes
         // for that address alone. Empty: no yes. (Step 4.)
         QString saidYesToPlainHttpAt;
         // What all of this was typed over, where whoever asks had the KVM before them for a
@@ -284,8 +293,9 @@ public:
         // With "certificate_differs", and with nothing else: the certificate the KVM is known
         // by (empty: by none) and the one that is shown at the new address right now, each by
         // its SHA-256; and that address as it is typed (its host, and its port where it has
-        // one of its own). Whoever asked shows the two side by side, and says where the second
-        // was shown. They are here and in no sentence: a sentence is read, and these are
+        // one of its own; a VNC server's whole, vncs:// and all, since one written without its
+        // scheme is a vnc:// one). Whoever asked shows the two side by side, and says where the
+        // second was shown. They are here and in no sentence: a sentence is read, and these are
         // compared.
         QByteArray remembered;
         QByteArray presented;
@@ -304,8 +314,9 @@ public:
     // What stands against the address chosen for a JetKVM asked both ways (step 4), as against an
     // address that was typed: another KVM of the wall at its place ("duplicate"), HTTPS to the plain
     // way at the place it is at ("not_in_the_clear"), and plain HTTP where it is spoken to over HTTPS
-    // without the yes to that very address (`saidYesToPlainHttpAt`; "plain_http_there", with what it
-    // is known by and that address). Nothing: none stands. `before` is the KVM as it is on `wall`.
+    // without the yes to that very address (`saidYesToPlainHttpAt`, its host and port; "plain_http_there",
+    // with what it is known by and that address). Nothing: none stands. `before` is the KVM as it is on
+    // `wall`. (A JetKVM's: a VNC server's vnc:// yes is its whole address, and asked for by change().)
     static std::optional<Outcome> refusalAtTheWayChosen(const LocalWall& wall, const OwnKvm& before,
                                                         const OwnKvm& after, const QString& saidYesToPlainHttpAt);
 
@@ -369,6 +380,12 @@ private:
     std::optional<QUrl> ownHttps() const;
     // What signs in to it at the address it has, or moves it with the password that is kept.
     void signInWhereItIs(bool moved);
+    // A VNC server's (desktop 0.2.0): signed in to with the password typed, where it is or at another address, a
+    // vncs:// one's certificate read there first. Moved with the kept one: never, as the web ("password_needed"); one
+    // with none kept is moved with none, signed in to there as one that needs none (`m_typedNone`).
+    void goOnForAVncServer(bool moved);
+    void certificateAtTheNewAddress(const base::Result<vnc::Certificate>& shown);
+    void signInToAVncServer();
     // The one sign-in with the password typed (or none, `m_typedNone`) at `where`: tried as for the first time, and
     // held to what the wall's own driver is held to before a password goes in the clear (LocalWall::twinCheckFor).
     base::Result<std::unique_ptr<OneSignIn>> signInWithWhatWasTyped(const OneSignIn::Where& where,
@@ -414,8 +431,8 @@ private:
     QString m_saidYesToPlainHttpAt;
     // Its other way, over HTTPS, was asked by this change already, and answered no JetKVM.
     bool m_overHttpsAsked = false;
-    // A JetKVM with no password kept, moved with none typed: it is signed in to as one that needs none,
-    // and saved with none.
+    // A JetKVM (or a VNC server) with no password kept, moved with none typed: it is signed in to as one
+    // that needs none, and saved with none.
     bool m_typedNone = false;
     // It is to be kept beside a twin it says by its number that it is (Typed::keepBoth).
     bool m_keepBoth = false;
@@ -473,6 +490,9 @@ public:
         // yes is refused (trust(), "same_device").
         QString presentedIsOf;
         QString presentedIsCalled;
+        // ...by what a VNC server's certificate says (LocalWall::certificateSaysSo: one of the two is one), not proven:
+        // two displays behind one TLS proxy, or a PiKVM's VNC server and its page, may be both (review cx6-2, L2).
+        bool presentedSaysSo = false;
     };
 
     // What a yes came to, as whoever asked is handed it.

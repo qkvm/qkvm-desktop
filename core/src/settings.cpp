@@ -6,8 +6,11 @@
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/own_actions.h>
 #include <qkvm/core/profile.h>
+#include <qkvm/core/proxmox_answers.h>
+#include <qkvm/core/redfish_answers.h>
 #include <qkvm/core/server_client.h>
 #include <qkvm/core/server_types.h>
+#include <qkvm/core/vnc_device.h>
 
 #include <algorithm>
 #include <cmath>
@@ -214,19 +217,74 @@ QList<Workspace> workspacesFrom(const QJsonValue& value)
     return result;
 }
 
+// The most an entry of a family this build does not speak to may hold (its compact JSON) to be kept as it stands:
+// an entry this program writes is a few hundred bytes, a certificate's text with it a few kilobytes.
+constexpr qsizetype mostKeptEntryBytes = qsizetype{64} * 1024;
+
 // The longest a KVM's name, group and user name are, as the server has them.
 constexpr qsizetype longestKvmName = 80;
 constexpr qsizetype longestKvmGroup = 40;
 constexpr qsizetype longestKvmUser = 64;
 
 // What an entry of the file's list of KVMs is: a KVM of this PC's own (`kvm`); none where it is
-// none this program wrote, without an id of its shape or without an address that is one; or one of
-// its shape that says no family this build speaks to (`ofAnotherFamily`): written by another build of
-// the program, which this one does not read, and keeps as it stands (Remembered::kvmsItDoesNotRead).
+// none this program wrote, without an id of its shape; or one with an id of its shape that this build
+// does not read (`ofAnotherFamily`): of a family it does not speak to, whatever its address says (from
+// 0.2.0: a later version's kinds, a PC with Intel AMT's, have addresses of their own), or of a family it
+// speaks to in a form it cannot read as one of that family (an address that is none of the family's, a
+// mark of its machine of no driver's shape; of a Proxmox guest also a node, a number, an address in the
+// clear or a boot order from before that is none as the program writes it). Written by another build of
+// the program, which this one keeps as it stands (Remembered::kvmsItDoesNotRead), never dropped, where
+// it is of the size an entry is (mostKeptEntryBytes): a later version may write a family of today in a
+// form of its own (the coordinator's rule of 2026-11-16; the profiles of 0.1.0 and 0.1.1 lost their
+// example of a family of later, a "vnc" at an https:// address, once this build read "vnc").
 struct KvmEntry {
     std::optional<OwnKvm> kvm;
     bool ofAnotherFamily = false;
 };
+
+// A boot order as a guest's settings write one after "order=" (proxmox::bootOrderOf), and nothing else.
+bool isABootOrder(const QJsonValue& said)
+{
+    return said.isString() && !said.toString().isEmpty() &&
+           proxmox::bootOrderOf(QJsonObject{{u"boot"_s, u"order="_s + said.toString()}}).has_value();
+}
+
+// A guest's boot order from before (OwnKvm::bootOrderWas), as the program writes one: both orders as a guest's
+// settings write them, the guest's number one of a guest's, and the number it gives for itself one a driver gives, or
+// none. None for anything else.
+std::optional<BootOrderWas> bootOrderWasFrom(const QJsonValue& said)
+{
+    const QJsonObject is = said.toObject();
+    const QJsonValue vmid = is["vmid"_L1];
+    const QJsonValue machine = is["machine"_L1];
+    const auto whole = [](const QJsonValue& value, double least, double most) {
+        const double number = value.toDouble(-1);
+        return value.isDouble() && std::isfinite(number) && std::floor(number) == number && number >= least &&
+               number <= most;
+    };
+    if (!said.isObject() || !isABootOrder(is["order"_L1]) || !isABootOrder(is["written"_L1]) ||
+        !whole(vmid, static_cast<double>(proxmox::lowestGuest), static_cast<double>(proxmox::highestGuest)) ||
+        !machine.isString() || (!machine.toString().isEmpty() && !exchange::isADevicesOwnNumber(machine.toString()))) {
+        return std::nullopt;
+    }
+    return BootOrderWas{is["order"_L1].toString(), is["written"_L1].toString(), static_cast<qint64>(vmid.toDouble()),
+                        machine.toString()};
+}
+
+// Where a server's controller keeps its card's computer (OwnKvm::serverPlace), as the program writes it: a place as
+// a controller names one (redfish::link), or none, and a flag. Anything else is no "none" (a computer that gives no
+// number would then pass for the card's wherever it is listed alone): read as one of several, which no such computer
+// passes for.
+ServerPlace serverPlaceFrom(const QJsonValue& said)
+{
+    const QJsonValue place = said.toObject()["place"_L1];
+    const QJsonValue several = said.toObject()["among_several"_L1];
+    if (!said.isObject() || !place.isString() || !several.isBool() ||
+        (!place.toString().isEmpty() && redfish::link(place) != place.toString())) {
+        return ServerPlace{QString(), true};
+    }
+    return ServerPlace{place.toString(), several.toBool()};
+}
 
 KvmEntry kvmFrom(const QJsonValue& said)
 {
@@ -234,25 +292,46 @@ KvmEntry kvmFrom(const QJsonValue& said)
     const QJsonObject is = said.toObject();
     OwnKvm kvm;
     kvm.id = is["id"_L1].toString();
-    kvm.address = is["address"_L1].toString();
-    const QUrl address(kvm.address, QUrl::StrictMode);
-    // An address as the program writes one, and in no other way: one KVM has one address, and
-    // whether a KVM "is on the wall already" is asked by it (kvm::addressFrom). One that says
-    // the same otherwise (the port every such address has anyway, a path, capitals) is none the
-    // program wrote.
-    const base::Result<QUrl> asWritten = kvm::addressFrom(kvm.address);
-    const bool isAddress = address.isValid() && !address.host().isEmpty() && address.userInfo().isEmpty() &&
-                           (address.scheme() == "https"_L1 || address.scheme() == "http"_L1) && asWritten &&
-                           asWritten.value().toString(QUrl::FullyEncoded) == kvm.address;
-    if (!idShape.match(kvm.id).hasMatch() || !isAddress) {
+    if (!idShape.match(kvm.id).hasMatch()) {
         return {};
     }
+    // Kept as it stands, where it is of the size an entry is: whatever it is kept for, by the one rule for every entry
+    // of the program's shape this build does not read (KvmEntry): of a family it does not speak to, or of one it speaks
+    // to, kept for its address, its machine field (outside review), or a Proxmox guest's node, number or boot order.
+    const auto keptAsItStands = [&is]() -> KvmEntry {
+        if (QJsonDocument(is).toJson(QJsonDocument::Compact).size() > mostKeptEntryBytes) {
+            return {};
+        }
+        return {std::nullopt, true};
+    };
     // Its family, in so many words: of none, or of one this build does not speak to by itself, it is
-    // a KVM this build does not read.
+    // a KVM this build does not read, kept as it stands whatever its address, where it is of the size
+    // an entry is.
     if (const QJsonValue kind = is["kind"_L1]; kind.isString() && OwnKvm::namesAFamily(kind.toString())) {
         kvm.kind = kind.toString();
     } else {
-        return {std::nullopt, true};
+        return keptAsItStands();
+    }
+    // An address as the program writes one for its family, and in no other way: one KVM has one
+    // address, and whether a KVM "is on the wall already" is asked by it (kvm::addressFrom, and a VNC
+    // server's vnc::addressFrom). One that says the same otherwise (the port every such address has
+    // anyway, a path, capitals) is none the program wrote.
+    kvm.address = is["address"_L1].toString();
+    bool isAddress = false;
+    if (kvm.kind == "vnc"_L1) {
+        const base::Result<QString> asWritten = vnc::addressFrom(kvm.address);
+        isAddress = vnc::namesOne(kvm.address) && asWritten && asWritten.value() == kvm.address;
+    } else {
+        const QUrl address(kvm.address, QUrl::StrictMode);
+        const base::Result<QUrl> asWritten = kvm::addressFrom(kvm.address);
+        isAddress = address.isValid() && !address.host().isEmpty() && address.userInfo().isEmpty() &&
+                    (address.scheme() == "https"_L1 || address.scheme() == "http"_L1) && asWritten &&
+                    asWritten.value().toString(QUrl::FullyEncoded) == kvm.address;
+    }
+    // (One that says the family in another form is none this build can put on the wall: kept as it stands, as one of
+    // a family it does not speak to, and never dropped.)
+    if (!isAddress) {
+        return keptAsItStands();
     }
     kvm.name = is["name"_L1].toString().left(longestKvmName);
     kvm.group = is["group"_L1].toString().left(longestKvmGroup);
@@ -278,9 +357,13 @@ KvmEntry kvmFrom(const QJsonValue& said)
     if (const QJsonValue machine = is["machine"_L1]; !machine.isUndefined()) {
         const QString mark = machine.toString();
         if (!machine.isString() || (!mark.isEmpty() && !exchange::isADevicesOwnNumber(mark))) {
-            return {std::nullopt, true};
+            return keptAsItStands();
         }
         kvm.machine = mark;
+    }
+    // ...and where its controller keeps that server's computer, of a server's controller (from 0.2.0).
+    if (const QJsonValue at = is["server_place"_L1]; kvm.kind == "redfish"_L1 && !at.isUndefined()) {
+        kvm.serverPlace = serverPlaceFrom(at);
     }
     // Kept beside its twin, where the file says so as a flag does.
     const QJsonValue beside = is["kept_beside_twin"_L1];
@@ -288,6 +371,33 @@ KvmEntry kvmFrom(const QJsonValue& said)
     // Its screen watches: what is no whole number above 0 is none, a longer one a day.
     kvm.noSignalMinutes = ScreenWatch::minutesFrom(is["no_signal_minutes"_L1].toInteger());
     kvm.unchangedMinutes = ScreenWatch::minutesFrom(is["unchanged_minutes"_L1].toInteger());
+    // A Proxmox guest: its node and its number, as the program writes them, at a Proxmox spoken to over HTTPS; one
+    // that says otherwise is no guest this build reads, and is kept as it stands.
+    if (kvm.kind == "proxmox"_L1) {
+        const QJsonValue node = is["node"_L1];
+        const QJsonValue vmid = is["vmid"_L1];
+        const double number = vmid.toDouble(-1);
+        // (A whole number among a guest's numbers before it is made one: a double beyond what a qint64 holds, an
+        // infinite one among them, is not cast at all. Review c9b-1, L7.)
+        const bool aGuestsNumber = vmid.isDouble() && std::isfinite(number) && std::floor(number) == number &&
+                                   number >= static_cast<double>(proxmox::lowestGuest) &&
+                                   number <= static_cast<double>(proxmox::highestGuest);
+        if (!node.isString() || !proxmox::isNode(node.toString()) || !aGuestsNumber ||
+            !kvm.address.startsWith("https://"_L1)) {
+            return keptAsItStands();
+        }
+        kvm.node = node.toString();
+        kvm.vmid = static_cast<qint64>(number);
+        // The boot order its driver replaced and has not put back yet, as the program writes it, or none; one in any
+        // other shape is no "none" (the order before would be lost to the next writing): kept as it stands.
+        if (const QJsonValue was = is["boot_order_was"_L1]; !was.isUndefined()) {
+            const std::optional<BootOrderWas> read = bootOrderWasFrom(was);
+            if (!read) {
+                return keptAsItStands();
+            }
+            kvm.bootOrderWas = read;
+        }
+    }
     return {kvm, false};
 }
 
@@ -300,7 +410,7 @@ QString certificateWith(const QJsonValue& said, const OwnKvm& kvm)
 {
     constexpr qsizetype sha256Bytes = 32;
     if (!said.isString() || !kvm.knownByCertificate || kvm.certificate.size() != sha256Bytes ||
-        !kvm.address.startsWith("https://"_L1)) {
+        !(kvm.address.startsWith("https://"_L1) || kvm.address.startsWith("vncs://"_L1))) {
         return {};
     }
     const QString written = said.toString();
@@ -329,6 +439,20 @@ QJsonObject written(const OwnKvm& kvm)
     }
     if (kvm.unchangedMinutes > 0) {
         said.insert(u"unchanged_minutes"_s, kvm.unchangedMinutes);
+    }
+    if (kvm.kind == "redfish"_L1 && kvm.serverPlace != ServerPlace{}) {
+        said.insert(u"server_place"_s, QJsonObject{{u"place"_s, kvm.serverPlace.place},
+                                                   {u"among_several"_s, kvm.serverPlace.amongSeveral}});
+    }
+    if (kvm.kind == "proxmox"_L1) {
+        said.insert(u"node"_s, kvm.node);
+        said.insert(u"vmid"_s, kvm.vmid);
+        if (kvm.bootOrderWas) {
+            said.insert(u"boot_order_was"_s, QJsonObject{{u"order"_s, kvm.bootOrderWas->order},
+                                                         {u"written"_s, kvm.bootOrderWas->written},
+                                                         {u"vmid"_s, kvm.bootOrderWas->vmid},
+                                                         {u"machine"_s, kvm.bootOrderWas->machine}});
+        }
     }
     return said;
 }
@@ -379,12 +503,14 @@ QJsonObject written(const OwnAction& action)
 }
 
 // What was read: nothing where there is no file; and of a file that could not be read, or is
-// not what this program writes, nothing but that it is so.
-std::optional<Remembered> readFrom(const QString& file, Settings::Patience patience)
+// not what this program writes, nothing but that it is so. `listWhole`: whether its list of KVMs
+// was read whole (Settings::listReadWhole).
+std::optional<Remembered> readFrom(const QString& file, Settings::Patience patience, bool& listWhole)
 {
     // (What is there and is no file, a folder of that name, is not one that could not be read:
     // nothing is lost with it, and it is in the way of the writing, which says so.)
     if (!QFileInfo(file).isFile()) {
+        listWhole = true; // (no list: nothing of it left aside)
         return Remembered{};
     }
     QFile kept(file);
@@ -467,19 +593,26 @@ std::optional<Remembered> readFrom(const QString& file, Settings::Patience patie
         section.isString() && Remembered::namesASettingsSection(section.toString())) {
         remembered.settingsSection = section.toString();
     }
-    // (The first `mostKvms` entries, KVMs or not: settings.h says so where the list is.)
-    const QJsonArray kvms = said["kvms"_L1].toArray();
+    // (The first `mostKvms` entries, KVMs or not: settings.h says so where the list is.) Whole where it is a list or
+    // none, and each entry of it is read as a KVM of the wall: none kept as it stands, none dropped (M2).
+    const QJsonValue listed = said["kvms"_L1];
+    const QJsonArray kvms = listed.toArray();
+    listWhole = (listed.isUndefined() || listed.isArray()) && kvms.size() <= Remembered::mostKvms;
     QSet<QString> ids;
     for (qsizetype at = 0; at < kvms.size() && at < Remembered::mostKvms; ++at) {
         const QJsonValue one = kvms.at(at);
         const KvmEntry entry = kvmFrom(one);
         if (entry.ofAnotherFamily) {
+            listWhole = false;
             // Kept as it stands, and once by its id, as the wall's own are.
             if (const QString id = one.toObject()["id"_L1].toString(); !ids.contains(id)) {
                 ids.insert(id);
                 remembered.kvmsItDoesNotRead.append(one);
             }
             continue;
+        }
+        if (!entry.kvm || ids.contains(entry.kvm->id)) {
+            listWhole = false; // (no entry the program wrote, or one of an id twice: dropped)
         }
         if (const std::optional<OwnKvm>& kvm = entry.kvm; kvm && !ids.contains(kvm->id)) {
             ids.insert(kvm->id);
@@ -542,7 +675,13 @@ std::optional<Remembered> readFrom(const QString& file, Settings::Patience patie
 
 bool OwnKvm::namesAFamily(const QString& kind)
 {
-    return kind == "kvmd"_L1 || kind == "jetkvm"_L1 || kind == "redfish"_L1;
+    return kind == "kvmd"_L1 || kind == "jetkvm"_L1 || kind == "redfish"_L1 || kind == "vnc"_L1 || kind == "proxmox"_L1;
+}
+
+bool OwnKvm::isInTheClear() const
+{
+    const QString scheme = QUrl(address).scheme();
+    return scheme != "https"_L1 && scheme != "vncs"_L1;
 }
 
 bool Remembered::namesAReleaseKey(const QString& key)
@@ -570,11 +709,12 @@ Settings::Settings(QString file) : Settings(std::move(file), Patience{}) {}
 
 Settings::Settings(QString file, Patience patience) : m_file(std::move(file))
 {
-    if (std::optional<Remembered> read = readFrom(m_file, patience)) {
+    if (std::optional<Remembered> read = readFrom(m_file, patience, m_listReadWhole)) {
         m_remembered = std::move(*read);
     } else {
         m_wasUnreadable = true;
         m_inTheWay = true;
+        m_listReadWhole = false;
     }
 }
 
@@ -740,6 +880,21 @@ base::Result<void> Settings::remember(const Remembered& what)
     m_unwritten = false;
     ++m_writings;
     return {};
+}
+
+bool Settings::keepsAsideWhatCouldNotBeRead() const
+{
+    // (By the names putAsideWhatCouldNotBeRead gives, at this start or at one before.)
+    const QFileInfo was(m_file);
+    for (int number = 1; number <= mostPutAside; ++number) {
+        const QString name = number == 1
+                                 ? u"%1.unreadable.%2"_s.arg(was.completeBaseName(), was.suffix())
+                                 : u"%1.unreadable-%3.%2"_s.arg(was.completeBaseName(), was.suffix()).arg(number);
+        if (QFileInfo(was.dir().filePath(name)).isFile()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 base::Result<void> Settings::putAsideWhatCouldNotBeRead()

@@ -1,26 +1,28 @@
+#pragma once
+
 #include "../tests/aspeed_frames.h"
 #include "fuzz_input.h"
 
 #include <qkvm/bmc/ami_console.h>
 
-#include <cstdio>
-#include <fstream>
-#include <string>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <utility>
+#include <vector>
 
-// The first inputs of the fuzz targets: frames the tests' own writer makes, of every kind of block, a few to an
-// input, as fuzz_input.h lays them out, into the first folder named, one file each; and into the second, what a
-// controller's console sends (its first words, and those frames in pieces), as fuzz_ami_console.cpp takes it.
-//
-//     fuzz_bmc_seeds <folder> [<console folder>]
-using namespace qkvm::bmc;
-using aspeed::frames::Coefficients;
-using aspeed::frames::Frame;
+// The first inputs of bmc's fuzz targets, for the seed maker (core/fuzz/make_seeds.cpp): frames the tests' own writer
+// makes, of every kind of block, a few to an input, as fuzz_input.h lays them out (fuzz_aspeed.h); and what a
+// controller's console sends (its first words, and those frames in pieces), as fuzz_ami_console.h takes it.
+namespace qkvm::bmc::fuzz {
 
-namespace {
+namespace seeds {
 
-Coefficients planeOf(aspeed::frames::Numbers& below, int busy)
+inline aspeed::frames::Coefficients planeOf(aspeed::frames::Numbers& below, int busy)
 {
-    Coefficients found{};
+    aspeed::frames::Coefficients found{};
     found[0] = below(301) - 150;
     for (std::size_t at = 1; at < 64; ++at) {
         if (below(100) < busy) {
@@ -30,16 +32,18 @@ Coefficients planeOf(aspeed::frames::Numbers& below, int busy)
     return found;
 }
 
-Frame someFrame(aspeed::frames::Numbers& below)
+inline aspeed::frames::Frame someFrame(aspeed::frames::Numbers& below)
 {
+    using aspeed::frames::Coefficients;
     const int width = 1 + below(160);
     const int height = 1 + below(120);
     const bool half = below(4) == 0;
     const int strength = below(8);
     const int correction = below(8);
     const bool luma = below(2) == 0;
-    Frame frame(width, height,
-                {.halfColour = half, .strength = strength, .correctionStrength = correction, .lumaForColour = luma});
+    aspeed::frames::Frame frame(
+        width, height,
+        {.halfColour = half, .strength = strength, .correctionStrength = correction, .lumaForColour = luma});
     const int blocks = 1 + below(60);
     for (int block = 0; block < blocks; ++block) {
         aspeed::frames::Place at;
@@ -83,7 +87,7 @@ Frame someFrame(aspeed::frames::Numbers& below)
 }
 
 // The facts a frame's first piece begins with, as a controller writes them (ami_console.h, frameFacts).
-std::vector<std::uint8_t> factsOf(const aspeed::FrameHeader& header, std::size_t length)
+inline std::vector<std::uint8_t> factsOf(const aspeed::FrameHeader& header, std::size_t length)
 {
     std::vector<std::uint8_t> found(ami::frameFacts);
     auto put16 = [&found](std::size_t at, int value) {
@@ -104,8 +108,30 @@ std::vector<std::uint8_t> factsOf(const aspeed::FrameHeader& header, std::size_t
     return found;
 }
 
-bool consoleSeeds(const std::string& folder)
+} // namespace seeds
+
+// Forty-eight inputs of up to four frames each (the first a console's screen as the tests draw it).
+inline std::vector<std::vector<std::uint8_t>> aspeedSeeds()
 {
+    std::vector<std::vector<std::uint8_t>> made;
+    for (int seed = 0; seed < 48; ++seed) {
+        aspeed::frames::Numbers below(static_cast<std::uint64_t>(seed) + 1);
+        std::vector<std::uint8_t> input;
+        const int frames = 1 + below(mostFrames);
+        for (int one = 0; one < frames; ++one) {
+            const aspeed::frames::Frame frame =
+                seed == 0 ? aspeed::frames::consoleScreen(160, 120, 6, 3) : seeds::someFrame(below);
+            putFrame(input, frame.header(), frame.data());
+        }
+        made.push_back(std::move(input));
+    }
+    return made;
+}
+
+// Twenty-four streams of a console: its first words, then frames in pieces, each behind a step of up to 4096 bytes.
+inline std::vector<std::vector<std::uint8_t>> consoleSeeds()
+{
+    std::vector<std::vector<std::uint8_t>> made;
     for (int seed = 0; seed < 24; ++seed) {
         aspeed::frames::Numbers below(static_cast<std::uint64_t>(seed) + 101);
         const int step = 1 + below(4096);
@@ -114,10 +140,10 @@ bool consoleSeeds(const std::string& folder)
         put(ami::message(ami::kind::allowed));
         put(ami::message(ami::kind::passSeen, static_cast<std::uint16_t>(below(3)), ami::Bytes{1}));
         for (int one = 1 + below(3); one > 0; --one) {
-            const Frame frame = someFrame(below);
+            const aspeed::frames::Frame frame = seeds::someFrame(below);
             const ami::Bytes data = frame.data();
             ami::Bytes first = {0, 0};
-            const ami::Bytes facts = factsOf(frame.header(), data.size());
+            const ami::Bytes facts = seeds::factsOf(frame.header(), data.size());
             first.insert(first.end(), facts.begin(), facts.end());
             std::size_t at = std::min(data.size(), static_cast<std::size_t>(below(2000)));
             first.insert(first.end(), data.begin(), data.begin() + static_cast<std::ptrdiff_t>(at));
@@ -132,52 +158,9 @@ bool consoleSeeds(const std::string& folder)
             }
             put(ami::message(ami::kind::stillThere));
         }
-        std::ofstream out(folder + "/console-" + std::to_string(seed), std::ios::binary);
-        out.write(reinterpret_cast<const char*>(input.data()), static_cast<std::streamsize>(input.size()));
-        if (!out) {
-            return false;
-        }
+        made.push_back(std::move(input));
     }
-    return true;
+    return made;
 }
 
-int made(int argc, char** argv)
-{
-    if (argc != 2 && argc != 3) {
-        std::fprintf(stderr, "fuzz_bmc_seeds <folder> [<console folder>]\n");
-        return 2;
-    }
-    const std::string folder = argv[1];
-    for (int seed = 0; seed < 48; ++seed) {
-        aspeed::frames::Numbers below(static_cast<std::uint64_t>(seed) + 1);
-        std::vector<std::uint8_t> input;
-        const int frames = 1 + below(fuzz::mostFrames);
-        for (int one = 0; one < frames; ++one) {
-            const Frame frame = seed == 0 ? aspeed::frames::consoleScreen(160, 120, 6, 3) : someFrame(below);
-            fuzz::putFrame(input, frame.header(), frame.data());
-        }
-        std::ofstream out(folder + "/seed-" + std::to_string(seed), std::ios::binary);
-        out.write(reinterpret_cast<const char*>(input.data()), static_cast<std::streamsize>(input.size()));
-        if (!out) {
-            std::fprintf(stderr, "could not write into %s\n", folder.c_str());
-            return 1;
-        }
-    }
-    if (argc == 3 && !consoleSeeds(argv[2])) {
-        std::fprintf(stderr, "could not write into %s\n", argv[2]);
-        return 1;
-    }
-    return 0;
-}
-
-} // namespace
-
-int main(int argc, char** argv)
-{
-    try {
-        return made(argc, argv);
-    } catch (...) {
-        std::fprintf(stderr, "the seeds could not be made\n");
-        return 1;
-    }
-}
+} // namespace qkvm::bmc::fuzz

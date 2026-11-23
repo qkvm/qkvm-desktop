@@ -89,18 +89,20 @@ QDateTime utcDate(const QString& value)
                                                                                                  : QDateTime();
 }
 
-// What the signed payload calls each kind of release, and what its package's name ends in.
-QString platformOf(UpdateKind kind)
+// What the signed payload calls each kind of release for each kind of Windows ("windows-arm64-setup"), and what its
+// package's name ends in.
+QString platformOf(UpdateKind kind, base::Architecture machine)
 {
+    const QString windows = u"windows-"_s + QString::fromLatin1(base::architectureName(machine)) + u'-';
     switch (kind) {
     case UpdateKind::Msix:
-        return u"windows-x64-msix"_s;
+        return windows + u"msix"_s;
     case UpdateKind::Setup:
-        return u"windows-x64-setup"_s;
+        return windows + u"setup"_s;
     case UpdateKind::Portable:
         break;
     }
-    return u"windows-x64-portable"_s;
+    return windows + u"portable"_s;
 }
 
 QString endingOf(UpdateKind kind)
@@ -131,28 +133,33 @@ UpdateKind updateKindOf(const QString& programFolder, bool packaged)
     return packaged ? UpdateKind::Msix : UpdateKind::Portable;
 }
 
-QUrl setupFeedBeside(const QUrl& feed)
+QUrl feedFor(const QUrl& builtInFeed, UpdateKind kind, base::Architecture machine)
 {
-    return updateAddress(feed) ? feed.resolved(QUrl(u"stable-setup.json"_s)) : QUrl();
+    if (!updateAddress(builtInFeed)) {
+        return {};
+    }
+    if (machine == base::Architecture::Arm64) {
+        return builtInFeed.resolved(
+            QUrl(kind == UpdateKind::Setup ? u"stable-arm64-setup.json"_s : u"stable-arm64.json"_s));
+    }
+    return kind == UpdateKind::Setup ? builtInFeed.resolved(QUrl(u"stable-setup.json"_s)) : builtInFeed;
 }
 
 UpdateChannel updateChannelFor(const QUrl& builtInFeed, const QByteArray& publicKey, const QString& currentVersion,
-                               const QString& programFolder, bool packaged, const QString& dataFolder)
+                               const QString& programFolder, bool packaged, const QString& dataFolder,
+                               base::Architecture machine)
 {
     const UpdateKind kind = updateKindOf(programFolder, packaged);
-    return {kind == UpdateKind::Setup ? setupFeedBeside(builtInFeed) : builtInFeed,
-            publicKey,
-            currentVersion,
-            kind,
-            programFolder,
-            dataFolder};
+    return {feedFor(builtInFeed, kind, machine), publicKey, currentVersion, kind, programFolder, dataFolder, machine,
+            base::programArchitecture()};
 }
 
 UpdateChannel desktopUpdateChannel()
 {
     return updateChannelFor(QUrl(QString::fromLatin1(updateFeed)), QByteArray::fromHex(updatePublicKey),
                             QString::fromLatin1(updateCurrentVersion), QCoreApplication::applicationDirPath(),
-                            !windowsPackageFamily().isEmpty(), QFileInfo(Settings::usualFile()).absolutePath());
+                            !windowsPackageFamily().isEmpty(), QFileInfo(Settings::usualFile()).absolutePath(),
+                            base::machineArchitecture());
 }
 
 bool updateAddress(const QUrl& address)
@@ -193,7 +200,7 @@ QVersionNumber updateVersion(const QString& text)
 }
 
 base::Result<UpdateRelease> verifiedUpdate(QByteArrayView envelope, const QByteArray& publicKey, const QDateTime& now,
-                                           UpdateKind kind)
+                                           UpdateKind kind, base::Architecture machine)
 {
     if (envelope.size() > mostUpdateMetadata || !now.isValid()) {
         return invalid();
@@ -215,7 +222,7 @@ base::Result<UpdateRelease> verifiedUpdate(QByteArrayView envelope, const QByteA
     const auto* bytes = value.find(u"bytes");
     if (schema == nullptr || !schema->isNumber() || !schema->whole || schema->number != 1 || bytes == nullptr ||
         !bytes->isNumber() || !bytes->whole || bytes->number < 1 || bytes->number > mostUpdatePackage ||
-        text(value, u"product") != u"qkvm-desktop"_s || text(value, u"platform") != platformOf(kind) ||
+        text(value, u"product") != u"qkvm-desktop"_s || text(value, u"platform") != platformOf(kind, machine) ||
         text(value, u"channel") != u"stable"_s) {
         return invalid();
     }

@@ -158,6 +158,13 @@ struct Status {
     int height = 0;
     bool powerIsKnown = false; // the KVM is wired to the computer's power light
     std::optional<bool> power;
+    // Why the KVM's power board is no witness of the computer's power, in the wall's words (the status's `atx.note`,
+    // from a qKVM server 0.3.2; this PC's own kvmd's driver says the same, KvmdDevice): its code ("power_led_unwired":
+    // the board says off while the screen shows a picture, so its power-LED wires are probably not connected) and its
+    // sentence, said in the machine's Details. Empty where there is nothing to say; the card then says "Power unknown"
+    // where it can say neither on nor off.
+    QString powerNoteCode;
+    QString powerNote;
     std::optional<bool> keyboard;
     std::optional<double> temperature;
     QString model;
@@ -172,6 +179,18 @@ struct Status {
     std::optional<Fingerbot> fingerbot;
     // Nothing: nothing is in its virtual drive, it has none, or the server does not say.
     std::optional<MountedMedia> media;
+    // A KVM of this PC's own wall has virtual media (its driver says no `can`: KvmdDevice::mediaOffer). A server says
+    // so in `can` ("media").
+    bool offersMedia = false;
+    // A server's card of this PC's own wall that was added while its server gave no number (UUID), whose computer gives
+    // one now: the card asks whether that is the server it was added for, and nothing but looks goes to it until it is
+    // answered (RedfishDevice, the owner's decision of 2026-11-22; its answer, act "its_server").
+    bool asksItsServer = false;
+    // ...and the number (its digest) the card asks about: its Yes takes that one only (review cx2-2, L1); and what that
+    // computer says of itself (its model, serial number and host name, where it says them), for the card's box to show
+    // apart from the card's words (review cx2-3, L-d).
+    QString askedAbout;
+    QString saysOfItself;
 };
 
 // Fresh status takes precedence over inventory. An absent list preserves older-server behavior.
@@ -443,6 +462,8 @@ struct MediaList {
     QStringList unseen; // a sentence for each place whose images could not be listed
     int leftOut = 0;    // entries there that are no image qKVM hands on
     QStringList notes;  // what stands against a change just now
+    // Whether the place's list was read whole (false: its notes say it was not), so that no image listed is none there.
+    bool readWhole = true;
     // The device's own storage, in bytes: what is free of how much, where it says.
     std::optional<qint64> free;
     std::optional<qint64> size;
@@ -450,7 +471,20 @@ struct MediaList {
     MediaOffer offers;
     std::optional<MediaUploading> uploading;
     QString servedFrom; // where a server's controller reads its image from qKVM; empty: not said
+    // What the place knows the machine by at this listing: of a KVM of this PC's own wall, where it is and the
+    // certificate it is known by. A box that listed it so changes nothing once it is another (MediaPlace::movedSince).
+    // Empty: the place says none (a server).
+    QString boundTo;
+    // A server's mark of the machine this list was made of (0.3.2, GET .../media's `listed`): 32 hex digits, taken in
+    // no other shape. A change picked from this list sends it back (MediaMount::listed, and MediaPlace's `listed`), and
+    // the server does nothing where the tile's machine is no longer the one listed (409 "moved"). Empty: the place
+    // says none (a server before 0.3.2; this PC's own wall, which holds a box to `boundTo` instead, but for a Proxmox
+    // guest's list: the mark of the guest and the node its images were listed on, ProxmoxDevice::listedMark).
+    QString listed;
 };
+
+// Whether a server's `listed` is in the one shape it makes it in: 32 hex digits, small.
+bool isListedMark(const QString& said);
 
 // What is asked of a machine's drive (POST .../media). `machine` is the machine's name as the question named it: the
 // server does nothing where it is called otherwise by then (409 changed).
@@ -461,6 +495,9 @@ struct MediaMount {
     bool writable = false;
     QString boot = QStringLiteral("none"); // or "once", "until_unmounted"
     bool restart = false;
+    // The mark of the list the image was picked from (MediaList::listed), sent with it; empty: none is sent (a server
+    // before 0.3.2, as before).
+    QString listed;
 };
 
 // What a mount, an unmount and a deletion answer once done: a sentence where there is more to say than that, and what
@@ -486,12 +523,17 @@ base::Result<std::optional<MediaUploading>> uploadingFrom(const QByteArray& answ
 base::Result<MediaDone> mediaDoneFrom(const QByteArray& answer);
 base::Result<MediaUploaded> uploadedFrom(const QByteArray& answer);
 QByteArray mountBody(const MediaMount& mount);
-// The body of an unmount and of a deletion: the image as the question named it, and the machine.
-QByteArray imageBody(const QString& image, const QString& machine);
+// The body of an unmount and of a deletion: the image as the question named it, the machine, and the mark of the list
+// it was picked from where there is one (MediaList::listed).
+QByteArray imageBody(const QString& image, const QString& machine, const QString& listed);
 // Whether the server takes this as the name of an image carried to a device (kvm.IMAGE_NAME): letters, digits, blanks
 // and . _ + - ( ) [ ] ~ , (200 at the most), neither beginning nor ending with a blank or a dot, and not ending in
 // ".incomplete" (what a JetKVM calls an image while it comes).
 bool isImageName(const QString& name);
+// What is said of a name that is not one (the server's NAME_RULE).
+inline constexpr const char* imageNameRule =
+    "An image's name is of letters, digits, spaces and . _ + - ( ) [ ] ~ , (200 at the most), and neither begins nor "
+    "ends with a space or a dot. Rename the file and upload it again.";
 
 // Why the server refused, from its answer {"code": ..., "message": ...}: the message is written to be
 // shown to a person as it is. An answer that is not of that shape gives a sentence of the program's own.

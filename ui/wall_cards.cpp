@@ -99,6 +99,11 @@ QString machineMetaOf(const core::Status& status)
             parts.append(words("Power on"));
         } else if (status.power == std::optional<bool>(false) && status.signal != std::optional<bool>(true)) {
             parts.append(words("Power off"));
+        } else if (status.power == std::optional<bool>(false) &&
+                   (!status.powerNote.isEmpty() || !status.ports.isEmpty())) {
+            // Off beside a picture: no witness (app.js, machineText, web 0.3.2). Why, where the wall can say (its
+            // Details say the note); on a KVM with several inputs it cannot, its board perhaps another computer's.
+            parts.append(words("Power unknown"));
         }
     }
     // A Fingerbot paired with the KVM, and its battery where that is low.
@@ -221,6 +226,8 @@ QString actionOf(CardWay way)
         return words("Review certificate");
     case CardWay::ShowHere:
         return words("Show here");
+    case CardWay::ConfirmServer:
+        return words("Is it this server?");
     case CardWay::None:
         break;
     }
@@ -246,6 +253,11 @@ CardWay cardWayOf(const core::Machine& machine, const core::Status* status)
     }
     if (!machine.own) {
         return CardWay::None;
+    }
+    // A server's card that asks whether the computer at its place, which gives a number of its own now, is its server:
+    // to that question (the owner's decision of 2026-11-22).
+    if (status->asksItsServer) {
+        return CardWay::ConfirmServer;
     }
     // (And where another JetKVM answers at its address: its password typed in the box that changes it takes the one
     // that answers now, as the card's words say. J5.)
@@ -343,7 +355,8 @@ WallTile cardFor(const core::Machine& machine, const core::Status* status, quint
     tile.name = machine.name;
     // Where a machine is, and before it the way it is spoken to where that is the plain one: the
     // one thing about an address that whoever looks at the wall has to know.
-    tile.host = machine.plain ? u"http://"_s + machine.host : machine.host;
+    // (A VNC server's way in the clear is vnc://, and no web address to open: outside review c9a-2, L4.)
+    tile.host = machine.plain ? (machine.kind == u"vnc"_s ? u"vnc://"_s : u"http://"_s) + machine.host : machine.host;
     tile.group = machine.group;
     tile.note = machine.note;
     tile.openable = !machine.page.isEmpty();
@@ -367,6 +380,8 @@ WallTile cardFor(const core::Machine& machine, const core::Status* status, quint
     tile.label = labelOf(status->state, status);
     tile.meta = withNote(metaOf(*status), false);
     tile.largeMeta = withNote(metaOf(*status), true);
+    // Why its power is unknown, in the wall's words, for its Details (app.js, powerNote): of a machine with a picture.
+    tile.powerNote = status->hasPicture ? status->powerNote : QString();
     if (status->server) {
         const bool runs = status->state == "online"_L1 || status->state == "error"_L1;
         // (Never the picture of a PC with Intel AMT in health only, whatever was handed over.)

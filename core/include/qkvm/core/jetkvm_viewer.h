@@ -57,8 +57,9 @@ class JetKvmDevice;
 //   A connection that comes about ends that.
 // * Another JetKVM at its address (J5: its driver asks which JetKVM answers before every line, JetKvmDevice): no line
 //   and no offer; every card is told so (`another_machine`) until the one it is known by answers again, and a card's
-//   connection asks again at the driver's sameJetKvmEveryMs; "Show here" and a window that is opened ask at once, and
-//   every window is told so for good (anotherAnswers).
+//   connection asks again at the driver's sameJetKvmEveryMs; "Show here", a window that is opened, and what a person
+//   asks over the connection (keys, a press, its media: inputReady, connected) ask at once, and every window is told
+//   so for good (anotherAnswers).
 class JetKvmViewer : public QObject {
     Q_OBJECT
 
@@ -95,7 +96,10 @@ public:
     void keyGoes();
     // How it is, over its connection where one is open (false, and nothing asked, where none is). Nothing
     // where the connection went meanwhile, given back by this program: nothing was heard of the JetKVM then.
-    bool askStatus(std::function<void(const std::optional<Status>&)> done);
+    // And what getVirtualMediaState answered beside it, for its driver (the web's `media` of a look), or why not.
+    using StatusTold =
+        std::function<void(const std::optional<Status>&, const std::optional<base::Result<json::Value>>&)>;
+    bool askStatus(StatusTold done);
     // "Show here": the program no longer stands aside, and connects at once. Done once open; or what the
     // connecting ended in.
     void resume(std::function<void(base::Result<Done>)> done);
@@ -126,8 +130,8 @@ signals:
     void connectionOver(quint64 serial);
 
 private:
-    // What its four questions of a look were answered: its video, its USB, its extension, its version.
-    using Said = std::array<std::optional<base::Result<json::Value>>, 4>;
+    // What its five questions of a look were answered: its video, its USB, its extension, its version, its drive.
+    using Said = std::array<std::optional<base::Result<json::Value>>, 5>;
 
     qint64 now() const { return m_clock.elapsed(); }
     // `eventsAtAsking`: what the connection had said of its input in events when the look was asked; an answer to

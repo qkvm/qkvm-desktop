@@ -51,6 +51,9 @@ public:
 
     std::unique_ptr<Live> open(Live::Need need) override;
     void end(const base::Error& why) override;
+    // A window holds its keyboard and mouse, given (the web's held_by): what a restart from its virtual media waits for
+    // (LocalWall::mediaHeld).
+    bool keyboardHeld() const override { return !m_over && m_holder != nullptr && m_given; }
 
 private:
     class Handle;

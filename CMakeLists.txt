@@ -1,13 +1,46 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Where Qt is on this PC: tools/fetch_qt.ps1 writes it into local.cmake, which git does not keep.
+# Which Windows the program is built for: x64, or ARM64 (the arm64-* presets). Where it is built on a PC of the other
+# kind (ARM64 on x64: the build box's way), the build is a cross-build: the tools of Qt's that it runs while it builds
+# are the x64 Qt's (its host, QT_HOST_PATH), and its own such tool comes from an x64 build of the same sources
+# (QKVM_HOST_TOOLS, below).
+set(QKVM_ARCH "x64" CACHE STRING "The Windows it is built for: x64 or arm64")
+set_property(CACHE QKVM_ARCH PROPERTY STRINGS x64 arm64)
+if(NOT QKVM_ARCH MATCHES "^(x64|arm64)$")
+    message(FATAL_ERROR "QKVM_ARCH is x64 or arm64, not ${QKVM_ARCH}.")
+endif()
+
+# Where Qt is on this PC: tools/fetch_qt.ps1 writes it into local.cmake, which git does not keep (QKVM_QT_DIR for x64,
+# QKVM_QT_DIR_ARM64 for ARM64; an ARM64 build on an x64 PC needs both). The libraries of others an ARM64 build links
+# are in .deps/arm64, or where local.cmake says (QKVM_DEPS_ARM64).
 include("${CMAKE_CURRENT_LIST_DIR}/local.cmake" OPTIONAL)
 if(NOT DEFINED QKVM_QT_DIR OR NOT EXISTS "${QKVM_QT_DIR}/lib/cmake/Qt6/Qt6Config.cmake")
     message(FATAL_ERROR "Qt is not known on this PC yet. Run tools/fetch_qt.ps1 (README.md, Building).")
 endif()
+if(QKVM_ARCH STREQUAL "arm64")
+    if(NOT DEFINED QKVM_QT_DIR_ARM64 OR NOT EXISTS "${QKVM_QT_DIR_ARM64}/lib/cmake/Qt6/Qt6Config.cmake")
+        message(FATAL_ERROR "Qt for ARM64 is not known on this PC yet. Run tools/fetch_qt.ps1 -Arch arm64.")
+    endif()
+    if(NOT DEFINED QKVM_DEPS_ARM64)
+        set(QKVM_DEPS_ARM64 "${CMAKE_CURRENT_LIST_DIR}/.deps/arm64")
+    endif()
+    if(NOT "$ENV{PROCESSOR_ARCHITECTURE}" STREQUAL "ARM64")
+        set(CMAKE_SYSTEM_NAME Windows)
+        set(CMAKE_SYSTEM_VERSION 10.0)
+        set(CMAKE_SYSTEM_PROCESSOR ARM64)
+    endif()
+    # (Qt for ARM64 is itself cross-built, and says it needs its host's Qt whatever PC it is used on.)
+    set(QT_HOST_PATH "${QKVM_QT_DIR}" CACHE PATH "The x64 Qt, whose tools an ARM64 build runs")
+    set(QKVM_QT_DIR "${QKVM_QT_DIR_ARM64}")
+    set(QKVM_FFMPEG_DIR "${QKVM_DEPS_ARM64}/ffmpeg")
+else()
+    set(QKVM_FFMPEG_DIR "${CMAKE_CURRENT_LIST_DIR}/.deps/ffmpeg")
+endif()
 list(PREPEND CMAKE_PREFIX_PATH "${QKVM_QT_DIR}")
 
-set(QKVM_FFMPEG_DIR "${CMAKE_CURRENT_LIST_DIR}/.deps/ffmpeg")
+if(QKVM_ARCH STREQUAL "arm64" AND NOT EXISTS "${QKVM_FFMPEG_DIR}/lib/avcodec.lib")
+    message(FATAL_ERROR "FFmpeg for ARM64 is not in ${QKVM_DEPS_ARM64} yet. Run tools/build_ffmpeg.ps1 -Arch arm64.")
+endif()
 if(NOT EXISTS "${QKVM_FFMPEG_DIR}/lib/avcodec.lib")
     message(FATAL_ERROR "FFmpeg is not in .deps yet. Run tools/build_ffmpeg.ps1 (the project's own, which a release is "
         "built with), or tools/fetch_ffmpeg.ps1 (a development build with encoders for tools/make_testdata.ps1).")
@@ -17,11 +50,31 @@ endif()
 # it, and a crash in one can still be read.
 set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT ProgramDatabase)
 
-project(QkvmDesktop VERSION 0.1.2 LANGUAGES CXX)
+project(QkvmDesktop VERSION 0.2.0 LANGUAGES CXX)
 
-if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "QKVM Desktop is built for Windows x64 with Microsoft's compiler, and for nothing else yet.")
+if(NOT MSVC OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR NOT MSVC_CXX_ARCHITECTURE_ID MATCHES "^(x64|ARM64)$")
+    message(FATAL_ERROR "QKVM Desktop is built for Windows x64 and ARM64 with Microsoft's compiler, and for nothing "
+        "else yet.")
 endif()
+# What the compiler on the path makes is what this build is for: a folder of an ARM64 preset filled with x64 programs
+# (or the other way round) passes for what it is not.
+string(TOLOWER "${MSVC_CXX_ARCHITECTURE_ID}" qkvm_compiler_makes)
+if(NOT qkvm_compiler_makes STREQUAL QKVM_ARCH)
+    message(FATAL_ERROR "This build is for ${QKVM_ARCH}, and the compiler on the path makes ${MSVC_CXX_ARCHITECTURE_ID} "
+        "programs: start the build's environment for ${QKVM_ARCH} (tools/common.ps1, Enter-BuildEnvironment -Arch "
+        "${QKVM_ARCH}).")
+endif()
+# The tools this build runs while it builds (qkvm-make-jetkvm-layouts, core/CMakeLists.txt), which a cross-build cannot
+# run as it makes them: an x64 build's of the same sources (cmake --build --preset debug --target <tool>).
+if(CMAKE_CROSSCOMPILING)
+    set(QKVM_HOST_TOOLS "${CMAKE_SOURCE_DIR}/build/debug/bin" CACHE PATH
+        "Where an x64 build of these sources keeps its programs, for the tools a cross-build runs")
+endif()
+# Where the tests find the files of the source tree they read (QKVM_TESTDATA and the like name them by their full
+# path): the source folder, unless the tests are to run on another PC that holds the tree in another folder (an ARM64
+# build made on the build box and run on Windows on ARM). Every program's definitions that name the source folder are
+# then made to name that one instead, at the end of this file.
+set(QKVM_TEST_FILES "${CMAKE_SOURCE_DIR}" CACHE PATH "Where the tests are to find the source tree's files")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -50,9 +103,20 @@ target_compile_definitions(qkvm_build INTERFACE
 # source folder (/d1trimfile:): the folder it was built in stays out of what is handed out.
 file(TO_NATIVE_PATH "${CMAKE_SOURCE_DIR}" qkvm_source_folder)
 target_compile_options(qkvm_build INTERFACE "$<$<CONFIG:Release>:/d1trimfile:${qkvm_source_folder}>")
+set(qkvm_release_link /DEBUG /OPT:REF /OPT:ICF /INCREMENTAL:NO /CETCOMPAT /PDBALTPATH:%_PDB%)
+if(QKVM_ARCH STREQUAL "arm64")
+    # (The shadow stack /CETCOMPAT marks a program fit for is Intel's and AMD's: the linker refuses it for ARM64.)
+    list(REMOVE_ITEM qkvm_release_link /CETCOMPAT)
+    # ARM64's own guard of returns is the compiler's, in every configuration: each function of our own signs its
+    # return address with the processor's pointer authentication as it begins, and checks it before it returns: Windows
+    # ends a program whose return address was overwritten on its stack (seen on the ARM test PC, where Windows turns it
+    # on for every program by default; base/tests/test_guarded_returns.cpp). On a processor without it those
+    # instructions do nothing.
+    target_compile_options(qkvm_build INTERFACE /guard:signret)
+endif()
 target_link_options(qkvm_build INTERFACE
     /guard:cf
-    "$<$<CONFIG:Release>:/DEBUG;/OPT:REF;/OPT:ICF;/INCREMENTAL:NO;/CETCOMPAT;/PDBALTPATH:%_PDB%>"
+    "$<$<CONFIG:Release>:${qkvm_release_link}>"
 )
 
 # The sanitizer goes to everything that is compiled here, the files Qt generates for a QML module
@@ -61,6 +125,44 @@ option(QKVM_ASAN "Build with the address sanitizer" OFF)
 if(QKVM_ASAN)
     add_compile_options(/fsanitize=address)
 endif()
+
+# libFuzzer's targets of the readers of what devices and servers send (DESIGN.md section 8), in a build of their own:
+# the fuzz preset, the address sanitizer's with QKVM_FUZZ, which the gate builds and runs for a bounded time
+# (tools/fuzz.ps1). No ordinary preset builds them. What any of them ever found is a test of every preset
+# (test_core_fuzz_found), its input written as bytes in the source.
+option(QKVM_FUZZ "Build libFuzzer's targets of the readers of what devices send" OFF)
+if(QKVM_FUZZ AND NOT QKVM_ASAN)
+    message(FATAL_ERROR "libFuzzer's targets are built with the address sanitizer: configure the fuzz preset.")
+endif()
+# The proof that each fuzz target reaches deep into its reader (base/include/qkvm/base/fuzz_promise.h, reached): built
+# with it, every harness ends the run where its reader read an input to the deep state the harness names, so that
+# tools/fuzz.ps1 -Canary sees each find its own within its bounded run. Its own preset (fuzz-canary) and folder: the
+# gate's fuzz targets (the fuzz preset) never have it.
+option(QKVM_FUZZ_CANARY "Build the fuzz targets with their canaries" OFF)
+if(QKVM_FUZZ_CANARY AND NOT QKVM_FUZZ)
+    message(FATAL_ERROR "The canaries are the fuzz targets': configure the fuzz-canary preset.")
+endif()
+# One fuzz target, `name`: its harness and the readers it reads with, compiled into it again so that libFuzzer sees
+# which of their branches an input takes; with the standard library's hardening, as the program's readers have it,
+# where a check that fails ends in abort(), which libFuzzer hears and keeps the input of (the library's own way out
+# ends a program past anybody's hearing). MAX_LEN: the longest input it is given; MALLOC_MB: the most one allocation
+# may ask for, in MB, beyond which libFuzzer counts it a finding; SEEDS: the folder of its seeds, as the seed maker
+# (core/fuzz/make_seeds.cpp) names it. Noted for tools/fuzz.ps1 in fuzzers.txt of the build.
+function(qkvm_add_fuzzer name)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "" "MAX_LEN;MALLOC_MB;SEEDS" "SOURCES;LIBRARIES;INCLUDES;DEFINITIONS")
+    if(NOT arg_MAX_LEN OR NOT arg_MALLOC_MB OR NOT arg_SEEDS)
+        message(FATAL_ERROR "The fuzz target ${name} says no MAX_LEN, MALLOC_MB or SEEDS.")
+    endif()
+    add_executable(${name} ${arg_SOURCES})
+    target_compile_options(${name} PRIVATE /fsanitize=fuzzer)
+    target_compile_definitions(${name} PRIVATE _MSVC_STL_HARDENING=1 _MSVC_STL_USE_ABORT_AS_DOOM_FUNCTION=1
+        ${arg_DEFINITIONS} $<$<BOOL:${QKVM_FUZZ_CANARY}>:QKVM_FUZZ_CANARY=1>)
+    target_include_directories(${name} PRIVATE ${arg_INCLUDES})
+    target_link_libraries(${name} PRIVATE qkvm_build qkvm_base ${arg_LIBRARIES})
+    set_target_properties(${name} PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    set_property(GLOBAL APPEND PROPERTY QKVM_FUZZERS "${name}")
+    set_property(GLOBAL APPEND PROPERTY QKVM_FUZZ_LINES "${name}|$<TARGET_FILE:${name}>|${arg_MAX_LEN}|${arg_MALLOC_MB}|${arg_SEEDS}")
+endfunction()
 
 # Every program is linked whole, in every build. Microsoft's linker, left to patch a program in place
 # (which is what it does by itself wherever a build keeps its symbols), has put a test together from
@@ -145,9 +247,14 @@ qkvm_test_runs(test_vm_scripts NOTHING) # (Windows PowerShell's)
 
 # Approved C++ receiver, built from the pinned sources by tools/fetch_webrtc.ps1.
 # Only its C ABI crosses the DLL boundary, including in debug and sanitizer builds.
-set(QKVM_WEBRTC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/webrtc-trial/install")
+if(QKVM_ARCH STREQUAL "arm64")
+    set(QKVM_WEBRTC_DIR "${QKVM_DEPS_ARM64}/webrtc/install")
+else()
+    set(QKVM_WEBRTC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.deps/webrtc-trial/install")
+endif()
 if(NOT EXISTS "${QKVM_WEBRTC_DIR}/lib/datachannel.lib" OR NOT EXISTS "${QKVM_WEBRTC_DIR}/bin/datachannel.dll")
-    message(FATAL_ERROR "Native WebRTC is missing. Run tools/fetch_webrtc.ps1 (README.md, Building).")
+    message(FATAL_ERROR "Native WebRTC is missing. Run tools/fetch_webrtc.ps1 (README.md, Building), with -Arch arm64 "
+        "for ARM64.")
 endif()
 add_library(qkvm_webrtc SHARED IMPORTED GLOBAL)
 set_target_properties(qkvm_webrtc PROPERTIES
@@ -163,9 +270,31 @@ add_subdirectory(base)
 add_subdirectory(engine)
 add_subdirectory(input)
 add_subdirectory(bmc)
+add_subdirectory(rfb)
 add_subdirectory(core)
 add_subdirectory(bench)
 add_subdirectory(ui)
+
+# Every fuzz target, its seeds made (by the seed maker, from the tests' own inputs: no seed is a file in the sources),
+# and the list tools/fuzz.ps1 runs them by: one line each, "name|program|longest input|most MB at once|seeds".
+if(QKVM_FUZZ)
+    get_property(qkvm_fuzzers GLOBAL PROPERTY QKVM_FUZZERS)
+    get_property(qkvm_fuzz_lines GLOBAL PROPERTY QKVM_FUZZ_LINES)
+    list(JOIN qkvm_fuzz_lines "\n" qkvm_fuzz_text)
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fuzz/fuzzers.txt" CONTENT "${qkvm_fuzz_text}\n")
+    # (And each target's one small seed beside them, in fuzz/smallest, which tools/fuzz.ps1 -Canary -Smallest begins
+    # from.)
+    add_custom_target(fuzz_seeds
+        COMMAND "${CMAKE_COMMAND}" -E rm -rf "${CMAKE_BINARY_DIR}/fuzz/seeds" "${CMAKE_BINARY_DIR}/fuzz/smallest"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_BINARY_DIR}/fuzz/seeds" "${CMAKE_BINARY_DIR}/fuzz/smallest"
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "--modify" "PATH=path_list_prepend:${QKVM_QT_DIR}/bin"
+            "--modify" "PATH=path_list_prepend:${QKVM_FFMPEG_DIR}/bin"
+            "$<TARGET_FILE:qkvm-fuzz-seeds>" "${CMAKE_BINARY_DIR}/fuzz/seeds" "${CMAKE_BINARY_DIR}/fuzz/smallest"
+        DEPENDS qkvm-fuzz-seeds
+        COMMENT "Making the fuzz targets' seeds" VERBATIM)
+    add_custom_target(fuzz_all DEPENDS ${qkvm_fuzzers} fuzz_seeds)
+endif()
 
 # Every program CTest runs fails quietly (base/tests/quiet_failures.cpp, DESIGN.md section 8): a test of which it
 # is not said what program it runs, or whose program does not link a quiet library, stops the configuration here,
@@ -202,3 +331,25 @@ function(qkvm_check_quiet_tests directory)
     endforeach()
 endfunction()
 qkvm_check_quiet_tests("${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The tests' files where the tests are to find them (QKVM_TEST_FILES above): in every definition of every target here
+# that names a file or folder of the source tree by its full path, the source folder becomes that one.
+function(qkvm_move_test_files directory)
+    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        foreach(property IN ITEMS COMPILE_DEFINITIONS INTERFACE_COMPILE_DEFINITIONS)
+            get_target_property(definitions ${target} ${property})
+            if(definitions)
+                string(REPLACE "=\"${CMAKE_SOURCE_DIR}" "=\"${QKVM_TEST_FILES}" moved "${definitions}")
+                set_property(TARGET ${target} PROPERTY ${property} "${moved}")
+            endif()
+        endforeach()
+    endforeach()
+    get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(subdirectory IN LISTS subdirectories)
+        qkvm_move_test_files("${subdirectory}")
+    endforeach()
+endfunction()
+if(NOT QKVM_TEST_FILES STREQUAL CMAKE_SOURCE_DIR)
+    qkvm_move_test_files("${CMAKE_CURRENT_SOURCE_DIR}")
+endif()

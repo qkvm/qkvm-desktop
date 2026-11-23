@@ -14,7 +14,15 @@ film, how many pictures reach the screen, how soon and how evenly.
     tools\measure_live.ps1 -JetKvm                                 a JetKVM by hand, shown large (M6 2i)
     tools\measure_live.ps1 -JetKvm -Cards 16                       sixteen on the wall, the first shown large
     tools\measure_live.ps1 -JetKvm -Cards 64 -Wall                 sixty-four, the wall itself measured
-    tools\measure_live.ps1 -JetKvm -FirstPicture                   how soon its first picture comes, after a
+    tools\measure_live.ps1 -JetKvm -Cards 64 -Wall -Every 0        the same, the wall paused: after each card's
+                                                                   first picture none is decoded (PERF-2)
+    tools\measure_live.ps1 -JetKvm -Cards 64 -Wall -Drag 20        the same, the window's edge dragged in and out
+                                                                   for 20 of the seconds measured
+    tools\measure_live.ps1 -JetKvm -Cards 64 -Wall -Stills 2       the same, so many cards' key frames decoded at
+                                                                   once (0: no limit; without it: the program's)
+    tools\measure_live.ps1 -JetKvm -Cards 64 -Wall -Compact        the same, the heaps compacted as the measuring
+                                                                   begins (what giving back freed memory comes to)
+    tools\measure_live.ps1 -JetKvm -FirstPicture                  how soon its first picture comes, after a
                                                                    JetKVM rested 0, 5.5 and 15 seconds (-Rests)
 
 With -JetKvm no Python is needed and no film is chosen: so many JetKVMs by hand on this PC's loopback
@@ -22,9 +30,16 @@ With -JetKvm no Python is needed and no film is chosen: so many JetKVMs by hand 
 are added to this PC's own wall in the rig ("own", QKVM_RIG_ADD, with the stand-in's made-up password),
 and the first is shown large and measured as a film is (QKVM_RIG_LIVE_MEASURE); with -Wall, the wall
 of them is measured as tools\stand_in_wall.py's is (QKVM_RIG_MEASURE: the processor, committed and
-video memory, the window's frames). The wall settles a quarter of a second longer for each card, so
-that all of them were added and have their pictures before anything is measured. Their summary is in
-the same folder. With -FirstPicture no window is shown: for each rest, one JetKVM by hand whose first
+video memory, the window's frames). The wall settles from when it has every card (on a loaded PC the
+last came 30 s and more after the first), a quarter of a second longer for each card, so that all of
+them have their pictures before anything is measured. The rig says what its committed memory is made
+of (its heaps by the size of each piece in use, its threads' stacks, the rest by the size of each
+allocation: PERF-2) as the window is shown, when the wall has all its cards and after the measuring.
+Their summary is in the same folder, with the memory committed when the wall had all its cards, as
+the measuring began, and at its end. With -Every 0 the wall is paused, as the View menu pauses it:
+each card has its first picture and no other is decoded, which leaves the cards' connections and
+what the wall holds (PERF-2). With -FirstPicture no window is shown: for each rest, one JetKVM by
+hand whose first
 picture comes so many milliseconds after the offer (as a real one's after it rested), and the release
 qkvm-jetkvm-rig against it (bench\jetkvm_rig.cpp): a card's first ask to its first key frame, as the
 connection's own steps say it and as a card that asks every 250 ms gets it, and a window's first live
@@ -52,6 +67,10 @@ param(
     [switch] $JetKvm,
     [ValidateRange(1, 128)] [int] $Cards = 1,
     [switch] $Wall,
+    [int] $Every = -1,
+    [int] $Drag = 0,
+    [int] $Stills = -1,
+    [switch] $Compact,
     [switch] $FirstPicture,
     [int[]] $Rests = @(0, 5500, 15000)
 )
@@ -212,8 +231,17 @@ try {
                 $env:QKVM_RIG_KVM_PASSWORD = 'secret'
                 $env:QKVM_RIG_DECODING = $Decoding
                 $env:QKVM_RIG_CARD = $Card
+                # (With -Stills: so many card stills that are key frames decoded at once; 0: no limit. Also beside
+                # a machine shown large, whose pictures are not in that line.)
+                if ($Stills -ge 0) { $env:QKVM_RIG_STILLS = "$Stills" }
                 if ($Wall) {
                     $env:QKVM_RIG_MEASURE = "$report,$jetSettle,$Seconds"
+                    # (With -Every: a new picture of each card so many ms apart, as the View menu sets it; 0: paused.)
+                    if ($Every -ge 0) { $env:QKVM_RIG_EVERY = "$Every" }
+                    # (With -Drag: the window's edge dragged in and out for so many seconds as the measuring begins.)
+                    if ($Drag -gt 0) { $env:QKVM_RIG_DRAG = "$Drag" }
+                    # (With -Compact: the heaps compacted once as the measuring begins, and what is committed then said.)
+                    if ($Compact) { $env:QKVM_RIG_COMPACT = '1' }
                 } else {
                     # (A JetKVM is named by where it is: its address and port.)
                     $env:QKVM_RIG_ENLARGE = ([uri] $addresses[0]).Authority
@@ -321,16 +349,17 @@ if ($JetKvm -and $Wall) {
             if ($line -match '^([^:]+): (.*)$') { $said[$Matches[1]] = $Matches[2] }
         }
     }
-    $lines = @('| JetKVM cards | Decoding | Card | Of the PC''s processors | MB committed | MB of the cards'' own memory | Frames a second | Work for a frame | Notes |', '|---|---|---|---|---|---|---|---|---|')
+    $lines = @('| JetKVM cards | Decoding | Card | Of the PC''s processors | MB committed | MB with all cards, as the measuring began | MB of the cards'' own memory | Frames a second | Work for a frame | The interface thread''s answer | Notes |', '|---|---|---|---|---|---|---|---|---|---|---|')
     if ($failed.ContainsKey('jetkvm-1080p60')) {
-        $lines += "| $Cards | $Decoding | $Card | $($failed['jetkvm-1080p60']) | | | | | |"
+        $lines += "| $Cards | $Decoding | $Card | $($failed['jetkvm-1080p60']) | | | | | | | |"
     } elseif (-not $said.ContainsKey('machines')) {
-        $lines += "| $Cards | $Decoding | $Card | no report | | | | | |"
+        $lines += "| $Cards | $Decoding | $Card | no report | | | | | | | |"
     } else {
         $notes = @()
         if ([int] $said['machines'] -ne $Cards) { $notes += "$($said['machines']) on the wall" }
         if ($said['the window was the one in front, at first and at last'] -ne 'yes, yes') { $notes += 'window not in front' }
-        $lines += "| $Cards | $Decoding | $Card | $($said['percent of the PC''s processors']) % | $($said['MB committed']) | $($said['MB of the graphics cards'' own memory']) | $($said['frames a second']) | $($said['ms of work for a frame']) | $($notes -join ', ') |"
+        $withAll = if ($said['ms from the program''s start to the wall''s cards'] -match '\(([\d.]+) MB') { $Matches[1] } else { '' }
+        $lines += "| $Cards | $Decoding | $Card | $($said['percent of the PC''s processors']) % | $($said['MB committed']) | $withAll, $($said['MB committed as the measuring began']) | $($said['MB of the graphics cards'' own memory']) | $($said['frames a second']) | $($said['ms of work for a frame']) | $($said['ms the interface thread took to answer']) | $($notes -join ', ') |"
     }
     $lines += ''
     $lines += 'Targets (SPEC.md section 9): a wall of 64 under 5 % of the processors and under 300 MB committed.'

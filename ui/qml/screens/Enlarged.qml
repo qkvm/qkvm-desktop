@@ -315,6 +315,7 @@ Item {
             // (app.css, ".focus-identity": clamp(90px, 22vw, 210px)).
             Item {
                 id: identity
+                objectName: "consoleIdentity"
 
                 readonly property real least: Math.max(90, Math.min(210, enlarged.width * 0.22))
 
@@ -365,6 +366,7 @@ Item {
             // what it leaves the machine's name, and More takes what does not fit.
             ConsoleOverflow {
                 id: headerTools
+                objectName: "consoleHeaderTools"
                 Layout.preferredWidth: Math.min(full, header.width - identity.least - header.spacing)
                 packed: true
                 menuName: "consoleMore"

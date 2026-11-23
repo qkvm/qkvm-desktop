@@ -344,6 +344,31 @@ private slots:
         QCOMPARE(b.lastSeenSecondsAgo, std::optional<int>(7200));
     }
 
+    void whyAKvmsPowerIsUnknownIsRead()
+    {
+        // (A qKVM server 0.3.2: `atx.note`, there only where the board is no witness of the power: its code and its
+        // sentence, both, as texts of one line.) A board as before 0.3.2 has none.
+        const base::Result<QHash<QString, core::Status>> all = core::statusFrom(
+            R"({"unwired": {"state": "online", "video": {"signal": true},
+                            "atx": {"enabled": true, "power": false, "hdd": null,
+                                    "note": {"code": "power_led_unwired", "message": "Its wires are not connected."}}},
+                "before": {"state": "online", "atx": {"enabled": true, "power": false, "hdd": null}},
+                "half": {"state": "online",
+                         "atx": {"enabled": true, "power": false, "note": {"code": "power_led_unwired"}}},
+                "words": {"state": "online",
+                          "atx": {"enabled": true, "power": false, "note": {"code": 1, "message": "x"}}},
+                "noBoard": {"state": "online",
+                            "atx": {"enabled": false, "power": false, "note": {"code": "c", "message": "m"}}}})");
+        QVERIFY(all.ok());
+        const core::Status unwired = all.value().value(u"unwired"_s);
+        QCOMPARE(unwired.powerNoteCode, u"power_led_unwired"_s);
+        QCOMPARE(unwired.powerNote, u"Its wires are not connected."_s);
+        for (const char* none : {"before", "half", "words", "noBoard"}) {
+            const core::Status status = all.value().value(QString::fromLatin1(none));
+            QVERIFY2(status.powerNoteCode.isEmpty() && status.powerNote.isEmpty(), none);
+        }
+    }
+
     void aFingerbotAndItsBatteryAreRead()
     {
         // A Fingerbot paired with the KVM (`fingerbot` in `can`): its battery in percent, null until it was asked,
@@ -879,7 +904,7 @@ private slots:
                            "upload": "yes", "where": "device", "writable": ["flash", "disk"], "delete": true,
                            "drops_input": true},
                 "uploading": {"name": "tools.img", "size": 1000, "sent": 4000, "by": "anna", "at": 1700000000},
-                "served_from": )"
+                "listed": "0123456789abcdef0123456789abcdef", "served_from": )"
             // (Not in the raw text: moc takes the two strokes of an address there for the start of a remark.)
             "\"http://192.168.1.10:8787\"}");
         QVERIFY2(list.ok(), list.ok() ? "" : list.error().message.c_str());
@@ -918,6 +943,8 @@ private slots:
         QCOMPARE(up.sent, qint64{1000});
         QCOMPARE(up.by, u"anna"_s);
         QCOMPARE(is.servedFrom, u"http://192.168.1.10:8787"_s);
+        // (0.3.2) The mark of the machine the list was made of, to be sent back with a change picked from it.
+        QCOMPARE(is.listed, u"0123456789abcdef0123456789abcdef"_s);
 
         // What is no list of a machine's media is refused whole.
         QVERIFY(!core::mediaListFrom(R"({"images": []})").ok());
@@ -928,6 +955,55 @@ private slots:
             core::mediaListFrom(R"({"images": [], "offers": {}, "mounted": null, "uploading": null})");
         QVERIFY(bare.ok());
         QVERIFY(!bare.value().mounted && !bare.value().uploading && !bare.value().free);
+        // A server before 0.3.2 says no mark: none is kept, and none is sent.
+        QVERIFY(bare.value().listed.isEmpty());
+    }
+
+    void theMarkOfTheMachineAListWasMadeOfIsTakenOnlyInItsShape_data()
+    {
+        QTest::addColumn<QJsonValue>("listed");
+        QTest::addColumn<bool>("taken");
+        QTest::addColumn<QString>("kept");
+        // (server.py, media_listed: the first 32 hex digits of a SHA-256, as hexdigest() writes them.)
+        const QString mark = u"5d41402abc4b2a76b9719d911017c592"_s;
+        QTest::newRow("as the server makes it") << QJsonValue(mark) << true << mark;
+        QTest::newRow("not said: a server before 0.3.2") << QJsonValue(QJsonValue::Undefined) << true << QString();
+        QTest::newRow("null") << QJsonValue(QJsonValue::Null) << true << QString();
+        // Anything else is no mark of the server's: the list is not understood, and nothing is picked from it.
+        QTest::newRow("one digit short") << QJsonValue(mark.left(31)) << false << QString();
+        QTest::newRow("one digit more") << QJsonValue(mark + u'0') << false << QString();
+        QTest::newRow("a whole SHA-256") << QJsonValue(mark + mark) << false << QString();
+        QTest::newRow("in capitals") << QJsonValue(mark.toUpper()) << false << QString();
+        QTest::newRow("a letter that is no hex digit") << QJsonValue(mark.left(31) + u'g') << false << QString();
+        QTest::newRow("with a blank") << QJsonValue(mark.left(31) + u' ') << false << QString();
+        QTest::newRow("with a line feed") << QJsonValue(mark + QChar(0x0A)) << false << QString();
+        QTest::newRow("empty") << QJsonValue(u""_s) << false << QString();
+        QTest::newRow("a number") << QJsonValue(1234) << false << QString();
+        QTest::newRow("a list") << QJsonValue(QJsonArray{mark}) << false << QString();
+        QTest::newRow("an object") << QJsonValue(QJsonObject{{u"mark"_s, mark}}) << false << QString();
+        QTest::newRow("a yes") << QJsonValue(true) << false << QString();
+    }
+
+    void theMarkOfTheMachineAListWasMadeOfIsTakenOnlyInItsShape()
+    {
+        // GET .../media's `listed` (0.3.2) goes back to the server with every change picked from the list, in a body
+        // and in an upload's address: what comes is the server's to say, and is taken only in the shape it makes it.
+        QFETCH(const QJsonValue, listed);
+        QFETCH(const bool, taken);
+        QFETCH(const QString, kept);
+        QJsonObject said{{u"images"_s, QJsonArray{QJsonObject{{u"id"_s, u"a.iso"_s}, {u"name"_s, u"a.iso"_s}}}},
+                         {u"offers"_s, QJsonObject{}}};
+        if (!listed.isUndefined()) {
+            said[u"listed"_s] = listed;
+        }
+        const base::Result<core::MediaList> list = core::mediaListFrom(QJsonDocument(said).toJson());
+        QCOMPARE(list.ok(), taken);
+        if (taken) {
+            QCOMPARE(list.value().listed, kept);
+        } else {
+            QCOMPARE(list.error().code, std::string("bad_answer"));
+        }
+        QCOMPARE(core::isListedMark(listed.toString()), taken && !kept.isEmpty());
     }
 
     void anImageIdLongerThanTheServerTakesIsLeftOutAndNeverCutShort()
@@ -998,8 +1074,21 @@ private slots:
                               {u"writable"_s, false},
                               {u"boot"_s, u"none"_s},
                               {u"restart"_s, false}}));
-        QCOMPARE(QJsonDocument::fromJson(core::imageBody(u"a.iso"_s, u"Build server"_s)).object(),
+        QCOMPARE(QJsonDocument::fromJson(core::imageBody(u"a.iso"_s, u"Build server"_s, QString())).object(),
                  QJsonObject({{u"image"_s, u"a.iso"_s}, {u"machine"_s, u"Build server"_s}}));
+        // (0.3.2) With the mark of the list it was picked from, where the list said one.
+        const QString mark = u"5d41402abc4b2a76b9719d911017c592"_s;
+        mount.listed = mark;
+        QCOMPARE(QJsonDocument::fromJson(core::mountBody(mount)).object(),
+                 QJsonObject({{u"image"_s, u"debian-13.iso"_s},
+                              {u"machine"_s, u"Build server"_s},
+                              {u"listed"_s, mark},
+                              {u"drive"_s, u"cd"_s},
+                              {u"writable"_s, false},
+                              {u"boot"_s, u"none"_s},
+                              {u"restart"_s, false}}));
+        QCOMPARE(QJsonDocument::fromJson(core::imageBody(u"a.iso"_s, u"Build server"_s, mark)).object(),
+                 QJsonObject({{u"image"_s, u"a.iso"_s}, {u"machine"_s, u"Build server"_s}, {u"listed"_s, mark}}));
     }
 
     void anImagesNameIsOneTheServerTakes_data()

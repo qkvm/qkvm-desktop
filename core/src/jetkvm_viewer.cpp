@@ -212,6 +212,12 @@ void JetKvmViewer::asked(bool keys, std::function<void(base::Result<QPointer<Jet
         return;
     }
     m_wantedAt = now();
+    // A person asks (keys, a press, its media) while another JetKVM answers at its address: asked again at once, as a
+    // window that is opened is (the web's _run: "a button pressed asks at once, and is refused as long as it is so"),
+    // and not only at the cards' sameJetKvmEveryMs.
+    if (m_device != nullptr && m_device->another()) {
+        m_retryAt = 0;
+    }
     m_inputWaiting.append(Asking{keys, std::move(done)});
     if (!m_inputWithin.isActive()) {
         m_inputWithin.start(m_pace.inputReadyWithinMs);
@@ -433,15 +439,15 @@ void JetKvmViewer::askForAKeyFrame()
     }
 }
 
-bool JetKvmViewer::askStatus(std::function<void(const std::optional<Status>&)> done)
+bool JetKvmViewer::askStatus(StatusTold done)
 {
     if (!isOpen()) {
         return false;
     }
-    // The four at once, and the power board's only where its extension is on (the web's _read_status).
+    // The five at once, and the power board's only where its extension is on (the web's _read_status).
     struct Asking {
         Said said;
-        std::function<void(const std::optional<Status>&)> done;
+        StatusTold done;
         int events = 0; // what it had said of its input in events when this was asked (10f)
     };
     auto asking = std::make_shared<Asking>();
@@ -459,17 +465,18 @@ bool JetKvmViewer::askStatus(std::function<void(const std::optional<Status>&)> d
             return;
         }
         if (!atx || on == nullptr) {
-            asking->done(here->made(asking->said, std::nullopt, on, asking->events));
+            asking->done(here->made(asking->said, std::nullopt, on, asking->events), asking->said[4]);
             return;
         }
         on->call(u"getATXState"_s, {}, [here, asking, on](const base::Result<json::Value>& power) {
             if (here != nullptr) {
-                asking->done(here->made(asking->said, power, on, asking->events));
+                asking->done(here->made(asking->said, power, on, asking->events), asking->said[4]);
             }
         });
     };
-    const std::array<QString, 4> methods{u"getVideoState"_s, u"getUSBState"_s, u"getActiveExtension"_s,
-                                         u"getLocalVersion"_s};
+    // (What is in its drive, and whether it has one, is its driver's to read: jetkvm_media.cpp.)
+    const std::array<QString, 5> methods{u"getVideoState"_s, u"getUSBState"_s, u"getActiveExtension"_s,
+                                         u"getLocalVersion"_s, u"getVirtualMediaState"_s};
     for (std::size_t which = 0; which < methods.size(); ++which) {
         on->call(methods[which], {}, [asking, which, whenAll](const base::Result<json::Value>& said) {
             asking->said[which] = said;
@@ -488,7 +495,8 @@ std::optional<Status> JetKvmViewer::made(const Said& said, const std::optional<b
     const auto failedAs = [](const std::optional<base::Result<json::Value>>& one, std::string_view code) {
         return one && !*one && one->error().code == code;
     };
-    const auto& [video, usb, extension, version] = said;
+    const auto& [video, usb, extension, version, drive] = said;
+    static_cast<void>(drive); // (its driver's to read: an "in_use" of it counts, below)
     if (m_kept->aside || std::ranges::any_of(said, [&](const auto& one) { return failedAs(one, "in_use"); })) {
         status.state = u"busy"_s;
         status.errorCode = u"in_use"_s;

@@ -174,6 +174,18 @@ private slots:
         many.erase(many.begin() + lastRect, many.begin() + lastRect + 8);
         many.resize(many.size() - 3);
         QVERIFY(screen::read(many).has_value());
+        // As many rectangles as a packet holds, each the whole of the largest screen, and nothing after their heads:
+        // more pixels than any packet is long (counted against it as they are added: where a size is of 32 bits,
+        // their sum would run past what it counts).
+        std::vector<std::byte> huge = bytes({'Q', 'K', 'S', 'C', 0, 0x10, 0, 0x09});
+        huge.push_back(static_cast<std::byte>(screen::mostRects & 0xFF));
+        huge.push_back(static_cast<std::byte>(screen::mostRects >> 8));
+        huge.insert(huge.end(), 2, std::byte{0});
+        for (int one = 0; one < screen::mostRects; ++one) {
+            const std::vector<std::byte> rect = bytes({0, 0, 0, 0, 0, 0x10, 0, 0x09});
+            huge.insert(huge.end(), rect.begin(), rect.end());
+        }
+        QVERIFY(!screen::read(huge).has_value());
         // A head that says a screen nought wide, or nought high, is no head.
         QVERIFY(!screen::headOf(changed(4, 0)).has_value());
         QVERIFY(!screen::headOf(changed(6, 0)).has_value());

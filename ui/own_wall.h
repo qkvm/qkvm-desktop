@@ -14,6 +14,7 @@
 #include <qkvm/core/kvm_adding.h>
 #include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/local_wall.h>
+#include <qkvm/core/proxmox_adding.h>
 #include <qkvm/core/secrets.h>
 #include <qkvm/core/settings.h>
 #include <qkvm/core/wall_exchange.h>
@@ -42,12 +43,16 @@ public:
             QObject* parent = nullptr);
 
     core::LocalWall& wall() { return m_wall; }
+    // Whether a Proxmox is being asked for a box at this moment: a listing, or an add of a run (ProxmoxAdding::busy).
+    bool asksAProxmox() const { return m_proxmox.busy(); }
     void useAppLock(AppLock& lock);
 
     // The box of one window that adds a KVM: what it asks for is done, and it is told what came
     // of it, and no other box is. One KVM is added at a time, whichever window asks: a second box
     // is told to wait. Only the box whose KVM is being asked can give that up; and a box that
     // goes while its KVM is being asked has given it up. The view may go before this does.
+    // Virtual machines on Proxmox VE (wave 2) the same way, by core::ProxmoxAdding: a token's guests listed to the box
+    // to tick (the one the address names added at once), and the ticked ones added one after the other, each said.
     void serve(AddKvmView& view);
     // The box of one window that changes a KVM of the wall: what it asks for is done, and it is
     // told what came of it, and no other box is. One KVM is changed at a time, and one
@@ -119,7 +124,8 @@ public:
     // What the box says of a KVM that was added, as the page says it: what it is called, what
     // it says it is, and that it is spoken to in the clear where it is. `called`: as a sentence
     // calls it (calledInASentence), and never its name as it is.
-    static QString saidOf(const core::KvmAdding::Added& added, const QString& called);
+    // (`aVncServer`: its family's words for one spoken to in the clear.)
+    static QString saidOf(const core::KvmAdding::Added& added, const QString& called, bool aVncServer = false);
     // What a sentence of the screens calls a KVM of the wall, by the wall's name for it: as the
     // wall's own sentences call one (core::LocalWall::calledInASentence: its name set off so
     // that it cannot read as the sentence's own words, or where it is). The one way the screens
@@ -158,6 +164,9 @@ private:
     using Offered = EditKvmView::Offer;
 
     void giveUpFor(const QObject* box);
+    // The ticked guests of what a box listed, added one after the other (the page's "Add the ticked ones"), and the box
+    // told of each, and of the end.
+    void addGuests(const QPointer<AddKvmView>& box, const core::ProxmoxAdding::Typed& typed, QList<qint64> vmids);
     // What a box that changes a KVM had asked is given up, and the box is told what came of it;
     // or it is ended there and then, for a box that hears nothing any more: see
     // serve(EditKvmView&).
@@ -189,6 +198,15 @@ private:
 
     core::LocalWall m_wall;
     core::KvmAdding m_adding;
+    // Proxmox guests: what adds them, and what each box last listed of a Proxmox's (its guests are added from that, and
+    // from no other box's: what another box listed may be known by another certificate, shown there after this box
+    // listed it. Outside review of 0.2.0, 3.7). Kept until the box goes.
+    core::ProxmoxAdding m_proxmox;
+    QHash<const QObject*, core::ProxmoxAdding::Offered> m_listed;
+    // The box whose listing, or run of adds, is under way; nothing: none is (review c9b-1, L2). Compared as m_asking
+    // is, and told it gave up where it is still there.
+    const QObject* m_proxmoxFor = nullptr;
+    QPointer<AddKvmView> m_proxmoxBox;
     // The box whose KVM is being asked; nothing: none is. (Compared, and never looked into: the
     // box may be gone.)
     const QObject* m_asking = nullptr;

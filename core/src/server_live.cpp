@@ -20,19 +20,19 @@ constexpr int farthest = 32767;
 
 } // namespace
 
-ServerLive::ServerLive(ServerScreen* screen, Limits limits, QObject* parent)
+ServerLive::ServerLive(ServerConsole* screen, Limits limits, QObject* parent)
     : Live(parent), m_screen(screen), m_limits(limits)
 {
     if (m_screen != nullptr) {
         // A session that ends: the next begins with the whole screen, and keyboard and mouse went with it.
-        connect(m_screen, &ServerScreen::ended, this, [this](const QString& code, const QString& message) {
+        connect(m_screen, &ServerConsole::ended, this, [this](const QString& code, const QString& message) {
             m_wholeNext = true;
             lose(code.isEmpty() ? u"dropped"_s : code, message);
             m_lettingGo = false; // (a controller lets go of what a session had down as it ends)
         });
         // Something this one let go of may have stayed down: told while it holds keyboard and mouse, and after they
         // went (given back, taken away, closed from here) where it had something down then.
-        connect(m_screen, &ServerScreen::leftDown, this, [this] {
+        connect(m_screen, &ServerConsole::leftDown, this, [this] {
             if (m_turn || m_lettingGo) {
                 emit leftDown();
             }
@@ -148,6 +148,7 @@ void ServerLive::look()
     if (m_closed || m_screen == nullptr) {
         return;
     }
+    m_screen->liveSeen();
     static_cast<void>(m_screen->look());
     // The turn is over where the console went to somebody else or ended: said as soon as it is seen.
     if (m_turn) {
@@ -205,7 +206,7 @@ void ServerLive::askControl(bool on)
     }
     m_asking = true;
     m_givenBackWhileAsking = false;
-    m_screen->askForInput([self = QPointer<ServerLive>(this)](base::Result<int> turn) {
+    m_screen->askForInput([self = QPointer<ServerLive>(this)](base::Result<ServerConsole::Turn> turn) {
         // Decided a turn of the loop later: the screen may answer from inside the asking (its session holds the
         // console already), before a giving back said right after the asking.
         if (self == nullptr) {
@@ -219,7 +220,7 @@ void ServerLive::askControl(bool on)
     });
 }
 
-void ServerLive::answered(const base::Result<int>& turn)
+void ServerLive::answered(const base::Result<ServerConsole::Turn>& turn)
 {
     if (m_closed) {
         return;
@@ -232,6 +233,12 @@ void ServerLive::answered(const base::Result<int>& turn)
         still = base::Error{"dropped", "The server's console was closed"};
     } else if (turn) {
         still = m_screen->inTurn(turn.value());
+    }
+    // (And not while whoever made this says no: asked now, as the turn would be this one's, whenever it was asked.)
+    if (turn && still && !givenBack && m_refused) {
+        if (const std::optional<base::Error> refused = m_refused()) {
+            still = *refused;
+        }
     }
     if (!turn) {
         tell(false, QString::fromStdString(turn.error().code), QString::fromStdString(turn.error().message));

@@ -11,7 +11,9 @@
 #include <qkvm/base/result.h>
 #include <qkvm/core/jetkvm_device.h>
 #include <qkvm/core/kvmd_device.h>
+#include <qkvm/core/proxmox_device.h>
 #include <qkvm/core/redfish_device.h>
+#include <qkvm/core/vnc_device.h>
 
 namespace qkvm::core {
 
@@ -22,6 +24,10 @@ struct DriverPaces {
     JetKvmDevice::Pace jetkvm;
     // A server's management controller's (M7).
     RedfishDevice::Pace redfish;
+    // A VNC server's (desktop 0.2.0): the web's own times, its sign-ins counted where the kvmd's are.
+    VncDevice::Pace vnc;
+    // A Proxmox guest's (wave 2): its own, the web's (proxmox.py), its sign-ins counted where the kvmd's are.
+    ProxmoxDevice::Pace proxmox;
 
     // A JetKVM's alike a kvmd's wherever the two keep the same time (to be let in, to answer, to be left
     // alone after a failure, the waits after a sign-in, how long a look counts), and its sign-ins counted
@@ -62,8 +68,16 @@ public:
         // The mark what answers is held to; empty: none, and what answers is taken (an addition, an edit with the
         // password typed). A JetKVM's: of the number it is known by (OwnKvm::number, JetKvmDevice::Where). A server's
         // controller's: the mark its server is kept by (OwnKvm::machine, RedfishDevice::Where), which its driver asks
-        // which server answers by before anything goes. Of a kvmd, nothing.
+        // which server answers by before anything goes. A Proxmox guest's: the number it gives for itself
+        // (OwnKvm::machine, rule 30). Of a kvmd, nothing.
         QString machine;
+        // Of a Proxmox guest: its node and its number (OwnKvm::node, vmid); `address` its Proxmox, `user` the token's
+        // ID.
+        QString node;
+        qint64 vmid = 0;
+        // A server's controller's: where its controller keeps the server's computer, as the card keeps it
+        // (OwnKvm::serverPlace, RedfishDevice::Where), beside the mark; none with no mark.
+        ServerPlace serverPlace;
     };
 
     // What it says it is, in the words of both families.
@@ -77,6 +91,8 @@ public:
         // A server's controller: the mark its server is known by after this sign-in (RedfishDevice::machine): the
         // one it was asked by, or the one it took where it was asked by none. Of a KVM, empty.
         QString machine;
+        // ...and where its controller keeps that server's computer after this sign-in (RedfishDevice::serverPlace).
+        ServerPlace serverPlace;
     };
 
     // The sign-in of a KVM of this family (OwnKvm::kind) at `where`, with this password. Of a family
@@ -117,6 +133,8 @@ private:
     std::unique_ptr<KvmdDevice> m_kvmd;
     std::unique_ptr<JetKvmDevice> m_jetKvm;
     std::unique_ptr<RedfishDevice> m_redfish;
+    std::unique_ptr<VncDevice> m_vnc; // (a VNC server's, desktop 0.2.0)
+    std::unique_ptr<ProxmoxDevice> m_proxmox;
 };
 
 } // namespace qkvm::core

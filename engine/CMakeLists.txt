@@ -43,6 +43,8 @@ add_library(qkvm_engine STATIC
     src/gpu_core.cpp
     src/gpu_core.h
     src/scene_core.cpp
+    src/stills_gate.cpp
+    src/stills_gate.h
     src/stream_core.cpp
     src/stream_core.h
     src/surface.cpp
@@ -56,5 +58,8 @@ qkvm_add_test(test_engine_about SOURCES tests/test_about.cpp LIBRARIES qkvm_engi
 # The pool of decoding threads by itself, with work that blocks (it is the engine's own, in src).
 qkvm_add_test(test_engine_decode_pool SOURCES tests/test_decode_pool.cpp LIBRARIES qkvm_engine)
 target_include_directories(test_engine_decode_pool PRIVATE src)
+# A card's still made smaller, by itself, with FFmpeg's headers (it is the engine's own, in src).
+qkvm_add_test(test_engine_shrink SOURCES tests/test_shrink.cpp LIBRARIES qkvm_engine qkvm_ffmpeg)
+target_include_directories(test_engine_shrink PRIVATE src)
 qkvm_add_test(test_engine_scene SOURCES tests/test_scene.cpp LIBRARIES qkvm_engine qkvm_clips dxgi)
 target_compile_definitions(test_engine_scene PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")

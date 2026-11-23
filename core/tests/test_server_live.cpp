@@ -168,10 +168,10 @@ bool keysLetGo(const AmiConsoleByHand& console)
 }
 
 // The turn the screen's keyboard and mouse go in now (the live's own, where it holds them).
-qkvm::base::Result<int> turnOf(ServerScreen& screen)
+qkvm::base::Result<ServerScreen::Turn> turnOf(ServerScreen& screen)
 {
-    auto got = std::make_shared<std::optional<qkvm::base::Result<int>>>();
-    screen.askForInput([got](qkvm::base::Result<int> turn) { *got = std::move(turn); });
+    auto got = std::make_shared<std::optional<qkvm::base::Result<ServerScreen::Turn>>>();
+    screen.askForInput([got](qkvm::base::Result<ServerScreen::Turn> turn) { *got = std::move(turn); });
     QElapsedTimer waited;
     waited.start();
     while (!got->has_value() && waited.elapsed() < 15000) {
@@ -550,6 +550,7 @@ private slots:
         QTest::newRow("let go of in the turn") << 0;
         QTest::newRow("given back") << 1;
         QTest::newRow("closed") << 2;
+        QTest::newRow("taken away") << 3;
     }
 
     void whatMayHaveStayedDownIsSaidBeforeKeyboardAndMouseGo()
@@ -558,12 +559,14 @@ private slots:
         // left in time the screen ends the session (which lets go of it on the server). Whoever held keyboard and
         // mouse is told that something may have stayed down meanwhile, and then that they went; also where the key
         // was let go of as keyboard and mouse were given back, or as the live was closed (after their reading, M3:
-        // before, nothing was said then).
+        // before, nothing was said then); and where somebody at the controller's own page was given the console, and
+        // what was down was let go of then (part 4's second reading: watched as every letting go is; the live is told
+        // after it saw its turn go, at its next look, which comes well within the 2 s that letting go has).
         QFETCH(int, how);
         ServerScreen::Limits limits = Wall::shortLimits();
         limits.inputSayMs = 300;
         limits.mostWaitingBytes = qint64{64} * 1024 * 1024;
-        limits.letGoWithinMs = 600;
+        limits.letGoWithinMs = how == 3 ? 2000 : 600;
         limits.goodbyeWithinMs = 500;
         Wall wall(limits);
         QTRY_VERIFY_WITH_TIMEOUT(wall.pictures.size() >= 2, 10000);
@@ -591,9 +594,12 @@ private slots:
         } else if (how == 1) {
             wall.live->askControl(false);
             QTRY_COMPARE_WITH_TIMEOUT(wall.words, (std::vector<std::string>{"on", "off:", "left_down"}), 10000);
-        } else {
+        } else if (how == 2) {
             wall.live->close();
             QTRY_COMPARE_WITH_TIMEOUT(wall.words, (std::vector<std::string>{"on", "left_down"}), 10000);
+        } else {
+            wall.console.asks.emplace_back(ami::kind::sharing, somebody);
+            QTRY_COMPARE_WITH_TIMEOUT(wall.words, (std::vector<std::string>{"on", "off:in_use", "left_down"}), 10000);
         }
         QTest::qWait(300);
         QCOMPARE(wall.words.size(), how == 2 ? std::size_t{2} : std::size_t{3}); // (and nothing more)

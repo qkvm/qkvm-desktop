@@ -5,10 +5,13 @@ set_target_properties(qkvm_clips PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_include_directories(qkvm_clips PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(qkvm_clips PUBLIC qkvm_base qkvm_engine PRIVATE qkvm_build)
 
-# The measuring rig: the engine in a bare window, with Windows' own counters beside it. No Qt.
-add_executable(qkvm-bench main.cpp meter.cpp meter.h)
+# The measuring rig: the engine in a bare window, with Windows' own counters beside it. No Qt. With --server, a
+# server's own screen made here in ASPEED's format (bmc/tests/aspeed_frames.h), read by the program's own decoder
+# (qkvm_bmc) on a thread of its own and drawn from what changed of it (server_feeder.h, M7 3d).
+add_executable(qkvm-bench main.cpp meter.cpp meter.h server_feeder.cpp server_feeder.h)
 set_target_properties(qkvm-bench PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
-target_link_libraries(qkvm-bench PRIVATE qkvm_build qkvm_engine qkvm_clips pdh)
+target_include_directories(qkvm-bench PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests")
+target_link_libraries(qkvm-bench PRIVATE qkvm_build qkvm_engine qkvm_clips qkvm_bmc pdh)
 
 # The same engine underneath Qt Quick: the program's own window with a wall of made-up machines,
 # their pictures the made clips (SPEC.md, step M1, the sixth part).

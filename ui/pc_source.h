@@ -41,6 +41,8 @@ public:
     core::WallSource& place() override { return m_wall; }
     core::WallFeed& feed() override { return m_feed; }
     core::ScreenWatch* screens() override { return &m_wall.screens(); }
+    // Its kvmd KVMs' virtual media, which the wall has them through (core::LocalWall as a core::MediaPlace).
+    core::MediaPlace* mediaPlace() override { return &m_wall; }
     // Whether its wall is the one that is shown: from enter() to leave(); not at first.
     bool isAtTheWall() const override { return m_atTheWall; }
     // Each KVM fails by itself: the wall as a whole is never away.
@@ -60,8 +62,9 @@ public:
     // Whoever sits at this PC, as its wall knows them: one who may do everything there. There are
     // no accounts on it.
     static core::Account whoever();
-    // Whether everything on its wall is spoken to encrypted: no KVM of it is spoken to over plain
-    // HTTP (its card says which one is). Nothing travels to a server from here.
+    // Whether everything on its wall is spoken to encrypted: no KVM of it is spoken to in the clear
+    // (core::OwnKvm::isInTheClear: over plain HTTP, or a VNC server's vnc://; its card says which
+    // one is). Nothing travels to a server from here.
     bool isEncrypted() const;
 
 signals:

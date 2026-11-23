@@ -49,7 +49,7 @@ struct Rect {
 };
 
 // A packet, read: the screen's size, the rectangles, and the pixels of all of them one after the other (within the
-// packet that was read).
+// packet that was read: `pixels` is a view of its bytes, good only while the packet is, and never kept beyond it).
 struct Changes {
     int width = 0;
     int height = 0;
@@ -128,6 +128,11 @@ inline std::optional<Changes> read(std::span<const std::byte> packet)
             return std::nullopt;
         }
         pixels += std::size_t{3} * static_cast<std::size_t>(rect.width) * static_cast<std::size_t>(rect.height);
+        // (Counted against what the packet holds as it goes: the sum stays within the packet's length, and is never
+        // more than a size counts, where a size is of 32 bits too.)
+        if (pixels > packet.size()) {
+            return std::nullopt;
+        }
         changes.rects.push_back(rect);
     }
     const std::size_t from = headBytes + rectBytes * static_cast<std::size_t>(count);

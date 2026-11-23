@@ -6,7 +6,9 @@ Verifies an offline release signature using only its public key and assembles th
 No private keys, publication, certificate installation, package execution or network requests.
 The payload must be a current release payload as prepare_update_payload.ps1 writes it. The output must be served
 directly at the HTTPS feed address its kind is read from: stable.json, the one compiled into the desktop app, for a
-portable (or MSIX) release; stable-setup.json, beside it, for a Setup release. The command says which.
+portable (or MSIX) release for x64; stable-setup.json, beside it, for a Setup release for x64; and for Windows on Arm
+stable-arm64.json and stable-arm64-setup.json (the program's own rule, core/src/update_release.cpp feedFor). The
+command says which.
 #>
 param(
     [Parameter(Mandatory)][string] $Payload,

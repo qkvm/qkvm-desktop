@@ -23,8 +23,11 @@ if (-not (Test-Path $archive)) { Invoke-WebRequest -Uri 'https://github.com/Mbed
 $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($hash -ne 'a7e8bcbec0e6f761b4af24f25677626b35f762f68eef79c08677a363212d11f6') { throw 'Mbed TLS archive hash mismatch' }
 Write-Output "Verified Mbed TLS SHA-256 $hash"
-if (-not (Test-Path (Join-Path $trialRoot 'mbedtls-3.6.7'))) {
-    & "$env:SystemRoot\System32\tar.exe" -xf $archive -C $trialRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Mbed TLS extraction failed' }
-}
+# (Unpacked anew from the checked archive every time: whatever a build or a person left in the unpacked folder goes with
+# it, and build-cpp-dependencies.ps1 builds only the pinned tree. Mbed TLS's configuration once left its scripts'
+# compiled forms there, 2026-10-19.)
+$unpacked = Join-Path $trialRoot 'mbedtls-3.6.7'
+if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
+& "$env:SystemRoot\System32\tar.exe" -xf $archive -C $trialRoot
+if ($LASTEXITCODE -ne 0) { throw 'Mbed TLS extraction failed' }
 Write-Output 'Dependency sources ready.'

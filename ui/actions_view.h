@@ -75,6 +75,8 @@ public:
     // between one machine and the next, or -1 for a few at a time), and whether what had to be
     // ticked was ticked.
     Q_INVOKABLE void answerWith(bool yes, int paceSeconds, bool ticked);
+    // The no of a question that sends something with its no (a card's No: Ask::noAction), said by its button.
+    Q_INVOKABLE void answerNo();
     // The menu of the machines that are picked on the wall: of several, or of the one.
     Q_INVOKABLE void openPicked();
     // Of what is being done to several: that nothing more be sent; that what can be sent once more
@@ -123,6 +125,7 @@ signals:
     void closeAsked();
     void chosen(const QString& row);
     void answered(bool yes, int paceSeconds, bool ticked);
+    void saidNo();
     void pickedAsked();
     void runStopAsked();
     void runRetryAsked();

@@ -1,19 +1,18 @@
 #include <qkvm/core/jetkvm_connection.h>
 
 #include <algorithm>
-#include <cmath>
 #include <utility>
 
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QJsonDocument>
 
+#include "jetkvm_words.h"
 #include "rtc_sdp.h"
 
 #include <qkvm/base/clock.h>
 #include <qkvm/core/device_line.h>
 #include <qkvm/core/jetkvm_device.h>
-#include <qkvm/core/kvmd_answers.h>
 #include <qkvm/core/video_diagnostics.h>
 
 using namespace Qt::StringLiterals;
@@ -33,52 +32,10 @@ constexpr qsizetype largestHid = 64;
 constexpr qsizetype earliestKept = 40;
 // The largest address the offering side takes (WebRtcOffer::candidate).
 constexpr qsizetype largestCandidate = 2048;
-// What its input may say of its size and rate, at the most (clamped).
-constexpr int largestSide = 16384;
-constexpr double mostFps = 1000;
 
 // The JetKVM's own words where they are the web's (jetkvm.py).
 const char* const inUseSentence =
     "Someone is using this JetKVM's own console. It shows its picture to one viewer at a time.";
-
-// A device's text as one short line, or nothing (kvmd::plain, for what was read by the book).
-QString plainOf(const json::Value* value, qsizetype limit)
-{
-    if (value == nullptr) {
-        return {};
-    }
-    if (value->isText()) {
-        return kvmd::plain(QJsonValue(value->text), limit);
-    }
-    if (value->isNumber()) {
-        return kvmd::plain(QJsonValue(value->number), limit);
-    }
-    return {};
-}
-
-// A number it said, within reason: clamped to [0, most]; nothing that is no number is 0.
-double clampedNumber(const json::Value* value, double most)
-{
-    if (value == nullptr || !value->isNumber() || !std::isfinite(value->number)) {
-        return 0;
-    }
-    return std::clamp(value->number, 0.0, most);
-}
-
-// Whether a text the JetKVM said on `rpc` is the word that another viewer took it: read on the library's
-// thread, so pure (json::parse is).
-bool isOtherSessionConnected(QByteArrayView text)
-{
-    if (!text.contains("otherSessionConnected")) {
-        return false;
-    }
-    const base::Result<json::Value> said = json::parse(text);
-    if (!said || !said.value().isObject()) {
-        return false;
-    }
-    const json::Value* method = said.value().find(u"method");
-    return method != nullptr && method->isText() && method->text == u"otherSessionConnected"_s;
-}
 
 } // namespace
 
@@ -174,7 +131,7 @@ void JetKvmConnection::lineCame(DeviceLine* line)
     WebRtcOffer::Setup setup;
     setup.h264Formats = formats;
     setup.channels = {{"rpc", true, largestRpc}, {"hidrpc", false, largestHid}};
-    setup.stopsOn = &isOtherSessionConnected;
+    setup.stopsOn = &jetkvm_words::otherSessionConnected;
     setup.mostCandidates = 40; // the web's MAX_CANDIDATES
     // (This PC's loopback only where the JetKVM is spoken to there: a test's stand-in.)
     setup.loopbackAllowed = m_device != nullptr && spokenToOnThisPc(m_device->address());
@@ -252,69 +209,44 @@ void JetKvmConnection::read(const QByteArray& text)
     if (m_over) {
         return;
     }
-    // What is no JSON object (a "pong") is let go, as is what is not for this connection.
-    const base::Result<json::Value> parsed = json::parse(text);
-    if (!parsed || !parsed.value().isObject()) {
+    // (Read as jetkvm_words.cpp reads it: what is no JSON object, a "pong", is let go, as is what is not for this
+    // connection.)
+    using Signalling = jetkvm_words::Signalling;
+    const Signalling said = jetkvm_words::signalling(text, m_answered);
+    switch (said.kind) {
+    case Signalling::Kind::Nothing:
         return;
-    }
-    const json::Value& message = parsed.value();
-    const json::Value* type = message.find(u"type");
-    if (!m_answered) {
-        const json::Value* error = message.find(u"error");
-        if (type == nullptr && error != nullptr && !(error->kind == json::Value::Kind::Null) &&
-            !(error->isFlag() && !error->flag) && !(error->isText() && error->text.isEmpty())) {
-            const QString words = plainOf(error, 200);
-            finish(u"bad_response"_s,
-                   u"The JetKVM refused the request for video: "_s + (words.isEmpty() ? u"no reason given"_s : words));
-            return;
-        }
-        if (type != nullptr && type->isText() && type->text == u"answer"_s) {
-            const json::Value* data = message.find(u"data");
-            answered(data != nullptr ? *data : json::Value{});
-            return;
-        }
-    }
-    if (type != nullptr && type->isText() && type->text == u"new-ice-candidate"_s) {
-        // Its address; the mid it says is let go (the library takes the bundle's). One that comes before the
-        // answer is kept for it (as the web's _await_answer takes them in either order), a few at the most.
-        const json::Value* data = message.find(u"data");
-        const json::Value* candidate = data != nullptr && data->isObject() ? data->find(u"candidate") : nullptr;
-        if (candidate == nullptr || !candidate->isText() || !m_peer) {
+    case Signalling::Kind::Refused:
+        finish(u"bad_response"_s, u"The JetKVM refused the request for video: "_s +
+                                      (said.refusal.isEmpty() ? u"no reason given"_s : said.refusal));
+        return;
+    case Signalling::Kind::Answer:
+        answered(said.data);
+        return;
+    case Signalling::Kind::Address:
+        // Its address. One that comes before the answer is kept for it (as the web's _await_answer takes them in
+        // either order), a few at the most.
+        if (!m_peer) {
             return;
         }
         if (!m_answered) {
             // (Only one that may be taken later, 2048 bytes at most, is kept: forty of a line's largest were
             // kept before, the reading of a9b950b, L4.)
-            const QByteArray address = candidate->text.toUtf8();
-            if (m_early.size() < earliestKept && address.size() <= largestCandidate) {
-                m_early.append(address);
+            if (m_early.size() < earliestKept && said.address.size() <= largestCandidate) {
+                m_early.append(said.address);
             }
             return;
         }
-        m_peer->candidate(candidate->text.toUtf8());
+        m_peer->candidate(said.address);
+        return;
     }
 }
 
 void JetKvmConnection::answered(const json::Value& data)
 {
     const auto unreadable = [this] { finish(u"bad_response"_s, u"The JetKVM sent an answer that cannot be read"_s); };
-    if (!data.isText()) {
-        unreadable();
-        return;
-    }
-    // (Its size before it is decoded: the reading of a9b950b, L4.)
-    if (data.text.size() > qsizetype{256} * 1024) {
-        unreadable();
-        return;
-    }
-    const auto decoded = QByteArray::fromBase64Encoding(data.text.toLatin1(), QByteArray::AbortOnBase64DecodingErrors);
-    if (!decoded) {
-        unreadable();
-        return;
-    }
-    const base::Result<json::Value> description = json::parse(decoded.decoded);
-    const json::Value* sdp = description && description.value().isObject() ? description.value().find(u"sdp") : nullptr;
-    if (sdp == nullptr || !sdp->isText() || sdp->text.isEmpty() || !m_peer || !m_peer->answer(sdp->text.toUtf8())) {
+    const std::optional<QByteArray> sdp = jetkvm_words::answerSdp(data);
+    if (!sdp || !m_peer || !m_peer->answer(*sdp)) {
         unreadable();
         return;
     }
@@ -338,17 +270,12 @@ void JetKvmConnection::heard(const WebRtcOffer::Said& word)
     if (word.channel != rpcChannel) {
         return;
     }
-    const base::Result<json::Value> parsed = json::parse(word.bytes);
-    if (!parsed || !parsed.value().isObject()) {
-        return;
-    }
-    const json::Value& said = parsed.value();
+    // (Read as jetkvm_words.cpp reads it.)
+    using Rpc = jetkvm_words::Rpc;
+    Rpc said = jetkvm_words::rpc(word.bytes);
     // An answer: only to a number of ours that waits, a whole one (w14 row 1: in any order).
-    if (const json::Value* id = said.find(u"id"); id != nullptr && id->isNumber()) {
-        if (!id->whole || id->number < 1 || id->number > 9.0e15) {
-            return;
-        }
-        const auto number = static_cast<qint64>(id->number);
+    if (said.kind == Rpc::Kind::Answer) {
+        const qint64 number = said.id;
         // (A report's answer, whoever waits for it: keys do not change road while one may still be done.)
         m_unanswered.remove(number);
         const auto waiting = m_waiting.find(number);
@@ -373,74 +300,59 @@ void JetKvmConnection::heard(const WebRtcOffer::Said& word)
         Waiting call = std::move(waiting.value());
         m_waiting.erase(waiting);
         settled(call, true);
-        const json::Value* error = said.find(u"error");
-        if (error != nullptr && error->kind != json::Value::Kind::Null) {
-            QString words;
-            if (error->isObject()) {
-                const json::Value* detail = error->find(u"data");
-                words = plainOf(detail, 200);
-                if (words.isEmpty()) {
-                    words = plainOf(error->find(u"message"), 200);
-                }
-            } else {
-                words = plainOf(error, 200);
-            }
+        if (said.refused) {
             tell(std::move(call.done),
-                 base::Error{"action_failed", (words.isEmpty() ? u"The JetKVM refused"_s : words).toStdString()});
+                 base::Error{"action_failed",
+                             (said.words.isEmpty() ? u"The JetKVM refused"_s : said.words).toStdString()});
             return;
         }
-        const json::Value* result = said.find(u"result");
-        tell(std::move(call.done), result != nullptr ? *result : json::Value{});
+        tell(std::move(call.done), std::move(said.result));
         return;
     }
-    if (said.find(u"id") != nullptr && said.find(u"method") == nullptr) {
-        return; // (an answer under a number that is none of ours: nothing)
-    }
-    const json::Value* method = said.find(u"method");
-    if (method == nullptr || !method->isText()) {
-        return;
-    }
-    const json::Value* params = said.find(u"params");
-    if (method->text == u"otherSessionConnected"_s) {
+    switch (said.kind) {
+    case Rpc::Kind::OtherSession:
         // Another viewer took it: once (a device may say it as often as it likes). Nothing more of ours goes to it,
         // but the letting go of what it may still do of ours (rule 28).
         if (!std::exchange(m_taken, true)) {
             letGoAtHandOver();
             emit takenByAnother();
         }
-    } else if (method->text == u"videoInputState"_s && params != nullptr && params->isObject()) {
+        break;
+    case Rpc::Kind::Video:
         ++m_videoEvents; // (an answer to getVideoState asked before this is older than it: 10f)
-        const json::Value* ready = params->find(u"ready");
-        if (ready != nullptr && ready->isFlag()) {
+        if (said.ready) {
             // Back after it said there was none: the first picture of it is waited for from this moment.
-            if (ready->flag && m_video.ready == std::optional<bool>(false)) {
+            if (*said.ready && m_video.ready == std::optional<bool>(false)) {
                 m_video.signalAtUs = word.arrivedUs;
             }
-            m_video.ready = ready->flag;
+            m_video.ready = said.ready;
         }
-        m_video.width = static_cast<int>(clampedNumber(params->find(u"width"), largestSide));
-        m_video.height = static_cast<int>(clampedNumber(params->find(u"height"), largestSide));
-        m_video.fps = clampedNumber(params->find(u"fps"), mostFps);
+        m_video.width = said.width;
+        m_video.height = said.height;
+        m_video.fps = said.fps;
         emit videoSaid();
-    } else if (method->text == u"usbState"_s && params != nullptr && params->isText()) {
-        m_usb = plainOf(params, 40);
-    } else if (method->text == u"atxState"_s && params != nullptr && params->isObject()) {
-        m_atx = *params;
-    } else if (method->text == u"localVersion"_s && params != nullptr && params->isObject()) {
-        m_version = plainOf(params->find(u"appVersion"), 40);
-    } else if (method->text == u"keysDownState"_s && params != nullptr && params->isObject() && m_road == Road::Hid) {
-        // (Where a JetKVM says its keyboard here rather than on hidrpc: the same word, taken the same way.)
-        const json::Value* keys = params->find(u"keys");
-        if (keys != nullptr && keys->isList() && keys->list.size() <= 16) {
+        break;
+    case Rpc::Kind::Usb:
+        m_usb = said.words;
+        break;
+    case Rpc::Kind::Atx:
+        m_atx = said.result;
+        break;
+    case Rpc::Kind::Version:
+        m_version = said.words;
+        break;
+    case Rpc::Kind::Keys:
+        // (Where a JetKVM says its keyboard here rather than on hidrpc: taken the same way, on hidrpc's road.)
+        if (m_road == Road::Hid) {
             Keyboard keyboard;
-            keyboard.modifiers = static_cast<int>(clampedNumber(params->find(u"modifier"), 255));
-            for (const json::Value& key : keys->list) {
-                if (const int usage = static_cast<int>(clampedNumber(&key, 255)); usage != 0) {
-                    keyboard.keys.append(usage);
-                }
-            }
+            keyboard.modifiers = said.modifiers;
+            keyboard.keys = said.keys;
             keysSaid(keyboard);
         }
+        break;
+    case Rpc::Kind::Nothing:
+    case Rpc::Kind::Answer:
+        break;
     }
     // (The rest is let go.)
 }
@@ -491,6 +403,7 @@ std::optional<qint64> JetKvmConnection::ask(const QString& method, const QJsonOb
         m_pressing.insert(id, *waiting.press);
     }
     waiting.id = id;
+    waiting.tooLargeBefore = refused().tooLarge;
     m_waiting.insert(id, std::move(waiting));
     // Its time: where its answer came first, nothing waits under its number by then.
     QTimer::singleShot(withinMs, this, [this, id] {
@@ -501,7 +414,13 @@ std::optional<qint64> JetKvmConnection::ask(const QString& method, const QJsonOb
         Waiting call = std::move(found.value());
         m_waiting.erase(found);
         settled(call, false);
-        tell(std::move(call.done), base::Error{"timeout", "The JetKVM did not answer in time"});
+        // (A message larger than `rpc` takes came meanwhile, and was let go: its answer, for all that is known. Said,
+        // so that a list too long for one message is told as that, and not as a JetKVM gone quiet: review c8b-1 L7.)
+        const bool tooLarge = refused().tooLarge > call.tooLargeBefore;
+        tell(std::move(call.done),
+             base::Error{"timeout", tooLarge ? "The JetKVM did not answer in time: what it sent meanwhile was larger "
+                                               "than qKVM takes in one message (64 KiB)"
+                                             : "The JetKVM did not answer in time"});
     });
     return id;
 }

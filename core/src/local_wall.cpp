@@ -1,12 +1,15 @@
 #include <qkvm/core/local_wall.h>
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <list>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include <QCoreApplication>
+#include <QJsonObject>
 #include <QPointer>
 #include <QRandomGenerator>
 #include <QSet>
@@ -17,9 +20,11 @@
 #include <qkvm/core/kvm_adding.h>
 #include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/kvm_probe.h>
+#include <qkvm/core/proxmox_device.h>
 #include <qkvm/core/redfish_device.h>
 #include <qkvm/core/setup_overrides.h>
 #include <qkvm/core/tls.h>
+#include <qkvm/core/vnc_device.h>
 #include <qkvm/core/wiped.h>
 
 using namespace Qt::StringLiterals;
@@ -84,6 +89,25 @@ std::optional<base::Error> notAnAddress(const QString& address)
     return std::nullopt;
 }
 
+// ...and of a KVM of its family: a VNC server's as vnc::addressFrom writes it (vnc://, vncs://), every other family's
+// as a KVM's address is (desktop 0.2.0).
+std::optional<base::Error> notAnAddressOf(const OwnKvm& kvm)
+{
+    if (kvm.kind != "vnc"_L1) {
+        return vnc::namesOne(kvm.address)
+                   ? std::optional<base::Error>(base::Error{"invalid", "A KVM's address is no VNC server's"})
+                   : notAnAddress(kvm.address);
+    }
+    const base::Result<QString> asWritten = vnc::addressFrom(kvm.address);
+    if (!vnc::namesOne(kvm.address) || !asWritten) {
+        return base::Error{"invalid", "Not the address of a VNC server"};
+    }
+    if (asWritten.value() != kvm.address) {
+        return base::Error{"invalid", "This address is not written the way the wall keeps one"};
+    }
+    return std::nullopt;
+}
+
 base::Error passwordNeeded()
 {
     return {"password_needed",
@@ -113,6 +137,8 @@ base::Error stopped()
 // What is said beside the web's sentence where a second card of a server is refused: the web's page would offer to
 // keep both, and this program does not (the owner's word, M7 Q2).
 constexpr QLatin1StringView oneCardOfAServer{" A server has one card on this PC's wall."};
+// ...and a Proxmox guest (the web refuses one guest twice: same_device).
+constexpr QLatin1StringView oneCardOfAGuest{" A guest has one card on this PC's wall."};
 
 // And this program's own, where the server has no words: there a certificate is looked at only
 // where a device has one.
@@ -194,6 +220,16 @@ base::Error notInTheClear()
             "password would travel unencrypted. To use it that way, remove it from the wall and add it again."};
 }
 
+// The same of a VNC server, in its family's words: VNC authentication sends no password, but an answer it can be worked
+// out from (outside review c9a-3, L2).
+base::Error vncNotInTheClear()
+{
+    return {"not_in_the_clear",
+            "This VNC server is on the wall over TLS (vncs://). It is not changed to vnc:// at the same address, where "
+            "what is seen and typed could be read on the way, and its password worked out from what goes. To use it "
+            "that way, remove it from the wall and add it again."};
+}
+
 // A certificate's SHA-256 is this long. What is said to be one and is not that long is none.
 constexpr qsizetype sha256Bytes = 32;
 
@@ -220,7 +256,10 @@ bool keptPasswordMayGoTo(const OwnKvm& there, const OwnKvm& known)
     }
     // Somewhere else, the KVM is the one that shows the certificate it is known by, and nothing
     // else is: so there has to be such a certificate, and a line on which one is shown, here
-    // and there.
+    // and there. Over HTTPS alone: not a VNC server's vncs://, whose certificate is often not one
+    // server's (a TLS proxy before several displays of a host, each with a password of its own;
+    // one certificate on every board of a maker). The web's known_again is for https:// alone, and
+    // a VNC server moved takes its password typed again (outside review c9a-2, M2).
     const auto encrypted = [](const OwnKvm& kvm) { return QUrl(kvm.address).scheme() == "https"_L1; };
     return encrypted(known) && encrypted(there) && known.knownByCertificate && known.certificate.size() == sha256Bytes;
 }
@@ -271,6 +310,12 @@ public:
         m_bytes.append(lines);
         m_bytes.append(QByteArrayView(signs));
     }
+    // One record whole, as it stands in a record of two (makeOne).
+    explicit KeptAs(QByteArrayView record)
+    {
+        m_bytes.reserve(record.size());
+        m_bytes.append(record);
+    }
     KeptAs(const KeptAs&) = delete;
     KeptAs& operator=(const KeptAs&) = delete;
     KeptAs(KeptAs&&) = delete;
@@ -285,13 +330,113 @@ private:
     WipedOnLeaving<QByteArray> m_over{m_bytes};
 };
 
-// The password in a secret, where the secret was saved for this KVM as it is. Nothing where it
-// was saved for another address or another certificate, is of another form, or is none at all:
-// then the KVM has no password, and nothing is made of what is there.
-QString passwordIn(const QByteArray& secret, const OwnKvm& kvm)
+// The first line of a KVM's secret that holds two of the records above, while a change takes its
+// password to another address or certificate (alter): this mark, a line feed, the length of the
+// first record in decimal digits, a line feed, and the two records one after the other, each whole,
+// the one saved for the KVM as it was first. So whichever of the two the settings say the KVM is
+// when the change is cut off (the program ended, Windows refused the next writing), the store has
+// its password for it (the outside review of the wave 2 desktop, 6.1). No form before reads it as
+// one of its own: it begins with another line.
+constexpr QByteArrayView secretMarkOfTwo = "QKVM-KVM-2+";
+
+// The two records of a secret of two, as views of it; nothing where it is not one, or not whole.
+std::optional<std::pair<QByteArrayView, QByteArrayView>> recordsIn(QByteArrayView secret)
+{
+    if (!secret.startsWith(secretMarkOfTwo) || secret.size() <= secretMarkOfTwo.size() ||
+        secret.at(secretMarkOfTwo.size()) != '\n') {
+        return std::nullopt;
+    }
+    const QByteArrayView rest = secret.sliced(secretMarkOfTwo.size() + 1);
+    // (Four digits at the most, the first of them no nought: no record is longer than the store keeps.)
+    const qsizetype end = rest.indexOf('\n');
+    if (end < 1 || end > 4 || rest.at(0) == '0') {
+        return std::nullopt;
+    }
+    qsizetype length = 0;
+    for (const char digit : rest.first(end)) {
+        if (digit < '0' || digit > '9') {
+            return std::nullopt;
+        }
+        length = length * 10 + (digit - '0');
+    }
+    const QByteArrayView records = rest.sliced(end + 1);
+    if (length >= records.size()) {
+        return std::nullopt;
+    }
+    // Each of the two begins as a record does: a length a byte short or long of the first is no record of two, and
+    // reads as none (where the first is the KVM's own, it cut its password, or added the second's lines to it: review
+    // cx6-1, L4).
+    const auto beginsAsOne = [](QByteArrayView record) {
+        return record.size() > secretMark.size() && record.startsWith(secretMark) &&
+               record.at(secretMark.size()) == '\n';
+    };
+    const QByteArrayView first = records.first(length);
+    const QByteArrayView second = records.sliced(length);
+    if (!beginsAsOne(first) || !beginsAsOne(second)) {
+        return std::nullopt;
+    }
+    return std::pair(first, second);
+}
+
+// The record in a secret that was saved for this KVM as it is: the secret itself, or one of the two
+// it holds. Nothing where none was.
+QByteArrayView recordFor(QByteArrayView secret, const OwnKvm& kvm)
 {
     const std::optional<QByteArray> lines = savedFor(kvm);
-    if (!lines || !secret.startsWith(*lines)) {
+    if (!lines) {
+        return {};
+    }
+    if (secret.startsWith(*lines)) {
+        return secret;
+    }
+    if (const auto two = recordsIn(secret)) {
+        for (const QByteArrayView one : {two->first, two->second}) {
+            if (one.startsWith(*lines)) {
+                return one;
+            }
+        }
+    }
+    return {};
+}
+
+// What is kept for a KVM's password while a change takes it elsewhere: the record kept for it as it
+// was and the one for it as it is to be, in one secret of two (secretMarkOfTwo), put together in room
+// that is asked for once and written over when this goes, as KeptAs.
+class KeptTogether {
+public:
+    KeptTogether(QByteArrayView before, QByteArrayView after)
+    {
+        const QByteArray length = QByteArray::number(before.size());
+        m_bytes.reserve(secretMarkOfTwo.size() + 1 + length.size() + 1 + before.size() + after.size());
+        m_bytes.append(secretMarkOfTwo);
+        m_bytes.append('\n');
+        m_bytes.append(length);
+        m_bytes.append('\n');
+        m_bytes.append(before);
+        m_bytes.append(after);
+    }
+    KeptTogether(const KeptTogether&) = delete;
+    KeptTogether& operator=(const KeptTogether&) = delete;
+    KeptTogether(KeptTogether&&) = delete;
+    KeptTogether& operator=(KeptTogether&&) = delete;
+    ~KeptTogether() = default;
+
+    const QByteArray& bytes() const noexcept { return m_bytes; }
+
+private:
+    QByteArray m_bytes;
+    WipedOnLeaving<QByteArray> m_over{m_bytes};
+};
+
+// The password in a secret, where the secret was saved for this KVM as it is (or one of the two it
+// holds was: recordFor). Nothing where it was saved for another address or another certificate, is
+// of another form, or is none at all: then the KVM has no password, and nothing is made of what is
+// there.
+QString passwordIn(QByteArrayView secret, const OwnKvm& kvm)
+{
+    const std::optional<QByteArray> lines = savedFor(kvm);
+    const QByteArrayView record = recordFor(secret, kvm);
+    if (!lines || !record.startsWith(*lines)) {
         return {};
     }
     // Every sign of it, as it was given. (QString::fromUtf8 takes a first U+FEFF for a mark of
@@ -299,7 +444,7 @@ QString passwordIn(const QByteArray& secret, const OwnKvm& kvm)
     // Bytes that are no text are no password this program wrote.
     QStringDecoder signs(QStringConverter::Utf8,
                          QStringConverter::Flag::ConvertInitialBom | QStringConverter::Flag::Stateless);
-    QString password = signs.decode(QByteArrayView(secret).sliced(lines->size()));
+    QString password = signs.decode(record.sliced(lines->size()));
     // What was read is written over on every way out of here but the one that hands it on: where
     // its signs are found wrong, and where something throws. (What Qt's decoder holds while it
     // decodes is Qt's, and is not reached from here.)
@@ -321,6 +466,24 @@ QString keptPasswordOf(SecretStore& secrets, const OwnKvm& kvm)
     QByteArray secret = secrets.kept(LocalWall::secretOf(kvm.id));
     const WipedOnLeaving over(secret);
     return passwordIn(secret, kvm);
+}
+
+// A record of two that a change cut off left behind (the program ended between the settings' writing and the last
+// keeping, or Windows did not take that keeping: alter), made one again: the record in it saved for the KVM as the list
+// has it, alone, taken from the secret read whole. Nothing where the secret is no record of two, or holds none for the
+// KVM as it is: it stays as it is, used for nothing, as a record for another place does. Where Windows does not take
+// the one, the two stay, which hold it, and the next start makes it one (SPEC.md section 11.4; review cx6-1, M2).
+void makeOne(SecretStore& secrets, const OwnKvm& kvm, QByteArrayView secret)
+{
+    if (!recordsIn(secret)) {
+        return;
+    }
+    const QByteArrayView record = recordFor(secret, kvm);
+    if (record.isEmpty()) {
+        return;
+    }
+    const KeptAs one(record);
+    static_cast<void>(secrets.keep(LocalWall::secretOf(kvm.id), one.bytes()));
 }
 
 // Whether a KVM's card says another thing for what an asking came to than it said before.
@@ -377,12 +540,24 @@ LocalWall::LocalWall(Settings& settings, SecretStore& secrets, DriverPaces paces
         const std::optional<OwnKvm> twin = heldFor(kvm.id);
         // Asked what it is: where the list says so, of a KVM of which that is kept at all. One
         // over plain HTTP is asked once in every run, whatever a file says of it.
-        const bool asked = !twin && kvm.askedWhatItIs && keepsThatItWasAsked(kvm);
+        // (A Proxmox guest is asked by its driver alone, right before every sign-in, on the very line its token is to
+        // go on: so it is one that was asked, over HTTPS, whatever the list says. Review c9b-1, M2;
+        // keepsThatItWasAsked.)
+        const bool asked = !twin && (kvm.askedWhatItIs || kvm.kind == "proxmox"_L1) && keepsThatItWasAsked(kvm);
         // (With the password that was saved for it as it is. One for which there is none is on
         // the wall all the same, and its driver says that it has none. Of one that was not
-        // asked yet what it is, nothing is read from the store.)
+        // asked yet what it is, nothing of what the store holds goes to its driver: it is read
+        // for that anew when an asking has found the KVM, wasAsked.)
+        // What the store holds for it is read once at every start, and a record of two that a change cut off left is
+        // made one before anything else reads it (makeOne): from then on the store holds one record for each KVM, and
+        // a version before 0.2.0 started after this finds the one it reads (review cx6-1, M2). But nothing of one held
+        // back for its twin, whose password is not so much as read while that lasts: its record is made one at the
+        // first start after the hold is let go of, or by its next change.
         // (What was read is written over once the driver has its own copy: wiped.h, SecretText. F5.)
-        QString kept = asked ? keptPasswordOf(m_secrets, kvm) : QString();
+        QByteArray secret = twin ? QByteArray() : m_secrets.kept(secretOf(kvm.id));
+        const WipedOnLeaving overSecret(secret);
+        makeOne(m_secrets, kvm, secret);
+        QString kept = asked ? passwordIn(secret, kvm) : QString();
         const WipedOnLeaving overKept(kept);
         hold(kvm, asked, kept);
         if (twin) {
@@ -408,6 +583,12 @@ LocalWall::LocalWall(Settings& settings, SecretStore& secrets, DriverPaces paces
     // short while of the first.
     m_saySoon.setSingleShot(true);
     connect(&m_saySoon, &QTimer::timeout, this, &LocalWall::cameToSomething);
+    // The looks the askings began, a few every frame (lookInTurns).
+    m_looksTurn.setSingleShot(true);
+    // (Not a coarse one, which may come a twentieth sooner or later; and the frame between is held to by the wall's own
+    // clock all the same: beginDueLooks.)
+    m_looksTurn.setTimerType(Qt::PreciseTimer);
+    connect(&m_looksTurn, &QTimer::timeout, this, &LocalWall::beginDueLooks);
 }
 
 LocalWall::~LocalWall()
@@ -418,9 +599,16 @@ LocalWall::~LocalWall()
 
 bool LocalWall::keepsThatItWasAsked(const OwnKvm& kvm)
 {
+    // (A Proxmox guest is asked what it is by its driver, not by the wall: right before every sign-in with its token,
+    // and before another guest's is taken for its own, the unsigned question of its API on the very line the token is
+    // to go on, held to the certificate its Proxmox is known by (or one Windows trusts for its name), and the token
+    // goes only where what answers says it is a Proxmox (ProxmoxDevice; outside review of 0.2.0, 3.2). That holds on
+    // every road a card comes by, an add, an edit, a yes to another certificate, a file, a start of the program, so the
+    // wall hands its driver the token as one asked from its adding on, and from a file as it is taken: kept so, over
+    // HTTPS alone.)
     // Over HTTPS a certificate (the KVM's own, or one Windows trusts for its name) says at every
     // line who answers. Over plain HTTP nothing does: there it is asked anew in every run.
-    return kvm.address.startsWith("https://"_L1);
+    return kvm.address.startsWith("https://"_L1) || kvm.address.startsWith("vncs://"_L1);
 }
 
 void LocalWall::noteByItself(const QList<OwnKvm>& kvms, const QHash<QString, QString>& certificates)
@@ -486,10 +674,25 @@ std::unique_ptr<OwnDevice> LocalWall::driverFor(Held& one, const OwnKvm& kvm, co
         return std::make_unique<JetKvmDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.jetkvm,
                                               one.jetkvm);
     }
+    if (kvm.kind == "vnc"_L1) {
+        // (A VNC server's: RFB on its own connection, a vncs:// one held to the certificate it is known by as a kvmd's
+        // HTTPS line is; and none of its password where it is said to be known by what is no certificate.)
+        VncDevice::Where where{kvm.address, kvm.knownByCertificate, kvm.certificate};
+        return std::make_unique<VncDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.vnc);
+    }
     if (kvm.kind == "redfish"_L1) {
         // (Held to the server it is kept by: which server answers is asked by that before anything goes.)
-        RedfishDevice::Where where{QUrl(kvm.address), kvm.user, kvm.knownByCertificate, kvm.certificate, kvm.machine};
+        RedfishDevice::Where where{QUrl(kvm.address), kvm.user,    kvm.knownByCertificate,
+                                   kvm.certificate,   kvm.machine, kvm.serverPlace};
         return std::make_unique<RedfishDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.redfish);
+    }
+    if (kvm.kind == "proxmox"_L1) {
+        // (Held to the guest it was added for: which virtual machine has its number is asked by that before anything
+        // goes, rule 30. Its password is its API token's secret.)
+        // (And the boot order a driver of it replaced and has not put back yet, kept with it: keepsBootOrder.)
+        ProxmoxDevice::Where where{QUrl(kvm.address),      kvm.node,        kvm.vmid,    kvm.user,
+                                   kvm.knownByCertificate, kvm.certificate, kvm.machine, kvm.bootOrderWas};
+        return std::make_unique<ProxmoxDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.proxmox);
     }
     KvmdDevice::Where where;
     where.address = QUrl(kvm.address);
@@ -498,7 +701,13 @@ std::unique_ptr<OwnDevice> LocalWall::driverFor(Held& one, const OwnKvm& kvm, co
     where.certificate = kvm.certificate;
     // (No password for a KVM that is said to be known by what is no certificate, whoever hands
     // one over: that is the wall's to keep, whatever a driver does with one.)
-    return std::make_unique<KvmdDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.kvmd);
+    auto made = std::make_unique<KvmdDevice>(std::move(where), savedFor(kvm) ? password : QString(), m_paces.kvmd);
+    // What outlives each of its drivers goes to the next one of the same KVM: that it showed several inputs (KvmdKept).
+    if (!one.kvmd) {
+        one.kvmd = std::make_shared<KvmdKept>();
+    }
+    made->keepWith(one.kvmd);
+    return made;
 }
 
 void LocalWall::hold(const OwnKvm& kvm, bool asked, const QString& password)
@@ -593,6 +802,26 @@ void LocalWall::listenTo(const Held& one)
                 });
             });
     }
+    // A guest's driver took the number the virtual machine at its place gives (none was kept): noted with it as a
+    // controller's server is (rule 30, the web's on_known), a turn of the loop later.
+    if (auto* guest = qobject_cast<ProxmoxDevice*>(one.device.get())) {
+        connect(
+            guest, &ProxmoxDevice::knownAs, this,
+            [this, id = one.id, by = QPointer<const ProxmoxDevice>(guest)](const QString& before, const QString& now) {
+                later([this, id, by, before, now] { knowsItsServer(id, by.data(), before, now); });
+            });
+        // The boot order it replaces, kept with the guest at once, before the order is written (review c9b-3, M1).
+        guest->keepBootOrdersBy(
+            [this, id = one.id, by = QPointer<const ProxmoxDevice>(guest)](const std::optional<BootOrderWas>& was) {
+                return keepsBootOrder(id, by.data(), was);
+            });
+        // Its keyboard and mouse are not given to a window while the wall does something to it (as the web's live
+        // lines are refused them while their machine is acted on: review c9b-4, L1), and a restart from its media is
+        // refused while a window has them (mediaHeld): so no stop of it goes under somebody's keys.
+        guest->refuseControlWhile([wall = QPointer<LocalWall>(this), id = one.id]() -> std::optional<base::Error> {
+            return wall != nullptr ? wall->actedOn(id) : std::nullopt;
+        });
+    }
     // A controller's driver took the server that answered for its own: noted with the KVM, a turn of the loop later
     // (the driver is in the middle of its look, and what is kept is written to a file).
     if (const auto* server = qobject_cast<const RedfishDevice*>(one.device.get())) {
@@ -601,7 +830,32 @@ void LocalWall::listenTo(const Held& one)
             [this, id = one.id, by = QPointer<const RedfishDevice>(server)](const QString& before, const QString& now) {
                 later([this, id, by, before, now] { knowsItsServer(id, by.data(), before, now); });
             });
+        // ...and where its controller keeps that server's computer, found anew (outside review of 0.2.0's Redfish
+        // fixes, M1): noted with the KVM too, so that its next driver, in this run or the next, holds to it.
+        connect(server, &RedfishDevice::foundAt, this,
+                [this, id = one.id, by = QPointer<const RedfishDevice>(server)](const QString& machine,
+                                                                                const QString& place, bool several) {
+                    later([this, id, by, machine, at = ServerPlace{place, several}] {
+                        knowsWhereItsServerIs(id, by.data(), machine, at);
+                    });
+                });
     }
+}
+
+void LocalWall::knowsWhereItsServerIs(const QString& id, const OwnDevice* by, const QString& machine,
+                                      const ServerPlace& at)
+{
+    // Of the KVM that driver was made for, as it is now, and of the server it is known by: a place found for another
+    // mark (a change took another server meanwhile) is not that server's.
+    Held* one = held(id);
+    const auto known = std::ranges::find_if(kvms(), [&id](const OwnKvm& kvm) { return kvm.id == id; });
+    if (by == nullptr || one == nullptr || one->device.get() != by || known == kvms().end() ||
+        known->kind != "redfish"_L1 || known->machine != machine || known->serverPlace == at) {
+        return;
+    }
+    QList<OwnKvm> asTheyAre = kvms();
+    asTheyAre[known - kvms().begin()].serverPlace = at;
+    noteByItself(asTheyAre, m_settings.remembered().kvmCertificates);
 }
 
 void LocalWall::knowsItsServer(const QString& id, const OwnDevice* by, const QString& before, const QString& now)
@@ -619,6 +873,35 @@ void LocalWall::knowsItsServer(const QString& id, const OwnDevice* by, const QSt
     noteByItself(asTheyAre, m_settings.remembered().kvmCertificates);
 }
 
+base::Result<void> LocalWall::keepsBootOrder(const QString& id, const OwnDevice* by,
+                                             const std::optional<BootOrderWas>& was)
+{
+    // Of the guest that driver was made for, as it is now; written down at once, before the driver writes the order it
+    // replaces (and the wall is what the file still says where that cannot be done: remember()).
+    Held* one = held(id);
+    const auto known = std::ranges::find_if(kvms(), [&id](const OwnKvm& kvm) { return kvm.id == id; });
+    if (by == nullptr || one == nullptr || one->device.get() != by || known == kvms().end() ||
+        known->kind != "proxmox"_L1) {
+        return base::Error{"stopped", "The guest is no longer on the wall as it was"};
+    }
+    if (known->bootOrderWas == was) {
+        return {};
+    }
+    QList<OwnKvm> with = kvms();
+    with[known - kvms().begin()].bootOrderWas = was;
+    return remember(with, "The guest's boot order from before");
+}
+
+std::optional<base::Error> LocalWall::actedOn(const QString& id)
+{
+    const Held* one = held(id);
+    if (one == nullptr || !one->busy) {
+        return std::nullopt;
+    }
+    const auto kvm = std::ranges::find_if(kvms(), [&id](const OwnKvm& known) { return known.id == id; });
+    return busyWith(kvm == kvms().end() ? words("this device") : calledInASentence(*kvm));
+}
+
 void LocalWall::letGoOfEveryDriver()
 {
     m_ended = true;
@@ -627,6 +910,22 @@ void LocalWall::letGoOfEveryDriver()
         letGo(one, stopped());
     }
     m_held.clear();
+}
+
+void LocalWall::stopEveryTyping()
+{
+    // (A driver answers "stopped" a turn of the loop later, or now: whoever is told may change the wall, so the drivers
+    // are told from a list of their own.)
+    std::vector<QPointer<OwnDevice>> drivers;
+    drivers.reserve(m_held.size());
+    for (const Held& one : m_held) {
+        drivers.emplace_back(one.device.get());
+    }
+    for (const QPointer<OwnDevice>& driver : drivers) {
+        if (driver != nullptr) {
+            driver->stopTyping();
+        }
+    }
 }
 
 JetKvmDevice::TwinCheck LocalWall::twinCheckFor(const QString& id)
@@ -648,8 +947,9 @@ std::optional<OwnKvm> LocalWall::twinBehind(const QString& id, const KvmProbe::F
     }
     // Held back already: let go of only where a look showed a certificate no other KVM of the wall is known by, or
     // nothing listens there. In doubt (something listens, and showed nothing), it stays held, as kvm::wayOf takes what
-    // listens for something (from the second reading of the twins, MEDIUM), for as long as the one it is held for is
-    // on the wall.
+    // listens for something (from the second reading of the twins, MEDIUM), for as long as a KVM of the wall is known
+    // by that certificate (the one it is held for, or another the hold went over to when that one was taken off:
+    // remember, outside review 2, 4.3).
     const auto one = std::ranges::find_if(m_held, [&id](const Held& held) { return held.id == id; });
     if (!id.isEmpty() && one != m_held.end() && one->heldBackByTwin && found.shown.isEmpty() && !found.nothingListens) {
         return heldFor(id);
@@ -737,11 +1037,24 @@ void LocalWall::markHeldFor(const QString& id, const QString& twin)
         with.kvmsHeldForATwin.insert(id, twin);
     }
     m_settings.note(with);
+    // A new hold is written at once: it holds this run already, and is kept "from the start of the next run" (SPEC 8)
+    // only once it is on disk. (Written soon, as what the wall notes by itself, a program killed within that while
+    // started the next time knowing of no hold, its HTTPS showed nothing that time, and the password went the plain
+    // way: the outside review of the wave 2 desktop, 6.3.) Where it cannot be written now, it stays noted, and goes
+    // with the next writing. A hold let go of is written soon: held a little longer on disk, nothing goes anywhere.
+    if (!twin.isEmpty() && m_settings.writeDown().ok()) {
+        return;
+    }
     // (Written soon, as what the wall notes by itself: one writing for as long as it stays so, not one per asking.)
     noteByItself(with.kvms, with.kvmCertificates);
 }
 
 std::optional<OwnKvm> LocalWall::anotherKnownBy(const QString& id, const QByteArray& shown) const
+{
+    return knownBy(kvms(), id, shown);
+}
+
+std::optional<OwnKvm> LocalWall::knownBy(const QList<OwnKvm>& among, const QString& id, const QByteArray& shown)
 {
     if (shown.isEmpty()) {
         return std::nullopt;
@@ -749,9 +1062,12 @@ std::optional<OwnKvm> LocalWall::anotherKnownBy(const QString& id, const QByteAr
     OwnKvm showing;
     showing.knownByCertificate = true;
     showing.certificate = shown;
-    const auto twin = std::ranges::find_if(
-        kvms(), [&id, &showing](const OwnKvm& other) { return other.id != id && sameCertificate(other, showing); });
-    return twin == kvms().end() ? std::nullopt : std::optional<OwnKvm>(*twin);
+    // (A VNC server's too, whose certificate is no proof of a twin (sameCertificate): what shows it at a JetKVM's own
+    // HTTPS is not that JetKVM, and its password does not go the plain way beside it.)
+    const auto twin = std::ranges::find_if(among, [&id, &showing](const OwnKvm& other) {
+        return other.id != id && (sameCertificate(other, showing) || certificateSaysSo(other, showing));
+    });
+    return twin == among.end() ? std::nullopt : std::optional<OwnKvm>(*twin);
 }
 
 base::Result<bool> LocalWall::followOntoHttps(const QString& id, const QUrl& from, const QUrl& at,
@@ -822,7 +1138,8 @@ void LocalWall::noteThatOneCameToSomething()
 void LocalWall::keepCertificate(const QString& id, const QByteArray& der)
 {
     const auto known = std::ranges::find_if(kvms(), [&id](const OwnKvm& one) { return one.id == id; });
-    if (known == kvms().end() || !known->knownByCertificate || !known->address.startsWith("https://"_L1) ||
+    if (known == kvms().end() || !known->knownByCertificate ||
+        !(known->address.startsWith("https://"_L1) || known->address.startsWith("vncs://"_L1)) ||
         m_settings.remembered().kvmCertificates.contains(id)) {
         return;
     }
@@ -861,6 +1178,14 @@ std::function<void(base::Result<Answer>)> LocalWall::owedBy(Held& one, std::func
     };
 }
 
+// (And for the answers of its KVMs' virtual media, which local_wall_media.cpp owes.)
+template std::function<void(base::Result<MediaList>)>
+LocalWall::owedBy<MediaList>(Held& one, std::function<void(base::Result<MediaList>)> done);
+template std::function<void(base::Result<MediaDone>)>
+LocalWall::owedBy<MediaDone>(Held& one, std::function<void(base::Result<MediaDone>)> done);
+template std::function<void(base::Result<MediaUploaded>)>
+LocalWall::owedBy<MediaUploaded>(Held& one, std::function<void(base::Result<MediaUploaded>)> done);
+
 void LocalWall::letGo(Held& one, const base::Error& why)
 {
     // Its driver a turn of the loop later: something of it may be in the middle of its work, and
@@ -869,6 +1194,19 @@ void LocalWall::letGo(Held& one, const base::Error& why)
     // everything is answered.
     const auto owed = std::exchange(one.owed, {});
     one.device.release()->deleteLater();
+    // A look the wall's line began at this driver goes with it, and the KVM is not in the line any
+    // more: the next asking looks at the driver it has from now on, at once. Whoever waited for
+    // that look is told a turn of the loop later, as everything is answered (the review of
+    // fdbfe378, L1). One that waits in the line for its turn stays there: its turn looks at the
+    // driver it has then.
+    if (m_looksWaited.contains(one.id) && !m_looksDue.contains(one.id)) {
+        const QList<std::function<void()>> waiting = m_looksWaited.take(one.id).waiting;
+        later([waiting] {
+            for (const std::function<void()>& tell : waiting) {
+                tell();
+            }
+        });
+    }
     for (const auto& tell : owed) {
         later([tell = std::function<void(const base::Error&)>(tell), why = base::Error(why)] { tell(why); });
     }
@@ -896,26 +1234,48 @@ base::Result<void> LocalWall::remember(const QList<OwnKvm>& kvms, const QHash<QS
     after.kvmCertificates = certificates;
     after.kvmPasswordsKept = marks;
     // A hold for a twin goes with the KVM it was of (taken off, or no longer a JetKVM over plain HTTP: moved onto
-    // HTTPS), and with the one it was held for (taken off: no KVM of the wall is known by that certificate any more,
-    // and a look anew would find no twin either). As the file keeps it (settings.cpp).
+    // HTTPS). The one it was held for taken off, it goes over to another KVM of the wall still known by the
+    // certificate that one was known by (two kept both under one certificate: a PiKVM and its own VNC server, two
+    // displays behind one TLS proxy; outside review 2, 4.3), as a look anew would find that one behind its HTTPS; and
+    // it goes only where none is: then no KVM of the wall is known by that certificate any more, and a look anew would
+    // find no twin either. As the file keeps it (settings.cpp).
     const auto ofTheList = [&kvms](const QString& id) -> const OwnKvm* {
         const auto there = std::ranges::find_if(kvms, [&id](const OwnKvm& kvm) { return kvm.id == id; });
         return there == kvms.end() ? nullptr : &*there;
     };
-    after.kvmsHeldForATwin.removeIf([&ofTheList](const QHash<QString, QString>::iterator& held) {
+    for (auto held = after.kvmsHeldForATwin.begin(); held != after.kvmsHeldForATwin.end();) {
         const OwnKvm* kvm = ofTheList(held.key());
-        if (kvm == nullptr) {
-            return true;
+        if (kvm == nullptr || kvm->kind != "jetkvm"_L1 || !kvm->address.startsWith("http://"_L1) ||
+            held.value() == held.key()) {
+            held = after.kvmsHeldForATwin.erase(held);
+            continue;
         }
-        return kvm->kind != "jetkvm"_L1 || !kvm->address.startsWith("http://"_L1) || held.value() == held.key() ||
-               ofTheList(held.value()) == nullptr;
-    });
+        if (ofTheList(held.value()) == nullptr) {
+            const QString twin = held.value();
+            const auto was = std::ranges::find_if(before.kvms, [&twin](const OwnKvm& one) { return one.id == twin; });
+            const std::optional<OwnKvm> still = was == before.kvms.end() || !was->knownByCertificate
+                                                    ? std::nullopt
+                                                    : knownBy(kvms, held.key(), was->certificate);
+            if (!still) {
+                held = after.kvmsHeldForATwin.erase(held);
+                continue;
+            }
+            held.value() = still->id;
+        }
+        ++held;
+    }
     if (const base::Result<void> written = m_settings.remember(after); !written) {
         // What is remembered changes even when the writing fails: so it is changed back, and
         // the wall is what the file still says.
         static_cast<void>(m_settings.remember(before));
         return notSaved(what, written.error());
     }
+    // What stood for a server on no card any more of a start into BIOS setup, its doubt over, goes as the list changes
+    // (SetupOverrides::prune): before 0.2.0 it stayed in its file for good. By the list the settings hold now, and only
+    // where the start read theirs whole: a wall that began as new because its settings could not be read says nothing
+    // of which servers are on no card (outside review of the prune, M2). Never one marked queued (round 2, M1).
+    static_cast<void>(
+        (m_paces.redfish.overrides ? *m_paces.redfish.overrides : SetupOverrides::program()).prune(m_settings));
     return {};
 }
 
@@ -935,8 +1295,11 @@ void LocalWall::askWall(std::function<void(base::Result<Wall>)> done)
         // in M7 part 3d.)
         machine.hasPicture = kvm.kind != "redfish"_L1;
         machine.group = kvm.group;
-        machine.page = QUrl(kvm.address);
-        machine.plain = machine.page.scheme() == "http"_L1;
+        // (A VNC server's address is no web page: it has none to open, as the web shows one only where it was typed.
+        // Outside review M4.)
+        machine.page = kvm.kind == "vnc"_L1 ? QUrl() : QUrl(kvm.address);
+        // (In the clear by the one rule for it, which the bar and its row in the settings say it by too.)
+        machine.plain = kvm.isInTheClear();
         machine.own = true;
         machine.noSignalMinutes = kvm.noSignalMinutes;
         machine.unchangedMinutes = kvm.unchangedMinutes;
@@ -988,6 +1351,7 @@ void LocalWall::askStatus(std::function<void(base::Result<QHash<QString, Status>
         one.waitsToBeAsked = !one.asked && one.asking == 0;
     }
     askThoseThatWait();
+    QStringList stale;
     for (Held& one : m_held) {
         if (!one.asked) {
             // The answer waits for an asking that is under way and holds a place, as it waits
@@ -1013,27 +1377,100 @@ void LocalWall::askStatus(std::function<void(base::Result<QHash<QString, Status>
                     return;
                 }
                 now->device->look();
+                emit wall->looking(id);
                 now->device->afterLook(patience, over);
             });
             continue;
         }
-        if (!one.device->isStale()) {
-            continue;
+        if (one.device->isStale()) {
+            stale.append(one.id);
         }
-        one.device->look();
-        ++waiting->looks;
-        one.device->afterLook(m_paces.kvmd.lookPatienceMs, [waiting, answer](bool /*stillLooking*/) {
-            if (--waiting->looks == 0) {
-                answer();
-            }
-        });
     }
+    // Those whose state is no longer fresh are looked at a few in a turn of the loop, in the wall's order, and the
+    // answer waits for every one of them (lookInTurns).
+    waiting->looks += static_cast<int>(stale.size());
+    lookInTurns(stale, [waiting, answer] {
+        if (--waiting->looks == 0) {
+            answer();
+        }
+    });
     if (waiting->looks == 0) {
         later(answer);
         return;
     }
     // The limit is kept here too: a driver that is let go meanwhile says nothing of its look.
     QTimer::singleShot(m_paces.kvmd.lookPatienceMs, this, answer);
+}
+
+void LocalWall::lookInTurns(const QStringList& machines, const std::function<void()>& overOne)
+{
+    // One line for the whole wall, whoever asked: a KVM that waits in it, or whose look from it is under way, is not
+    // put in it again, and whoever asks now waits for that look as well; one asked for anew joins the end. So however
+    // the askings come, no more than a few looks begin in a frame.
+    for (const QString& machine : machines) {
+        const auto there = m_looksWaited.find(machine);
+        if (there == m_looksWaited.end()) {
+            m_looksDue.append(machine);
+            m_looksWaited.insert(machine, LookDue{++m_looksSerial, {overOne}});
+        } else {
+            there->waiting.append(overOne);
+        }
+    }
+    if (!m_looksTurn.isActive()) {
+        beginDueLooks();
+    }
+}
+
+void LocalWall::beginDueLooks()
+{
+    // A frame after the few before, by the wall's own clock: a timer of Windows' came 3 to 6 ms early at times, also a
+    // precise one, and an asking that finds the line empty a moment after its last few began waits for the rest.
+    const int frameMs = std::max(0, m_own.looksEveryMs);
+    const int sinceMs = static_cast<int>(std::min<qint64>(m_clock.elapsed() - m_lastLooksAt, frameMs));
+    if (sinceMs < frameMs) {
+        m_looksTurn.start(frameMs - sinceMs);
+        return;
+    }
+    m_lastLooksAt = m_clock.elapsed();
+    // So many now, the first in the line, and the next so many a frame later: each look begins on this thread, and its
+    // answer is taken there (Own::looksInATurn says what that cost all at once).
+    const qsizetype now = std::min<qsizetype>(m_looksDue.size(), std::max(1, m_own.looksInATurn));
+    for (qsizetype at = 0; at < now; ++at) {
+        const QString machine = m_looksDue.takeFirst();
+        // Whoever waits for its look is told when it is over, or when its patience is: all who waited by then, once.
+        // (By its number: what waits for a later look of the same KVM is that one's.)
+        const auto over = [wall = QPointer<LocalWall>(this), machine, serial = m_looksWaited.value(machine).serial] {
+            if (wall == nullptr) {
+                return;
+            }
+            const auto due = wall->m_looksWaited.constFind(machine);
+            if (due == wall->m_looksWaited.constEnd() || due->serial != serial) {
+                return;
+            }
+            const QList<std::function<void()>> waiting = wall->m_looksWaited.take(machine).waiting;
+            for (const std::function<void()>& one : waiting) {
+                one();
+            }
+        };
+        Held* one = held(machine);
+        // Taken off the wall before its turn came, or its driver replaced by one that was not asked yet what it is:
+        // nothing is begun, and nobody waits for it (told a turn of the loop later: never from inside an asking). One
+        // that a look of another asking found as it is meanwhile is not looked at again.
+        if (one == nullptr || !one->asked || !one->device->isStale()) {
+            later(over);
+            continue;
+        }
+        // (Said as it begins, before the look itself: whoever times the turns times them from their beginning, and not
+        // from the end of each look's first steps on this thread.)
+        emit looking(machine);
+        one->device->look();
+        one->device->afterLook(m_paces.kvmd.lookPatienceMs, [over](bool /*stillLooking*/) { over(); });
+        // (Also where its driver is let go meanwhile, which then says nothing of its look: the line does not keep it.)
+        QTimer::singleShot(m_paces.kvmd.lookPatienceMs, this, over);
+    }
+    if (!m_looksDue.isEmpty()) {
+        m_looksTurn.start(frameMs);
+    }
 }
 
 void LocalWall::askSnapshot(const QString& machine, int width, double /*mayBeOldSeconds*/,
@@ -1146,10 +1583,17 @@ bool LocalWall::mayHaveBeenDone(const QString& machine, const base::Error& error
     const auto known = std::ranges::find_if(kvms(), [&machine](const OwnKvm& one) { return one.id == machine; });
     if (known == kvms().end()) {
         return KvmdDevice::mayHaveBeenDone(error) || JetKvmDevice::mayHaveBeenDone(error) ||
-               RedfishDevice::mayHaveBeenDone(error);
+               RedfishDevice::mayHaveBeenDone(error) || VncDevice::mayHaveBeenDone(error) ||
+               ProxmoxDevice::mayHaveBeenDone(error);
     }
     if (known->kind == "redfish"_L1) {
         return RedfishDevice::mayHaveBeenDone(error);
+    }
+    if (known->kind == "vnc"_L1) {
+        return VncDevice::mayHaveBeenDone(error);
+    }
+    if (known->kind == "proxmox"_L1) {
+        return ProxmoxDevice::mayHaveBeenDone(error);
     }
     return known->kind == "jetkvm"_L1 ? JetKvmDevice::mayHaveBeenDone(error) : KvmdDevice::mayHaveBeenDone(error);
 }
@@ -1247,7 +1691,7 @@ base::Result<QString> LocalWall::add(OwnKvm kvm, const QString& password)
     if (!OwnKvm::namesAFamily(kvm.kind)) {
         return base::Error{"invalid", "This program does not speak to that family of device itself."};
     }
-    if (const std::optional<base::Error> refusal = notAnAddress(kvm.address)) {
+    if (const std::optional<base::Error> refusal = notAnAddressOf(kvm)) {
         return *refusal;
     }
     const bool there = std::ranges::any_of(kvms(), [&kvm](const OwnKvm& known) { return atOnePlace(known, kvm); });
@@ -1267,6 +1711,8 @@ base::Result<QString> LocalWall::add(OwnKvm kvm, const QString& password)
     // Whoever adds a KVM here has asked what answers at its address, and signed in once: it is
     // one that was asked, in this run. That is kept for the next only of a KVM over HTTPS.
     kvm.askedWhatItIs = keepsThatItWasAsked(kvm);
+    // (No driver of it replaced a boot order yet: that is the wall's own to note.)
+    kvm.bootOrderWas.reset();
     // The password first: a KVM on the wall without one is a KVM that cannot be signed in to. (What
     // it is kept as is written over when this is left: KeptAs.)
     const KeptAs secret(*lines, password);
@@ -1302,9 +1748,23 @@ QList<OwnKvm> LocalWall::keptAside() const
 {
     QList<OwnKvm> all;
     for (const auto& kept : m_settings.remembered().kvmsItDoesNotRead) {
+        const QJsonObject entry = kept.toObject();
         OwnKvm kvm;
-        kvm.id = kept.toObject()["id"_L1].toString();
-        kvm.address = kept.toObject()["address"_L1].toString();
+        kvm.id = entry["id"_L1].toString();
+        kvm.address = entry["address"_L1].toString();
+        // Its family, as it says it; and of a Proxmox guest, its number where it says it as a guest's: it stands at
+        // its own place, its Proxmox's and its number there, as its card would (placeOf). One whose number is in no
+        // guest's shape stands at no guest's place, nor at its Proxmox's port, which is no guest's (review c9b-4, L3).
+        kvm.kind = entry["kind"_L1].toString();
+        if (kvm.kind == "proxmox"_L1) {
+            const QJsonValue vmid = entry["vmid"_L1];
+            const double number = vmid.toDouble(-1);
+            kvm.vmid = vmid.isDouble() && std::floor(number) == number &&
+                               number >= static_cast<double>(proxmox::lowestGuest) &&
+                               number <= static_cast<double>(proxmox::highestGuest)
+                           ? static_cast<qint64>(number)
+                           : -1;
+        }
         kvm.name = words("a KVM that another version of qKVM added, which this one does not show");
         all.append(kvm);
     }
@@ -1318,13 +1778,23 @@ bool LocalWall::keptAt(const OwnKvm& kvm) const
 
 LocalWall::Place LocalWall::placeOf(const OwnKvm& kvm)
 {
+    // (A VNC server's, by the address alone: the web refuses one only where the very same url is on the wall. A KVM's
+    // web page and a VNC server of one host, a PiKVM's, are two devices.)
+    if (vnc::namesOne(kvm.address)) {
+        return Place{QUrl(kvm.address).host(), -1, 0, kvm.address};
+    }
     const QUrl address(kvm.address);
-    return Place{address.host(), address.port(), address.port(address.scheme() == "http"_L1 ? 80 : 443)};
+    return Place{address.host(), address.port(), address.port(address.scheme() == "http"_L1 ? 80 : 443), QString(),
+                 kvm.kind == "proxmox"_L1 ? kvm.vmid : 0};
 }
 
 bool LocalWall::atOnePlace(const Place& one, const Place& other)
 {
-    if (one.host != other.host) {
+    if (!one.vnc.isEmpty() || !other.vnc.isEmpty()) {
+        return one.vnc == other.vnc;
+    }
+    // (Two guests of one Proxmox are two machines: at one place only where they are one guest by its number there.)
+    if (one.host != other.host || one.guest != other.guest) {
         return false;
     }
     // Neither with a port of its own: the same KVM over HTTPS and in the clear. Otherwise by
@@ -1334,6 +1804,13 @@ bool LocalWall::atOnePlace(const Place& one, const Place& other)
 
 std::optional<base::Error> LocalWall::intoTheClear(const OwnKvm& from, const OwnKvm& to)
 {
+    // A VNC server: from TLS to the clear at its very host and port, whose place is otherwise its whole address.
+    if (vnc::namesOne(from.address) && vnc::namesOne(to.address)) {
+        const vnc::Place was = vnc::placeOf(from.address);
+        const vnc::Place is = vnc::placeOf(to.address);
+        const bool intoIt = was.tls && !is.tls && was.host == is.host && was.port == is.port;
+        return intoIt ? std::optional<base::Error>(vncNotInTheClear()) : std::nullopt;
+    }
     const bool lessGuarded = QUrl(from.address).scheme() == "https"_L1 && QUrl(to.address).scheme() == "http"_L1;
     return lessGuarded && atOnePlace(from, to) ? std::optional<base::Error>(notInTheClear()) : std::nullopt;
 }
@@ -1341,8 +1818,31 @@ std::optional<base::Error> LocalWall::intoTheClear(const OwnKvm& from, const Own
 bool LocalWall::sameCertificate(const OwnKvm& one, const OwnKvm& other)
 {
     // (Never a server's controller, whichever of the two: its maker may have put one certificate on every board.)
+    // (Nor a Proxmox guest: its Proxmox's certificate is every guest's of it.)
+    // (Nor a VNC server, whichever of the two: one TLS proxy before several displays of a host shows one certificate
+    // for all of them, and a PiKVM's VNC server shows its web page's. That it is the other is what its certificate
+    // says, and somebody may say to keep both: certificateSaysSo. The outside review of the wave 2 desktop, 6.5.)
     return one.knownByCertificate && other.knownByCertificate && one.certificate == other.certificate &&
-           one.kind != "redfish"_L1 && other.kind != "redfish"_L1;
+           one.kind != "redfish"_L1 && other.kind != "redfish"_L1 && one.kind != "proxmox"_L1 &&
+           other.kind != "proxmox"_L1 && one.kind != "vnc"_L1 && other.kind != "vnc"_L1;
+}
+
+bool LocalWall::certificateSaysSo(const OwnKvm& one, const OwnKvm& other)
+{
+    // (As the web knows every device but a server's controller and a Proxmox guest by its pinned certificate, a VNC
+    // server's among them, and takes "Keep both" for an answer to that: core.identity, keep_both.)
+    const auto byIt = [](const OwnKvm& kvm) {
+        return kvm.knownByCertificate && kvm.kind != "redfish"_L1 && kvm.kind != "proxmox"_L1;
+    };
+    return byIt(one) && byIt(other) && one.certificate == other.certificate &&
+           (one.kind == "vnc"_L1 || other.kind == "vnc"_L1);
+}
+
+std::optional<OwnKvm> LocalWall::knownByTheSameCertificate(const QList<OwnKvm>& there, const OwnKvm& kvm)
+{
+    const auto known = std::ranges::find_if(
+        there, [&kvm](const OwnKvm& other) { return sameCertificate(other, kvm) || certificateSaysSo(other, kvm); });
+    return known == there.end() ? std::nullopt : std::optional<OwnKvm>(*known);
 }
 
 std::optional<OwnKvm> LocalWall::twinOf(const QList<OwnKvm>& there, const OwnKvm& kvm)
@@ -1352,6 +1852,23 @@ std::optional<OwnKvm> LocalWall::twinOf(const QList<OwnKvm>& there, const OwnKvm
         std::ranges::find_if(there, [&kvm](const OwnKvm& known) { return sameCertificate(known, kvm); });
     if (proven != there.end()) {
         return *proven;
+    }
+    // A Proxmox guest by the number it gives for itself (its SMBIOS UUID, OwnKvm::machine): one guest by another
+    // address of its Proxmox is the same guest (the web's same_device), and two that give none are two.
+    if (kvm.kind == "proxmox"_L1) {
+        const auto guest = std::ranges::find_if(there, [&kvm](const OwnKvm& known) {
+            return known.kind == "proxmox"_L1 && !kvm.machine.isEmpty() && known.machine == kvm.machine;
+        });
+        return guest == there.end() ? std::nullopt : std::optional<OwnKvm>(*guest);
+    }
+    // A VNC server known by the certificate another is known by, or another by a VNC server's: the same device by what
+    // that certificate says, and neither is one that somebody said is to stay beside its twin (6.5).
+    if (!isKeptBeside(kvm)) {
+        const auto says = std::ranges::find_if(
+            there, [&kvm](const OwnKvm& known) { return !isKeptBeside(known) && certificateSaysSo(known, kvm); });
+        if (says != there.end()) {
+            return *says;
+        }
     }
     // Then the number it gives for itself, which is said: of two that give none, neither is the other; and
     // neither is one that somebody said is to stay beside its twin (the web's keep_both), nor that twin of it.
@@ -1363,9 +1880,23 @@ std::optional<OwnKvm> LocalWall::twinOf(const QList<OwnKvm>& there, const OwnKvm
     return said == there.end() ? std::nullopt : std::optional<OwnKvm>(*said);
 }
 
+std::optional<OwnKvm> LocalWall::twinOfOneComing(const QList<OwnKvm>& there, const OwnKvm& kvm)
+{
+    if (std::optional<OwnKvm> twin = twinOf(there, kvm)) {
+        return twin;
+    }
+    if (isKeptBeside(kvm)) {
+        return std::nullopt;
+    }
+    const auto says =
+        std::ranges::find_if(there, [&kvm](const OwnKvm& known) { return certificateSaysSo(known, kvm); });
+    return says == there.end() ? std::nullopt : std::optional<OwnKvm>(*says);
+}
+
 bool LocalWall::isKeptBeside(const OwnKvm& kvm)
 {
-    return kvm.keptBesideItsTwin && kvm.kind != "redfish"_L1;
+    // (A Proxmox guest neither: one guest has one card, as the web refuses one twice.)
+    return kvm.keptBesideItsTwin && kvm.kind != "redfish"_L1 && kvm.kind != "proxmox"_L1;
 }
 
 bool LocalWall::saysItIsTheSame(const base::Error& refusal)
@@ -1373,7 +1904,7 @@ bool LocalWall::saysItIsTheSame(const base::Error& refusal)
     // (sameDevice's own sentence, built in that one place: its `saidSo`.)
     const QString said = QString::fromStdString(refusal.message);
     return refusal.code == "same_device" && said.startsWith(u"This says it is the same device as "_s) &&
-           !said.endsWith(oneCardOfAServer);
+           !said.endsWith(oneCardOfAServer) && !said.endsWith(oneCardOfAGuest);
 }
 
 base::Error LocalWall::sameDevice(const OwnKvm& twin, bool saidSo)
@@ -1389,9 +1920,11 @@ base::Error LocalWall::sameDevice(const OwnKvm& twin, bool saidSo)
     if (called != host) {
         sentence += u" ("_s + host + u')';
     }
-    // (A server's second card is not kept beside it either: nothing to answer, and so said.)
+    // (A server's second card is not kept beside it either: nothing to answer, and so said. Nor a guest's.)
     if (twin.kind == "redfish"_L1) {
         sentence += u"."_s + oneCardOfAServer;
+    } else if (twin.kind == "proxmox"_L1) {
+        sentence += u"."_s + oneCardOfAGuest;
     }
     return {"same_device", sentence.toStdString()};
 }
@@ -1430,6 +1963,7 @@ bool LocalWall::isStillTheOne(const OwnKvm& now, const OwnKvm& seen)
     OwnKvm asSeen = now;
     asSeen.askedWhatItIs = seen.askedWhatItIs;
     asSeen.machine = seen.machine;
+    asSeen.serverPlace = seen.serverPlace;
     return asSeen == seen;
 }
 
@@ -1465,7 +1999,7 @@ base::Result<void> LocalWall::remove(QString id)
     if (kvm == kvms().end() || one == nullptr) {
         return unknown();
     }
-    if (one->busy) {
+    if (one->busy || one->uploading) {
         // What is under way to it is not cut off, and not left without anybody to hear how it ended.
         return busyWith(calledInASentence(*kvm));
     }
@@ -1548,7 +2082,7 @@ base::Result<void> LocalWall::knowBy(QString id, const QByteArray& certificate)
     if (known == kvms().end()) {
         return unknown();
     }
-    if (QUrl(known->address).scheme() != "https"_L1) {
+    if (QUrl(known->address).scheme() != "https"_L1 && QUrl(known->address).scheme() != "vncs"_L1) {
         return noCertificate();
     }
     if (certificate.size() != sha256Bytes) {
@@ -1559,9 +2093,13 @@ base::Result<void> LocalWall::knowBy(QString id, const QByteArray& certificate)
     with.knownByCertificate = true;
     with.certificate = certificate;
     // What shows the certificate another KVM of the wall is known by is that KVM, at this one's
-    // address: this one's kept password does not go to it, whoever said yes.
+    // address: this one's kept password does not go to it, whoever said yes, and whatever either was kept beside (a
+    // VNC server's display behind one TLS proxy with another's too: review cx6-1, M1).
     QList<OwnKvm> others = kvms();
     others.removeIf([&id](const OwnKvm& one) { return one.id == id; });
+    if (const std::optional<OwnKvm> another = knownByTheSameCertificate(others, with)) {
+        return sameDevice(*another, !sameCertificate(*another, with));
+    }
     if (const std::optional<OwnKvm> twin = twinOf(others, with)) {
         return sameDevice(*twin, !sameCertificate(*twin, with));
     }
@@ -1587,7 +2125,19 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
     // sets a mark it did not sign in for.
     if (!password) {
         kvm.machine = known->machine;
+        // (And where its controller keeps that server's computer goes with the mark: outside review of 0.2.0's Redfish
+        // fixes, M1.)
+        kvm.serverPlace = known->serverPlace;
+    } else if (kvm.kind == "redfish"_L1 && kvm.machine == known->machine) {
+        // The same server signed in to with its password typed: where its computer is now is what that sign-in found,
+        // and that its controller was seen to list several computers stays, as one sign-in that finds its computer
+        // alone says nothing of the nodes its controller held before (outside review of 0.2.0's Redfish fixes, round
+        // 2, L1 c: what was learnt was lost, and another node put in the card's own slot passed for it).
+        kvm.serverPlace.amongSeveral = kvm.serverPlace.amongSeveral || known->serverPlace.amongSeveral;
     }
+    // The boot order a driver of it replaced and has not put back yet is the wall's own to keep, whatever a change
+    // hands in: it goes along with every change (and is of no other guest than its own: ProxmoxDevice::Where).
+    kvm.bootOrderWas = known->bootOrderWas;
     // Whether it was asked what it is, is the wall's own to say, whatever stands in what was
     // handed in: a KVM is not made one that was asked by being changed. And it is one that was
     // NOT asked from here on where somebody said yes to another certificate than it was known
@@ -1596,9 +2146,13 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
     // run: only of a KVM over HTTPS.)
     const bool byAnotherCertificate =
         kvm.knownByCertificate != known->knownByCertificate || kvm.certificate != known->certificate;
-    const bool askedFromNowOn = one->asked && !(saidYesTo && byAnotherCertificate);
+    // (A Proxmox guest is asked by its driver alone, on lines held to the certificate said yes to: right before its
+    // sign-in, what shows it is asked whether it is a Proxmox, and nothing of the token goes before it said so
+    // (keepsThatItWasAsked). It stays one that was asked. Review c9b-1, M2.)
+    const bool askedFromNowOn =
+        (kvm.kind == "proxmox"_L1 && keepsThatItWasAsked(kvm)) || (one->asked && !(saidYesTo && byAnotherCertificate));
     kvm.askedWhatItIs = askedFromNowOn && keepsThatItWasAsked(kvm);
-    if (const std::optional<base::Error> refusal = notAnAddress(kvm.address)) {
+    if (const std::optional<base::Error> refusal = notAnAddressOf(kvm)) {
         return *refusal;
     }
     const bool taken = std::ranges::any_of(
@@ -1668,7 +2222,7 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
     if (!anew && kvm == *known) {
         return {};
     }
-    if (anew && one->busy) {
+    if (anew && (one->busy || one->uploading)) {
         // What is under way to it is not cut off, and not left without anybody to hear how it ended.
         return busyWith(calledInASentence(*known));
     }
@@ -1684,7 +2238,21 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
     // that goes along, and to be put back where the list cannot be written. (A new name or group
     // reads nothing.) What was read, and what was made of it, is written over when this is left.
     const QString secret = secretOf(id);
-    QByteArray keptBefore = anew || goesAlong ? m_secrets.kept(secret) : QByteArray();
+    // What the store does not hand over this once is not taken for none: nothing is changed then. (Taken for none, a
+    // change whose list could not be written forgot what it had written in its place, and the password kept before was
+    // gone: the outside review of the wave 2 desktop, 6.1.)
+    QByteArray keptBefore;
+    bool keptAny = false;
+    if (anew || goesAlong) {
+        base::Result<std::optional<QByteArray>> read = m_secrets.read(secret);
+        if (!read) {
+            return notSaved(what, read.error());
+        }
+        if (read.value()) {
+            keptBefore = std::move(*read.value());
+            keptAny = true;
+        }
+    }
     const WipedOnLeaving overKept(keptBefore);
     QString fromNowOn = password ? *password : passwordIn(keptBefore, *known);
     const WipedOnLeaving overFromNowOn(fromNowOn);
@@ -1700,13 +2268,27 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
     // given, and a kept one goes only with a KVM that is known by what can be.)
     const bool written = lines.has_value() && (password.has_value() || (goesAlong && !fromNowOn.isEmpty()));
     // The password first, as when a KVM is added; and what was kept before is kept again where
-    // the rest cannot be written down. Where that fails too, what stays in the store was saved
-    // for the KVM as it was to be, and is not used for the KVM as it is. (What it is kept as is
-    // written over when this is left: KeptAs.)
+    // the rest cannot be written down. (What it is kept as is written over when this is left: KeptAs.)
+    // Where it is saved for another address or certificate than the one kept for the KVM as it was,
+    // both stand in the store until the list is written, and the one for the KVM as it is from then
+    // on alone after that: so wherever this is cut off, and where what was kept before cannot be put
+    // back, the store holds the password for the KVM as the file has it (6.1).
+    const QByteArrayView keptForIt = recordFor(keptBefore, *known);
+    const bool moves = written && !keptForIt.isEmpty() && lines != savedFor(*known);
     std::optional<KeptAs> keptAs;
+    std::optional<KeptTogether> keptBoth;
     if (written) {
         keptAs.emplace(*lines, fromNowOn);
-        if (const base::Result<void> kept = m_secrets.keep(secret, keptAs->bytes()); !kept) {
+        const QByteArray* first = &keptAs->bytes();
+        if (moves) {
+            keptBoth.emplace(keptForIt, keptAs->bytes());
+            first = &keptBoth->bytes();
+            if (first->size() > largestSecretBytes) {
+                return notSaved(what, {"secrets", "its password and the one kept for it until then are longer "
+                                                  "together than Windows keeps in one entry"});
+            }
+        }
+        if (const base::Result<void> kept = m_secrets.keep(secret, *first); !kept) {
             return notSaved(what, kept.error());
         }
     }
@@ -1731,8 +2313,10 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
         marks.insert(id);
     }
     if (const base::Result<void> kept = remember(with, certificates, marks, what); !kept) {
-        // (The list and the marks are what the file still says: remember() put them back.)
-        if (written && keptBefore.isEmpty()) {
+        // (The list and the marks are what the file still says: remember() put them back.) Nothing is kept again
+        // where nothing was kept before; and where something was, that, whatever it held. (Where Windows does not
+        // take it back, the two kept together stay, which hold the one for the KVM as it is: keptBoth.)
+        if (written && !keptAny) {
             m_secrets.forget(secret);
         } else if (written) {
             static_cast<void>(m_secrets.keep(secret, keptBefore));
@@ -1748,6 +2332,11 @@ base::Result<void> LocalWall::alter(const QString& id, OwnKvm kvm, const std::op
             }
         }
         return kept.error();
+    }
+    if (moves) {
+        // The KVM as it is from now on, alone. (Where Windows does not take that, the two kept together stay, and the
+        // one for the KVM as it is is read of them: nothing is lost.)
+        static_cast<void>(m_secrets.keep(secret, keptAs->bytes()));
     }
     if (written) {
         ++one->secretWrites;
@@ -1803,7 +2392,8 @@ base::Result<std::unique_ptr<OneSignIn>> LocalWall::signerIn(const QString& id, 
             if (const std::optional<OwnKvm> twin = anotherKnownBy(id, overHttps->shown)) {
                 return sameDevice(*twin);
             }
-            const OneSignIn::Where where{address, user, onto->knownByCertificate, onto->certificate, onto->number};
+            const OneSignIn::Where where{
+                address, user, onto->knownByCertificate, onto->certificate, onto->number, {}, 0, ServerPlace{}};
             QString kept = keptPasswordOf(m_secrets, *known);
             const WipedOnLeaving overKept(kept);
             return OneSignIn::of(known->kind, where, kept, paces, twins);
@@ -1815,7 +2405,9 @@ base::Result<std::unique_ptr<OneSignIn>> LocalWall::signerIn(const QString& id, 
     // By a driver of its family, held to what the KVM is known by: its certificate, a JetKVM's number (J5), and a
     // controller's to the server it is kept by (another server there is not sent the kept password where its
     // controller's number tells it).
-    const OneSignIn::Where where{address, user, known->knownByCertificate, known->certificate, markHeldTo(*known)};
+    const OneSignIn::Where where{
+        address,     user,        known->knownByCertificate, known->certificate, markHeldTo(*known),
+        known->node, known->vmid, known->serverPlace};
     // (What was read is written over once the sign-in's driver has its own copy. F5.)
     QString kept = keptPasswordOf(m_secrets, *known);
     const WipedOnLeaving overKept(kept);
@@ -1824,7 +2416,7 @@ base::Result<std::unique_ptr<OneSignIn>> LocalWall::signerIn(const QString& id, 
 
 QString LocalWall::markHeldTo(const OwnKvm& kvm)
 {
-    return kvm.kind == "redfish"_L1 ? kvm.machine : kvm.number;
+    return kvm.kind == "redfish"_L1 || kvm.kind == "proxmox"_L1 ? kvm.machine : kvm.number;
 }
 
 std::optional<base::Error> LocalWall::keptPasswordStaysBehind(const QString& id, const QUrl& address) const
@@ -1862,6 +2454,22 @@ bool LocalWall::ask(Held& one)
         }
         one.saidWhenAsked = std::move(why);
         one.waitsToBeAsked = false;
+        return false;
+    }
+    if (known->kind == "vnc"_L1) {
+        // A VNC server is asked nothing beside its own connection, as the web asks none: its RFB greeting is the
+        // asking, before which nothing that says who asks goes, and its password goes only as the answer to the
+        // challenge of what greeted as RFB and asked for VNC authentication (a vncs:// one's only on a line held to
+        // its certificate). So it has a driver with its password from here on.
+        one.waitsToBeAsked = false;
+        one.asked = true;
+        one.saidWhenAsked.reset();
+        letGo(one, connecting());
+        QString kept = keptPasswordOf(m_secrets, *known);
+        const WipedOnLeaving overKept(kept);
+        one.device = driverFor(one, *known, kept);
+        listenTo(one);
+        one.device->look();
         return false;
     }
     if (!hasRoomToAsk()) {
@@ -2043,8 +2651,9 @@ void LocalWall::wasAsked(const QString& id, quint64 number, const OwnKvm& askedA
     // way says, and no password goes there in the clear. Also at its first asking after a start. Held back, it is let
     // go of that only where its HTTPS showed one no other KVM of the wall is known by, or nothing listens there; in
     // doubt (something listens, and showed nothing), it stays held, as kvm::wayOf takes what listens for something
-    // (from the second reading of the twins, MEDIUM), for as long as the one it is held for is on the wall. A start
-    // keeps the hold (heldFor; from the third reading, L2): in doubt at its first asking, it stays held.
+    // (from the second reading of the twins, MEDIUM), for as long as a KVM of the wall is known by that certificate
+    // (outside review 2, 4.3). A start keeps the hold (heldFor; from the third reading, L2): in doubt at its first
+    // asking, it stays held.
     bool holdLifted = false;
     if (overHttps && asItIs) {
         // (The one rule for what holds it back, judgeItsHttps's: twinBehind.)
@@ -2174,6 +2783,15 @@ bool LocalWall::wasAskedWhatItIs(const QString& id) const
     return found != m_held.end() && found->asked;
 }
 
+std::optional<QUrl> LocalWall::sentOnToHttps(const QString& id) const
+{
+    const auto found = std::ranges::find_if(m_held, [&id](const Held& one) { return one.id == id; });
+    if (found == m_held.end() || found->asked || !found->saidWhenAsked) {
+        return std::nullopt;
+    }
+    return kvm::httpsOffered(*found->saidWhenAsked);
+}
+
 base::Error LocalWall::notAskedYet()
 {
     return {"not_asked_yet", words("This device has not been asked yet what it is. Nothing is sent to it, and no "
@@ -2206,6 +2824,11 @@ base::Error LocalWall::notTheKvm(const KvmProbe::Found& found, const QString& fa
         return {"unreachable", words("Nothing answers at this address. No password is sent there before a KVM has "
                                      "answered.")
                                    .toStdString()};
+    }
+    if (found.kind == KvmProbe::Kind::SomethingElse && found.sentOnTo) {
+        // Its plain address sends everybody on to HTTPS at the same host: said with that address, as it is made
+        // (kvm::httpsOnly), for the box that offers it. Nothing goes there by itself, and no password went.
+        return kvm::httpsOnly(*found.sentOnTo);
     }
     if (found.saidByAGatewayAlone) {
         // All that answered was a gateway, saying that what is behind it does not answer: a
@@ -2257,12 +2880,31 @@ QList<base::Result<QString>> LocalWall::takeFromAFile(const QList<FromAFile>& th
     QHash<QString, QList<Place>> atHost;
     QHash<QByteArray, qsizetype> knownBy; // where in `with`
     QHash<QString, qsizetype> givesNumber;
-    const auto note = [&atHost, &knownBy, &givesNumber](const OwnKvm& kvm, qsizetype index) {
+    // And by what a certificate says where a VNC server is one of the two (certificateSaysSo), of those that are not
+    // to stay beside a twin: the VNC servers, and the others.
+    QHash<QByteArray, qsizetype> saidByAVncServer;
+    QHash<QByteArray, qsizetype> saidByAnother;
+    // (A server's controller is no twin by a certificate, whichever of the two, nor a Proxmox guest, whose Proxmox's
+    // certificate is every guest's of it, nor a VNC server, whose certificate says it: sameCertificate. Review c9b-1,
+    // M1; 6.5.)
+    const auto byCertificate = [](const OwnKvm& kvm) {
+        return kvm.knownByCertificate && kvm.kind != "redfish"_L1 && kvm.kind != "proxmox"_L1;
+    };
+    const auto twinByCertificate = [&byCertificate](const OwnKvm& kvm) {
+        return byCertificate(kvm) && kvm.kind != "vnc"_L1;
+    };
+    const auto note = [&atHost, &knownBy, &givesNumber, &saidByAVncServer, &saidByAnother, &byCertificate,
+                       &twinByCertificate](const OwnKvm& kvm, qsizetype index) {
         const Place place = placeOf(kvm);
         atHost[place.host].append(place);
-        // (A server's controller is no twin by a certificate, whichever of the two: sameCertificate.)
-        if (kvm.knownByCertificate && kvm.kind != "redfish"_L1 && !knownBy.contains(kvm.certificate)) {
+        if (twinByCertificate(kvm) && !knownBy.contains(kvm.certificate)) {
             knownBy.insert(kvm.certificate, index);
+        }
+        if (byCertificate(kvm) && !isKeptBeside(kvm)) {
+            QHash<QByteArray, qsizetype>& said = kvm.kind == "vnc"_L1 ? saidByAVncServer : saidByAnother;
+            if (!said.contains(kvm.certificate)) {
+                said.insert(kvm.certificate, index);
+            }
         }
         if (!kvm.number.isEmpty() && !isKeptBeside(kvm) && !givesNumber.contains(kvm.number)) {
             givesNumber.insert(kvm.number, index);
@@ -2278,8 +2920,12 @@ QList<base::Result<QString>> LocalWall::takeFromAFile(const QList<FromAFile>& th
     }
     for (const FromAFile& one : those) {
         OwnKvm kvm = one.kvm;
-        // Nothing was asked at its address, whatever stands in what was handed in.
-        kvm.askedWhatItIs = false;
+        // Nothing was asked at its address, whatever stands in what was handed in. (A Proxmox guest is asked by its
+        // driver, before its first sign-in and every one after: keepsThatItWasAsked says how; it is taken as one
+        // asked, over HTTPS alone.)
+        kvm.askedWhatItIs = kvm.kind == "proxmox"_L1 && keepsThatItWasAsked(kvm);
+        // (Nor did a driver of it replace a boot order here: that is the wall's own to note.)
+        kvm.bootOrderWas.reset();
         // (Only of a family this build speaks to: one of another would be written and not read back.)
         if (!OwnKvm::namesAFamily(kvm.kind)) {
             came.append(base::Result<QString>(
@@ -2290,7 +2936,7 @@ QList<base::Result<QString>> LocalWall::takeFromAFile(const QList<FromAFile>& th
             came.append(base::Result<QString>(base::Error{"too_many", "This wall is full."}));
             continue;
         }
-        if (const std::optional<base::Error> refusal = notAnAddress(kvm.address)) {
+        if (const std::optional<base::Error> refusal = notAnAddressOf(kvm)) {
             came.append(base::Result<QString>(*refusal));
             continue;
         }
@@ -2307,9 +2953,21 @@ QList<base::Result<QString>> LocalWall::takeFromAFile(const QList<FromAFile>& th
             continue;
         }
         if (const auto twin = knownBy.constFind(kvm.certificate);
-            kvm.knownByCertificate && kvm.kind != "redfish"_L1 && twin != knownBy.constEnd()) {
+            twinByCertificate(kvm) && twin != knownBy.constEnd()) {
             came.append(base::Result<QString>(sameDevice(with.at(*twin))));
             continue;
+        }
+        // (By what a certificate says, where one of the two is a VNC server and neither is to stay beside its twin: as
+        // twinOf, 6.5.)
+        if (byCertificate(kvm) && !isKeptBeside(kvm)) {
+            const auto byAVncServer = saidByAVncServer.constFind(kvm.certificate);
+            const auto byAnother = saidByAnother.constFind(kvm.certificate);
+            if (byAVncServer != saidByAVncServer.constEnd() ||
+                (kvm.kind == "vnc"_L1 && byAnother != saidByAnother.constEnd())) {
+                came.append(base::Result<QString>(sameDevice(
+                    with.at(byAVncServer != saidByAVncServer.constEnd() ? *byAVncServer : *byAnother), true)));
+                continue;
+            }
         }
         if (const auto twin = givesNumber.constFind(kvm.number);
             !kvm.number.isEmpty() && !isKeptBeside(kvm) && twin != givesNumber.constEnd()) {
@@ -2366,7 +3024,14 @@ QList<base::Result<QString>> LocalWall::takeFromAFile(const QList<FromAFile>& th
         // Not asked yet: its driver gets no password, and its password is not read here. It is
         // read when an asking has found the KVM (wasAsked), for its driver; for a sealed file of
         // the wall (asAFile); and for a sign-in of somebody's change, once it was asked
-        // (signerIn). Whoever lists the KVMs is told by the mark, and reads nothing.
+        // (signerIn). Whoever lists the KVMs is told by the mark, and reads nothing. (A Proxmox guest's driver has its
+        // token at once: keepsThatItWasAsked.)
+        if (kvm.askedWhatItIs) {
+            QString kept = keptPasswordOf(m_secrets, kvm);
+            const WipedOnLeaving overKept(kept);
+            hold(kvm, true, kept);
+            continue;
+        }
         hold(kvm, false, QString());
     }
     emit changed();
@@ -2389,10 +3054,13 @@ LocalWall::AsAFile LocalWall::asAFile(bool withPasswords)
         // (The number it gives for itself, which tells it from another on the wall that takes the file.)
         device.ident = kvm.number;
         device.keepBoth = isKeptBeside(kvm);
-        // (And the machine its card was added for: a server's, by the numbers it gave for itself.)
+        // (And the machine its card was added for: a server's, by the numbers it gave for itself; a guest's, by its
+        // own.)
         device.machine = kvm.machine;
-        const bool encrypted = kvm.address.startsWith("https://"_L1);
-        // Over HTTPS by its certificate, or by Windows' word. (Over plain HTTP there is nothing
+        device.node = kvm.node;
+        device.vmid = kvm.vmid;
+        const bool encrypted = kvm.address.startsWith("https://"_L1) || kvm.address.startsWith("vncs://"_L1);
+        // Over HTTPS (or vncs://) by its certificate, or by Windows' word. (Over plain HTTP there is nothing
         // to check, and a file says "pinned" of that.)
         device.tls = encrypted && !kvm.knownByCertificate ? u"system"_s : u"pinned"_s;
         if (encrypted && kvm.knownByCertificate) {

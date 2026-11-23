@@ -90,6 +90,14 @@ inline RedfishDevice::Where keptAs(const RedfishByHand& bmc, const QString& mach
     return where;
 }
 
+// ...and where its controller keeps that server's computer, as a driver of it found it (RedfishDevice::serverPlace).
+inline RedfishDevice::Where keptAs(const RedfishByHand& bmc, const QString& machine, const ServerPlace& place)
+{
+    RedfishDevice::Where where = keptAs(bmc, machine);
+    where.serverPlace = place;
+    return where;
+}
+
 inline QString markOf(const QJsonValue& number)
 {
     return QStringLiteral("server:") +

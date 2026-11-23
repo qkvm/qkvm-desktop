@@ -22,8 +22,13 @@
 using namespace Qt::StringLiterals;
 using namespace qkvm::core;
 using namespace qkvm::core::testing;
+using qkvm::base::Architecture;
 
 namespace {
+// This test program's own kind of Windows, and the two by name.
+constexpr Architecture own = qkvm::base::programArchitecture();
+constexpr Architecture x64 = Architecture::X64;
+constexpr Architecture arm64 = Architecture::Arm64;
 // The stand-in that a Setup copy's updater runs in these tests, in Setup's place (stand_in_setup.cpp): its bytes.
 QByteArray standInSetup()
 {
@@ -33,6 +38,8 @@ QByteArray standInSetup()
 
 struct Desk {
     explicit Desk(UpdateKind made = UpdateKind::Portable) : kind(made) {}
+    // A copy of the kind `builtFor` on a PC of the kind `on` (an x64 copy on Windows on Arm: x64 on arm64).
+    Desk(UpdateKind made, Architecture copy, Architecture on) : kind(made), pc(on), builtFor(copy) {}
     Desk(const Desk&) = delete;
     Desk& operator=(const Desk&) = delete;
     // A Setup that is still running ends first, before its folders go.
@@ -43,26 +50,34 @@ struct Desk {
         }
     }
     UpdateKind kind;
+    // The PC's kind of Windows, and the copy's.
+    Architecture pc = own;
+    Architecture builtFor = own;
     QTemporaryDir folder;
     Settings settings{folder.filePath(u"settings.json"_s)};
     ReleaseSigner signer;
     UpdateNetwork network;
     QByteArray package{"a made-up package, never executed"};
     // The program runs from "program" (a Setup copy's holds Setup's marker), and keeps its data in "data".
-    UpdateChannel channel(const QString& version) const
+    UpdateChannel channel(const QString& version) const { return channel(version, builtFor); }
+    // The same copy's channel as a program of the kind `copy` (what starts after Setup, say).
+    UpdateChannel channel(const QString& version, Architecture copy) const
     {
         return {QUrl(u"https://updates.example.test/stable.json"_s),
                 signer.publicKey(),
                 version,
                 kind,
                 folder.filePath(u"program"_s),
-                folder.filePath(u"data"_s)};
+                folder.filePath(u"data"_s),
+                pc,
+                copy};
     }
     Updates updates{channel(u"0.1.0"_s), settings, network, folder.filePath(u"downloads"_s)};
+    // The release for this PC's kind of Windows, of this copy's kind.
+    QJsonObject release() const { return releaseFor(package, QDateTime::currentDateTimeUtc(), kind, pc); }
     void check(const QJsonObject& release = {})
     {
-        network.next = {
-            signer.seal(release.isEmpty() ? releaseFor(package, QDateTime::currentDateTimeUtc(), kind) : release)};
+        network.next = {signer.seal(release.isEmpty() ? this->release() : release)};
         updates.check();
     }
     void download()
@@ -71,8 +86,9 @@ struct Desk {
         updates.download();
     }
     QString program() const { return folder.filePath(u"program"_s); }
-    // A Setup copy, its marker beside the program, its release (the stand-in) downloaded and verified.
-    bool readyToRun()
+    // A Setup copy, its marker beside the program, its release (the stand-in, or `release` with the stand-in's size and
+    // hash) downloaded and verified.
+    bool readyToRun(QJsonObject release = {})
     {
         package = standInSetup();
         QFile marker(program() + u'/' + QString::fromLatin1(setupMarkerName));
@@ -81,7 +97,12 @@ struct Desk {
             return false;
         }
         marker.close();
-        check();
+        if (!release.isEmpty()) {
+            const QJsonObject made = this->release();
+            release[u"bytes"_s] = made[u"bytes"_s];
+            release[u"sha256"_s] = made[u"sha256"_s];
+        }
+        check(release);
         if (!QTest::qWaitFor([this] { return updates.state() == Updates::State::Available; }, 5000)) {
             return false;
         }
@@ -100,9 +121,9 @@ struct Desk {
     }
     // What the stand-in wrote in Setup's log once it ran (its command line, its file's hash, its file's name, its TEMP
     // and its TMP), waited for; nothing where it did not run.
-    QStringList whatSetupWrote() const
+    QStringList whatSetupWrote(const QString& version = u"0.2.0"_s) const
     {
-        QFile log(folder.filePath(u"data/updates/setup-0.2.0.log"_s));
+        QFile log(folder.filePath(u"data/updates/setup-"_s + version + u".log"_s));
         for (int waited = 0; waited < 300; ++waited) {
             if (log.open(QIODevice::ReadOnly)) {
                 const QString said = QString::fromUtf8(log.readAll());
@@ -509,17 +530,18 @@ private slots:
         const auto now = QDateTime::currentDateTimeUtc();
         const auto payload = releaseFor(desk.package, now);
         const auto envelope = desk.signer.seal(payload);
-        QVERIFY(verifiedUpdate(envelope, desk.signer.publicKey(), now, UpdateKind::Portable));
+        QVERIFY(verifiedUpdate(envelope, desk.signer.publicKey(), now, UpdateKind::Portable, own));
         const ReleaseSigner stranger;
-        QVERIFY(!verifiedUpdate(envelope, stranger.publicKey(), now, UpdateKind::Portable));
+        QVERIFY(!verifiedUpdate(envelope, stranger.publicKey(), now, UpdateKind::Portable, own));
         auto tampered = QJsonDocument::fromJson(envelope).object();
         auto changed = payload;
         changed[u"version"_s] = u"99.0.0"_s;
         tampered[u"payload"_s] = QString::fromLatin1(QJsonDocument(changed).toJson().toBase64());
-        QVERIFY(!verifiedUpdate(QJsonDocument(tampered).toJson(), desk.signer.publicKey(), now, UpdateKind::Portable));
-        QVERIFY(!verifiedUpdate(envelope, QByteArray(64, '\0'), now, UpdateKind::Portable));
+        QVERIFY(
+            !verifiedUpdate(QJsonDocument(tampered).toJson(), desk.signer.publicKey(), now, UpdateKind::Portable, own));
+        QVERIFY(!verifiedUpdate(envelope, QByteArray(64, '\0'), now, UpdateKind::Portable, own));
         QVERIFY(!verifiedUpdate(QByteArray(mostUpdateMetadata + 1, 'x'), desk.signer.publicKey(), now,
-                                UpdateKind::Portable));
+                                UpdateKind::Portable, own));
     }
 
     // The signed payload names the kind of copy it is for, and its package ends in that kind; a copy takes only its
@@ -628,7 +650,7 @@ private slots:
         QVERIFY(marker.open(QIODevice::WriteOnly));
         QCOMPARE(marker.write(setupMarkerContent), 6);
         marker.close();
-        const auto setup = updateChannelFor(builtIn, key, u"0.1.0"_s, installed.path(), false, u"C:/data"_s);
+        const auto setup = updateChannelFor(builtIn, key, u"0.1.0"_s, installed.path(), false, u"C:/data"_s, x64);
         QCOMPARE(setup.kind, UpdateKind::Setup);
         QCOMPARE(setup.feed, QUrl(u"https://download.qkvm.com/desktop/stable-setup.json"_s));
         QCOMPARE(setup.programFolder, installed.path());
@@ -636,20 +658,144 @@ private slots:
         QCOMPARE(setup.publicKey, key);
         QCOMPARE(setup.currentVersion, u"0.1.0"_s);
         QTemporaryDir unpacked;
-        const auto portable = updateChannelFor(builtIn, key, u"0.1.0"_s, unpacked.path(), false, u"C:/data"_s);
+        const auto portable = updateChannelFor(builtIn, key, u"0.1.0"_s, unpacked.path(), false, u"C:/data"_s, x64);
         QCOMPARE(portable.kind, UpdateKind::Portable);
         QCOMPARE(portable.feed, builtIn);
-        const auto msix = updateChannelFor(builtIn, key, u"0.1.0"_s, unpacked.path(), true, u"C:/data"_s);
+        const auto msix = updateChannelFor(builtIn, key, u"0.1.0"_s, unpacked.path(), true, u"C:/data"_s, x64);
         QCOMPARE(msix.kind, UpdateKind::Msix);
         QCOMPARE(msix.feed, builtIn);
         // A development build has no feed, and so none for Setup either.
-        QVERIFY(updateChannelFor({}, {}, u"0.1.0"_s, installed.path(), false, {}).feed.isEmpty());
-        QCOMPARE(setupFeedBeside(QUrl(u"https://download.qkvm.com/desktop/stable.json"_s)),
+        QVERIFY(updateChannelFor({}, {}, u"0.1.0"_s, installed.path(), false, {}, x64).feed.isEmpty());
+        QCOMPARE(feedFor(QUrl(u"https://download.qkvm.com/desktop/stable.json"_s), UpdateKind::Setup, x64),
                  QUrl(u"https://download.qkvm.com/desktop/stable-setup.json"_s));
-        QCOMPARE(setupFeedBeside(QUrl(u"https://updates.example.test/a/b/stable.json"_s)),
+        QCOMPARE(feedFor(QUrl(u"https://updates.example.test/a/b/stable.json"_s), UpdateKind::Setup, x64),
                  QUrl(u"https://updates.example.test/a/b/stable-setup.json"_s));
-        QVERIFY(setupFeedBeside(QUrl()).isEmpty());
-        QVERIFY(setupFeedBeside(QUrl(u"http://download.qkvm.com/desktop/stable.json"_s)).isEmpty());
+        QVERIFY(feedFor(QUrl(), UpdateKind::Setup, x64).isEmpty());
+        QVERIFY(feedFor(QUrl(u"http://download.qkvm.com/desktop/stable.json"_s), UpdateKind::Setup, x64).isEmpty());
+    }
+
+    // ---- The PC's own kind of Windows (native ARM64 in 0.2.0, the owner's decision of 2026-11-19) ----
+
+    // What the PC is, from what Windows says the machine is (IsWow64Process2's native machine): Windows on Arm only
+    // where Windows says ARM64; this program's own for anything else, and where Windows said nothing (no such call, or
+    // it failed). So no x64 copy on x64 is ever told it runs on Arm, and no ARM64 copy ever takes the x64 release.
+    void thePcIsOfArmOnlyWhereWindowsSaysSo_data()
+    {
+        QTest::addColumn<Architecture>("program");
+        QTest::addColumn<int>("native");
+        QTest::addColumn<bool>("said");
+        QTest::addColumn<Architecture>("pc");
+        QTest::newRow("x64 on x64") << x64 << int{IMAGE_FILE_MACHINE_AMD64} << true << x64;
+        QTest::newRow("x64 on Arm") << x64 << int{IMAGE_FILE_MACHINE_ARM64} << true << arm64;
+        QTest::newRow("x64, Windows said nothing") << x64 << int{IMAGE_FILE_MACHINE_ARM64} << false << x64;
+        QTest::newRow("x64, an unknown machine") << x64 << int{IMAGE_FILE_MACHINE_UNKNOWN} << true << x64;
+        QTest::newRow("x64, 32-bit Arm") << x64 << int{IMAGE_FILE_MACHINE_ARMNT} << true << x64;
+        QTest::newRow("x64, x86") << x64 << int{IMAGE_FILE_MACHINE_I386} << true << x64;
+        QTest::newRow("arm64 on Arm") << arm64 << int{IMAGE_FILE_MACHINE_ARM64} << true << arm64;
+        QTest::newRow("arm64, x64 said") << arm64 << int{IMAGE_FILE_MACHINE_AMD64} << true << arm64;
+        QTest::newRow("arm64, Windows said nothing") << arm64 << int{IMAGE_FILE_MACHINE_UNKNOWN} << false << arm64;
+    }
+
+    void thePcIsOfArmOnlyWhereWindowsSaysSo()
+    {
+        QFETCH(Architecture, program);
+        QFETCH(int, native);
+        QFETCH(bool, said);
+        QFETCH(Architecture, pc);
+        QCOMPARE(qkvm::base::machineFrom(static_cast<USHORT>(native), said, program), pc);
+    }
+
+    // This program asks Windows itself, and its channel is for that PC, as this program.
+    void thisProgramAsksWindowsWhatThePcIs()
+    {
+        USHORT process = 0;
+        USHORT native = 0;
+        QVERIFY(IsWow64Process2(GetCurrentProcess(), &process, &native) != FALSE);
+        QCOMPARE(qkvm::base::machineArchitecture(), qkvm::base::machineFrom(native, true, own));
+        const auto channel = desktopUpdateChannel();
+        QCOMPARE(channel.machine, qkvm::base::machineArchitecture());
+        QCOMPARE(channel.program, own);
+        QCOMPARE(qkvm::base::architectureName(x64), "x64");
+        QCOMPARE(qkvm::base::architectureName(arm64), "arm64");
+    }
+
+    // Each kind of copy reads its kind's feed for the PC's own kind of Windows, beside the built-in one: on x64 as
+    // 0.1.0 to 0.1.2 read them (stable.json, stable-setup.json), on Windows on Arm stable-arm64.json and
+    // stable-arm64-setup.json.
+    void eachCopyReadsTheFeedOfItsKindForThePcsKind_data()
+    {
+        QTest::addColumn<UpdateKind>("kind");
+        QTest::addColumn<Architecture>("pc");
+        QTest::addColumn<QString>("feed");
+        const QString at = u"https://download.qkvm.com/desktop/"_s;
+        QTest::newRow("portable on x64") << UpdateKind::Portable << x64 << at + u"stable.json"_s;
+        QTest::newRow("msix on x64") << UpdateKind::Msix << x64 << at + u"stable.json"_s;
+        QTest::newRow("setup on x64") << UpdateKind::Setup << x64 << at + u"stable-setup.json"_s;
+        QTest::newRow("portable on Arm") << UpdateKind::Portable << arm64 << at + u"stable-arm64.json"_s;
+        QTest::newRow("msix on Arm") << UpdateKind::Msix << arm64 << at + u"stable-arm64.json"_s;
+        QTest::newRow("setup on Arm") << UpdateKind::Setup << arm64 << at + u"stable-arm64-setup.json"_s;
+    }
+
+    void eachCopyReadsTheFeedOfItsKindForThePcsKind()
+    {
+        QFETCH(UpdateKind, kind);
+        QFETCH(Architecture, pc);
+        QFETCH(QString, feed);
+        const QUrl builtIn(u"https://download.qkvm.com/desktop/stable.json"_s);
+        QCOMPARE(feedFor(builtIn, kind, pc), QUrl(feed));
+        QVERIFY(feedFor({}, kind, pc).isEmpty());
+        QVERIFY(feedFor(QUrl(u"http://download.qkvm.com/desktop/stable.json"_s), kind, pc).isEmpty());
+        // And so a copy of that kind, run from its folder, on that PC.
+        QTemporaryDir folder;
+        if (kind == UpdateKind::Setup) {
+            QFile marker(folder.filePath(QString::fromLatin1(setupMarkerName)));
+            QVERIFY(marker.open(QIODevice::WriteOnly));
+            QCOMPARE(marker.write(setupMarkerContent), 6);
+        }
+        const auto channel = updateChannelFor(builtIn, QByteArray(64, 'k'), u"0.2.0"_s, folder.path(),
+                                              kind == UpdateKind::Msix, u"C:/data"_s, pc);
+        QCOMPARE(channel.kind, kind);
+        QCOMPARE(channel.feed, QUrl(feed));
+        QCOMPARE(channel.machine, pc);
+        QCOMPARE(channel.program, own);
+    }
+
+    // A copy takes only the release for the PC's own kind of Windows, letter for letter: on x64 the x64 release, on Arm
+    // the ARM64 one, of its own kind of copy; never the other kind of Windows', whatever it says of itself otherwise.
+    void eachCopyTakesOnlyTheReleaseForThePcsKind_data()
+    {
+        QTest::addColumn<UpdateKind>("kind");
+        QTest::addColumn<Architecture>("pc");
+        QTest::addColumn<QString>("platform");
+        QTest::addColumn<bool>("taken");
+        const std::array<std::pair<UpdateKind, const char*>, 3> kinds{
+            {{UpdateKind::Portable, "portable"}, {UpdateKind::Msix, "msix"}, {UpdateKind::Setup, "setup"}}};
+        for (const auto& [kind, name] : kinds) {
+            const QString of = QString::fromLatin1(name);
+            QTest::addRow("%s on x64, x64's", name) << kind << x64 << u"windows-x64-"_s + of << true;
+            QTest::addRow("%s on x64, Arm's", name) << kind << x64 << u"windows-arm64-"_s + of << false;
+            QTest::addRow("%s on Arm, Arm's", name) << kind << arm64 << u"windows-arm64-"_s + of << true;
+            QTest::addRow("%s on Arm, x64's", name) << kind << arm64 << u"windows-x64-"_s + of << false;
+            QTest::addRow("%s on Arm, in capitals", name) << kind << arm64 << u"windows-ARM64-"_s + of << false;
+            QTest::addRow("%s on Arm, aarch64", name) << kind << arm64 << u"windows-aarch64-"_s + of << false;
+            QTest::addRow("%s on Arm, arm", name) << kind << arm64 << u"windows-arm-"_s + of << false;
+            QTest::addRow("%s on Arm, no kind", name) << kind << arm64 << u"windows-"_s + of << false;
+        }
+        QTest::newRow("on Arm, the whole name alone") << UpdateKind::Portable << arm64 << u"windows-arm64"_s << false;
+    }
+
+    void eachCopyTakesOnlyTheReleaseForThePcsKind()
+    {
+        QFETCH(UpdateKind, kind);
+        QFETCH(Architecture, pc);
+        QFETCH(QString, platform);
+        QFETCH(bool, taken);
+        Desk desk;
+        const auto now = QDateTime::currentDateTimeUtc();
+        auto payload = releaseFor(desk.package, now, kind, pc);
+        payload[u"platform"_s] = platform;
+        QCOMPARE(static_cast<bool>(verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), now, kind, pc)),
+                 taken);
     }
 
     void eachKindOfCopyTakesOnlyItsOwnKindOfRelease()
@@ -658,12 +804,13 @@ private slots:
         QFETCH(QString, platform);
         QFETCH(QString, package);
         QFETCH(bool, taken);
+        // (Its rows are of x64's platforms: a copy on x64 Windows, whatever this test program is built for.)
         Desk desk;
         const auto now = QDateTime::currentDateTimeUtc();
-        auto payload = releaseFor(desk.package, now, copy);
+        auto payload = releaseFor(desk.package, now, copy, x64);
         payload[u"platform"_s] = platform;
         payload[u"package"_s] = package;
-        QCOMPARE(static_cast<bool>(verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), now, copy)),
+        QCOMPARE(static_cast<bool>(verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), now, copy, x64)),
                  taken);
     }
 
@@ -672,12 +819,21 @@ private slots:
         QTest::addColumn<QString>("fixture");
         QTest::addColumn<UpdateKind>("kind");
         QTest::addColumn<QString>("ending");
-        QTest::newRow("msix") << u"data/update-feed-dotnet.json"_s << UpdateKind::Msix << u".msix"_s;
-        QTest::newRow("portable") << u"data/update-feed-dotnet-portable.json"_s << UpdateKind::Portable << u".zip"_s;
+        QTest::addColumn<Architecture>("pc");
+        QTest::newRow("msix") << u"data/update-feed-dotnet.json"_s << UpdateKind::Msix << u".msix"_s << x64;
+        QTest::newRow("portable") << u"data/update-feed-dotnet-portable.json"_s << UpdateKind::Portable << u".zip"_s
+                                  << x64;
         // Signed by sign_release.ps1 with a throwaway encrypted key, assembled, then signed again by refresh_feed.ps1.
-        QTest::newRow("refreshed") << u"data/update-feed-dotnet-refreshed.json"_s << UpdateKind::Portable << u".zip"_s;
+        QTest::newRow("refreshed") << u"data/update-feed-dotnet-refreshed.json"_s << UpdateKind::Portable << u".zip"_s
+                                   << x64;
         // prepare_update_payload.ps1 -Setup, assembled for stable-setup.json.
-        QTest::newRow("setup") << u"data/update-feed-dotnet-setup.json"_s << UpdateKind::Setup << u"-setup.exe"_s;
+        QTest::newRow("setup") << u"data/update-feed-dotnet-setup.json"_s << UpdateKind::Setup << u"-setup.exe"_s
+                               << x64;
+        // prepare_update_payload.ps1 -Arch arm64 (0.2.0), assembled for stable-arm64.json and stable-arm64-setup.json.
+        QTest::newRow("arm64 portable") << u"data/update-feed-dotnet-arm64-portable.json"_s << UpdateKind::Portable
+                                        << u".zip"_s << arm64;
+        QTest::newRow("arm64 setup") << u"data/update-feed-dotnet-arm64-setup.json"_s << UpdateKind::Setup
+                                     << u"-setup.exe"_s << arm64;
     }
 
     void releaseToolsFeedIsAcceptedByTheWindowsVerifier()
@@ -685,6 +841,7 @@ private slots:
         QFETCH(QString, fixture);
         QFETCH(UpdateKind, kind);
         QFETCH(QString, ending);
+        QFETCH(Architecture, pc);
         // Prepared/assembled by the PowerShell release tools and signed by .NET,
         // independently of this test's CNG signer. Only public data is retained.
         // From the source folder the build names (a release build trims its folder off __FILE__).
@@ -694,12 +851,14 @@ private slots:
         const auto key = QByteArray::fromHex(kept.value(u"public_key"_s).toString().toLatin1());
         const auto envelope = QByteArray::fromBase64(kept.value(u"feed"_s).toString().toLatin1());
         const auto now = QDateTime::fromString(kept.value(u"checked_at"_s).toString(), Qt::ISODate);
-        const auto release = verifiedUpdate(envelope, key, now, kind);
+        const auto release = verifiedUpdate(envelope, key, now, kind, pc);
         QVERIFY(release);
         QVERIFY(release.value().package.path().endsWith(ending));
-        // And every other kind of copy refuses it, signed and current as it is.
+        // And every other kind of copy, on either kind of PC, refuses it, signed and current as it is.
         for (const auto other : {UpdateKind::Msix, UpdateKind::Portable, UpdateKind::Setup}) {
-            QVERIFY(other == kind || !verifiedUpdate(envelope, key, now, other));
+            for (const auto on : {x64, arm64}) {
+                QVERIFY((other == kind && on == pc) || !verifiedUpdate(envelope, key, now, other, on));
+            }
         }
         const QByteArray package("A made-up test package; never installed.");
         QCOMPARE(release.value().version, u"0.2.0"_s);
@@ -743,7 +902,7 @@ private slots:
         auto payload = releaseFor(desk.package);
         payload[field] = value;
         QVERIFY(!verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), QDateTime::currentDateTimeUtc(),
-                                UpdateKind::Portable));
+                                UpdateKind::Portable, own));
     }
 
     void duplicateFieldsAndBrokenUtf8AreRejected()
@@ -752,10 +911,10 @@ private slots:
         auto payload = QJsonDocument(releaseFor(desk.package)).toJson(QJsonDocument::Compact);
         payload.insert(1, "\"version\":\"8.0.0\",");
         QVERIFY(!verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), QDateTime::currentDateTimeUtc(),
-                                UpdateKind::Portable));
+                                UpdateKind::Portable, own));
         payload = QByteArray("{\"notes\":\"") + char(-1) + "\"}";
         QVERIFY(!verifiedUpdate(desk.signer.seal(payload), desk.signer.publicKey(), QDateTime::currentDateTimeUtc(),
-                                UpdateKind::Portable));
+                                UpdateKind::Portable, own));
     }
 
     void automaticChecksNotifyOnceAndNeverDownloadOrInstall()
@@ -1023,6 +1182,46 @@ private slots:
         desk.download();
         QCOMPARE(desk.network.requests.size(), 1);
         QVERIFY(!desk.updates.runSetup());
+    }
+
+    // A release of the copy's own version is offered only to a copy that is not of the PC's own kind of Windows (an
+    // x64 copy on Windows on Arm, which Windows runs under its emulation): that release is the same program of the
+    // PC's kind. A copy of the PC's kind is never offered its own version, on x64 and on Arm alike; an older version
+    // is never offered to any.
+    void theSameVersionIsOfferedOnlyToACopyThatIsNotOfThePcsKind_data()
+    {
+        QTest::addColumn<UpdateKind>("kind");
+        QTest::addColumn<Architecture>("copy");
+        QTest::addColumn<Architecture>("pc");
+        QTest::addColumn<QString>("version");
+        QTest::addColumn<bool>("offered");
+        for (const auto kind : {UpdateKind::Portable, UpdateKind::Setup}) {
+            const char* name = kind == UpdateKind::Portable ? "portable" : "setup";
+            QTest::addRow("%s, x64 on x64, the same", name) << kind << x64 << x64 << u"0.1.0"_s << false;
+            QTest::addRow("%s, arm64 on Arm, the same", name) << kind << arm64 << arm64 << u"0.1.0"_s << false;
+            QTest::addRow("%s, x64 on Arm, the same", name) << kind << x64 << arm64 << u"0.1.0"_s << true;
+            QTest::addRow("%s, x64 on Arm, older", name) << kind << x64 << arm64 << u"0.0.9"_s << false;
+            QTest::addRow("%s, x64 on Arm, newer", name) << kind << x64 << arm64 << u"0.2.0"_s << true;
+            QTest::addRow("%s, arm64 on Arm, older", name) << kind << arm64 << arm64 << u"0.0.9"_s << false;
+            QTest::addRow("%s, arm64 on Arm, newer", name) << kind << arm64 << arm64 << u"0.2.0"_s << true;
+            QTest::addRow("%s, x64 on x64, newer", name) << kind << x64 << x64 << u"0.2.0"_s << true;
+        }
+    }
+
+    void theSameVersionIsOfferedOnlyToACopyThatIsNotOfThePcsKind()
+    {
+        QFETCH(UpdateKind, kind);
+        QFETCH(Architecture, copy);
+        QFETCH(Architecture, pc);
+        QFETCH(QString, version);
+        QFETCH(bool, offered);
+        Desk desk(kind, copy, pc);
+        QCOMPARE(desk.updates.offersThePcsOwnKind(), copy != pc);
+        auto payload = desk.release();
+        payload[u"version"_s] = version;
+        desk.check(payload);
+        QTRY_VERIFY(!desk.updates.busy());
+        QCOMPARE(desk.updates.state(), offered ? Updates::State::Available : Updates::State::Current);
     }
 
     void failuresAreNeverReportedAsCurrentAndDoNotChangeSuccessfulDate_data()
@@ -1676,8 +1875,7 @@ private slots:
             QVERIFY(desk.updates.runSetup());
             QTRY_VERIFY_WITH_TIMEOUT(!desk.setupStillRuns(), 15000);
             QVERIFY(!QFileInfo::exists(log));
-            desk.network.next = {
-                desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+            desk.network.next = {desk.signer.seal(desk.release())};
             const Updates after(desk.channel(u"0.1.0"_s), desk.settings, desk.network,
                                 desk.folder.filePath(u"downloads"_s));
             QCOMPARE(after.afterSetup(), u"The update to qKVM 0.2.0 was not installed. Setup's log: "_s +
@@ -1725,7 +1923,7 @@ private slots:
         QCOMPARE(desk.handOver()["to"_L1].toString(), u"0.2.0"_s);
         const qsizetype asked = desk.network.requests.size();
         // (The feed has an answer ready: a look would be seen among the requests.)
-        desk.network.next = {desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+        desk.network.next = {desk.signer.seal(desk.release())};
         const Updates after(desk.channel(u"0.3.0"_s), desk.settings, desk.network,
                             desk.folder.filePath(u"downloads"_s));
         QCOMPARE(after.afterSetup(), QString());
@@ -1736,6 +1934,96 @@ private slots:
         QCOMPARE(desk.network.requests.size(), asked);
     }
 
+    // The note of a hand-over says the kind of Windows the release is for (from 0.2.0; 0.1.x's notes say none).
+    void aHandOverSaysTheKindOfWindowsItsReleaseIsFor_data()
+    {
+        QTest::addColumn<Architecture>("copy");
+        QTest::addColumn<Architecture>("pc");
+        QTest::addColumn<QString>("noted");
+        QTest::newRow("x64 on x64") << x64 << x64 << u"x64"_s;
+        QTest::newRow("x64 on Arm") << x64 << arm64 << u"arm64"_s;
+        QTest::newRow("arm64 on Arm") << arm64 << arm64 << u"arm64"_s;
+    }
+
+    void aHandOverSaysTheKindOfWindowsItsReleaseIsFor()
+    {
+        QFETCH(Architecture, copy);
+        QFETCH(Architecture, pc);
+        QFETCH(QString, noted);
+        Desk desk(UpdateKind::Setup, copy, pc);
+        QVERIFY(desk.readyToRun());
+        QVERIFY(desk.updates.runSetup());
+        QVERIFY(!desk.whatSetupWrote().isEmpty());
+        QCOMPARE(desk.handOver()["machine"_L1].toString(), noted);
+        QCOMPARE(desk.handOver()["to"_L1].toString(), u"0.2.0"_s);
+    }
+
+    // An x64 copy on Windows on Arm, handed over to Setup for the ARM64 release of its own version: the next start
+    // says it was installed only where the program that starts is of that kind; the x64 copy starting again at that
+    // version is one Setup did not replace, and is told what Setup said.
+    void aSwitchToThePcsKindIsSaidInstalledOnlyWhereThatKindStarts()
+    {
+        {
+            Desk desk(UpdateKind::Setup, x64, arm64);
+            auto same = desk.release();
+            same[u"version"_s] = u"0.1.0"_s;
+            QVERIFY(desk.readyToRun(same));
+            QVERIFY(desk.updates.runSetup());
+            QVERIFY(!desk.whatSetupWrote(u"0.1.0"_s).isEmpty());
+            QTRY_VERIFY_WITH_TIMEOUT(!desk.setupStillRuns(), 15000);
+            QCOMPARE(desk.handOver()["to"_L1].toString(), u"0.1.0"_s);
+            QCOMPARE(desk.handOver()["machine"_L1].toString(), u"arm64"_s);
+            const Updates after(desk.channel(u"0.1.0"_s, arm64), desk.settings, desk.network,
+                                desk.folder.filePath(u"downloads"_s));
+            QCOMPARE(after.afterSetup(), u"Updated to qKVM 0.1.0."_s);
+            QVERIFY(!after.afterSetupWentWrong());
+            QVERIFY(!QFileInfo::exists(desk.folder.filePath(u"data/updates/setup-handover.json"_s)));
+        }
+        Desk desk(UpdateKind::Setup, x64, arm64);
+        auto same = desk.release();
+        same[u"version"_s] = u"0.1.0"_s;
+        QVERIFY(desk.readyToRun(same));
+        const Environment says(u"QKVM_STAND_IN_SETUP_RESULT"_s, u"105 the program was still running"_s);
+        QVERIFY(desk.updates.runSetup());
+        QVERIFY(desk.setupStillRuns() || QFileInfo::exists(desk.folder.filePath(u"data/updates/setup-0.1.0.log"_s)));
+        QTRY_VERIFY_WITH_TIMEOUT(!desk.setupStillRuns(), 15000);
+        desk.network.next = {desk.signer.seal(same)};
+        const Updates after(desk.channel(u"0.1.0"_s, x64), desk.settings, desk.network,
+                            desk.folder.filePath(u"downloads"_s));
+        QVERIFY2(after.afterSetup().startsWith(u"The update to qKVM 0.1.0 was not installed: qKVM was still running"_s),
+                 qPrintable(after.afterSetup()));
+        QVERIFY(after.afterSetupWentWrong());
+        QVERIFY(!QFileInfo::exists(desk.folder.filePath(u"data/updates/setup-handover.json"_s)));
+        // And offered again.
+        QTRY_COMPARE(after.state(), Updates::State::Available);
+    }
+
+    // A note of 0.1.x says no kind of Windows: it is read by its version alone, as 0.1.x read it, by a program of
+    // either kind (the fixtures of each published version: test_ui_upgrade_continuity).
+    void aNoteThatSaysNoKindOfWindowsIsReadByItsVersionAlone_data()
+    {
+        QTest::addColumn<Architecture>("copy");
+        QTest::newRow("x64") << x64;
+        QTest::newRow("arm64") << arm64;
+    }
+
+    void aNoteThatSaysNoKindOfWindowsIsReadByItsVersionAlone()
+    {
+        QFETCH(Architecture, copy);
+        Desk desk(UpdateKind::Setup, copy, arm64);
+        const QString file = desk.folder.filePath(u"data/updates/setup-handover.json"_s);
+        QVERIFY(QDir().mkpath(QFileInfo(file).absolutePath()));
+        QFile written(file);
+        QVERIFY(written.open(QIODevice::WriteOnly));
+        const QByteArray note(R"({"schema":1,"from":"0.0.9","to":"0.1.0","process":4,"created":"1","temp":"x"})");
+        QCOMPARE(written.write(note), note.size());
+        written.close();
+        const Updates after(desk.channel(u"0.1.0"_s), desk.settings, desk.network,
+                            desk.folder.filePath(u"downloads"_s));
+        QCOMPARE(after.afterSetup(), u"Updated to qKVM 0.1.0."_s);
+        QVERIFY(!QFileInfo::exists(file));
+    }
+
     void theStartAfterAFailedUpdateSaysWhereSetupsLogIsAndOffersItAgain()
     {
         Desk desk(UpdateKind::Setup);
@@ -1743,7 +2031,7 @@ private slots:
         QVERIFY(desk.updates.runSetup());
         QVERIFY(!desk.whatSetupWrote().isEmpty());
         QTRY_VERIFY(!desk.setupStillRuns());
-        desk.network.next = {desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+        desk.network.next = {desk.signer.seal(desk.release())};
         Updates after(desk.channel(u"0.1.0"_s), desk.settings, desk.network, desk.folder.filePath(u"downloads"_s));
         QVERIFY(after.afterSetup().startsWith(u"The update to qKVM 0.2.0 was not installed."_s));
         QVERIFY(after.afterSetup().contains(QDir::toNativeSeparators(desk.updates.setupLogFor(u"0.2.0"_s))));
@@ -1772,6 +2060,14 @@ private slots:
             << u"7 nothing was changed: a file of qKVM's was in use"_s
             << u"The update to qKVM 0.2.0 was not installed, and nothing was changed: a file of qKVM's was in use. "
                "Setup's log: "_s;
+        // (Where Setup first put right what an update that did not finish left, it says what, and that it changed
+        // nothing else: its words as they are, never "nothing was changed" (review i020-2, L9).)
+        QTest::newRow("put right first")
+            << u"7 first, Setup put back the earlier version, which an update that did not finish had set aside, "
+               "and changed nothing else: a file of qKVM's was in use"_s
+            << u"The update to qKVM 0.2.0 was not installed: first, Setup put back the earlier version, which an "
+               "update that did not finish had set aside, and changed nothing else: a file of qKVM's was in use. "
+               "Setup's log: "_s;
         QTest::newRow("none") << QString() << u"The update to qKVM 0.2.0 was not installed. Setup's log: "_s;
         QTest::newRow("another word") << u"5 aborted"_s
                                       << u"The update to qKVM 0.2.0 was not installed. Setup's log: "_s;
@@ -1789,7 +2085,7 @@ private slots:
         QVERIFY(desk.updates.runSetup());
         QVERIFY(desk.setupStillRuns() || QFileInfo::exists(desk.folder.filePath(u"data/updates/setup-0.2.0.log"_s)));
         QTRY_VERIFY_WITH_TIMEOUT(!desk.setupStillRuns(), 15000);
-        desk.network.next = {desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+        desk.network.next = {desk.signer.seal(desk.release())};
         Updates after(desk.channel(u"0.1.0"_s), desk.settings, desk.network, desk.folder.filePath(u"downloads"_s));
         QVERIFY2(after.afterSetup().startsWith(said), qPrintable(after.afterSetup()));
         if (said.endsWith(u"Setup's log: "_s)) {
@@ -1809,7 +2105,7 @@ private slots:
         const Environment waits(u"QKVM_STAND_IN_SETUP_WAIT_MS"_s, u"1500"_s);
         const Environment says(u"QKVM_STAND_IN_SETUP_RESULT"_s, u"105 the program was still running"_s);
         QVERIFY(desk.updates.runSetup());
-        desk.network.next = {desk.signer.seal(releaseFor(desk.package, QDateTime::currentDateTimeUtc(), desk.kind))};
+        desk.network.next = {desk.signer.seal(desk.release())};
         Updates after(desk.channel(u"0.1.0"_s), desk.settings, desk.network, desk.folder.filePath(u"downloads"_s));
         const QSignalSpy told(&after, &Updates::afterSetupTold);
         QCOMPARE(after.afterSetup(), u"qKVM Setup is still at work on the update to qKVM 0.2.0. What came of it is "
@@ -1860,6 +2156,15 @@ private slots:
         QTest::newRow("a version with a path") << QByteArray(R"({"to":"0.2.0/../x","process":4,"created":"1"})");
         QTest::newRow("no process") << QByteArray(R"({"to":"0.2.0","created":"1"})");
         QTest::newRow("no start time") << QByteArray(R"({"to":"0.2.0","process":4})");
+        // (From 0.2.0 a note says the kind of Windows its release is for: x64 or arm64, and nothing else.)
+        QTest::newRow("a kind of Windows of no name")
+            << QByteArray(R"({"to":"0.2.0","process":4,"created":"1","machine":"arm32"})");
+        QTest::newRow("a kind of Windows in capitals")
+            << QByteArray(R"({"to":"0.2.0","process":4,"created":"1","machine":"ARM64"})");
+        QTest::newRow("a kind of Windows that is no text")
+            << QByteArray(R"({"to":"0.2.0","process":4,"created":"1","machine":64})");
+        QTest::newRow("an empty kind of Windows")
+            << QByteArray(R"({"to":"0.2.0","process":4,"created":"1","machine":""})");
     }
 
     void aHandOverNoteThatDoesNotReadIsLetGo()

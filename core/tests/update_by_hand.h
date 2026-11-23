@@ -75,13 +75,16 @@ private:
 };
 
 // A release of the given kind, as the release tools write it (spelled out here, not taken from the program).
+// For the test program's own kind of Windows unless another is named.
 inline QJsonObject releaseFor(const QByteArray& package, const QDateTime& now = QDateTime::currentDateTimeUtc(),
-                              UpdateKind kind = UpdateKind::Portable)
+                              UpdateKind kind = UpdateKind::Portable,
+                              base::Architecture machine = base::programArchitecture())
 {
     using namespace Qt::StringLiterals;
-    const QString platform = kind == UpdateKind::Portable ? u"windows-x64-portable"_s
-                             : kind == UpdateKind::Msix   ? u"windows-x64-msix"_s
-                                                          : u"windows-x64-setup"_s;
+    const QString windows = machine == base::Architecture::Arm64 ? u"windows-arm64-"_s : u"windows-x64-"_s;
+    const QString platform = windows + (kind == UpdateKind::Portable ? u"portable"_s
+                                        : kind == UpdateKind::Msix   ? u"msix"_s
+                                                                     : u"setup"_s);
     const QString address = kind == UpdateKind::Portable ? u"https://updates.example.test/qkvm-0.2.0.zip"_s
                             : kind == UpdateKind::Msix
                                 ? u"https://updates.example.test/qkvm-0.2.0.msix"_s

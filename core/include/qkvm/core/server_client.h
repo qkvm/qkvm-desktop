@@ -17,6 +17,8 @@
 
 #include <qkvm/base/result.h>
 #include <qkvm/core/live_link.h>
+#include <qkvm/core/media_place.h>
+#include <qkvm/core/network_end.h>
 #include <qkvm/core/server_details.h>
 #include <qkvm/core/server_types.h>
 #include <qkvm/core/tls.h>
@@ -99,11 +101,16 @@ namespace qkvm::core {
 //
 // It is one of the two places a wall's machines come from (wall_source.h): what a wall asks of
 // such a place, it asks a server through this.
-class ServerClient : public QObject, public WallSource {
+class ServerClient : public QObject, public WallSource, public MediaPlace {
     Q_OBJECT
 
 public:
     explicit ServerClient(QObject* parent = nullptr);
+    ~ServerClient() override;
+    ServerClient(const ServerClient&) = delete;
+    ServerClient& operator=(const ServerClient&) = delete;
+    ServerClient(ServerClient&&) = delete;
+    ServerClient& operator=(ServerClient&&) = delete;
 
     // Which server: what was typed, with "http://" put before it where no scheme was. An address
     // that is typed with "https://" is never spoken to in the clear. Refused: anything that is not
@@ -262,17 +269,20 @@ public:
     // A machine's virtual media (0.3.0): an admin's, signed in in person. The server refuses a token, and anybody
     // else, in its own words, as it refuses a machine that has none ("no_virtual_media"). `machine` is the machine's
     // id; `named` what the question named it, which the server holds to (409 "changed" where it is called otherwise
-    // by then: nothing was done).
+    // by then: nothing was done); `listed` (and a mount's own) the mark of the list it was picked from, sent where
+    // there is one, which a server 0.3.2 holds to (409 "moved" where the tile's machine is another by then: nothing was
+    // done). A server before 0.3.2 lists none, and is sent none: what goes is then as it was.
     // The images that can be mounted on it and what is mounted, asked of the machine now.
-    void askMedia(const QString& machine, std::function<void(base::Result<MediaList>)> done);
+    void askMedia(const QString& machine, std::function<void(base::Result<MediaList>)> done) override;
     // Mounted, taken out, deleted: answered as act() is (only the server's own no is a no, and whatever else leaves
     // open whether it was done is told as no answer of the server's, `unreachable`), and given as long as the page
     // gives them: seven minutes, for a server's mount waits for its drive to show, its answer and its task.
-    void mountMedia(const QString& machine, const MediaMount& mount, std::function<void(base::Result<MediaDone>)> done);
-    void unmountMedia(const QString& machine, const QString& image, const QString& named,
-                      std::function<void(base::Result<MediaDone>)> done);
-    void deleteMedia(const QString& machine, const QString& image, const QString& named,
-                     std::function<void(base::Result<MediaDone>)> done);
+    void mountMedia(const QString& machine, const MediaMount& mount,
+                    std::function<void(base::Result<MediaDone>)> done) override;
+    void unmountMedia(const QString& machine, const QString& image, const QString& named, const QString& listed,
+                      std::function<void(base::Result<MediaDone>)> done) override;
+    void deleteMedia(const QString& machine, const QString& image, const QString& named, const QString& listed,
+                     std::function<void(base::Result<MediaDone>)> done) override;
     // An image carried to the machine's device as `name`, from `image` as it is read: a piece at a time as the line
     // takes it, kept nowhere on the way, with its length said first, 16 GB at the most (mostUploadBytes). `image` is
     // open for reading, and is read at a place (a file): what has no length of its own before it is read is not
@@ -281,12 +291,24 @@ public:
     // nothing at the most (the server waits five for the device to say it has it all, once its last byte is out),
     // however long the whole takes; and it is answered as act() is. Driven by the network's own events on this
     // thread, which goes on meanwhile. What is handed back stops it: called before the answer, nothing more of it
-    // goes, its line is closed, and `done` is told uploadStopped (what came of it the server takes off).
+    // goes, its line is closed, and `done` is told uploadStopped (what came of it the server takes off). `listed` goes
+    // in its address beside the name and the machine, where there is one.
     std::function<void()> uploadMedia(const QString& machine, const QString& name, const QString& named,
-                                      std::unique_ptr<QIODevice> image,
-                                      std::function<void(base::Result<MediaUploaded>)> done);
+                                      const QString& listed, std::unique_ptr<QIODevice> image,
+                                      std::function<void(base::Result<MediaUploaded>)> done) override;
     // How far the upload under way to it has come, by the server's count; nothing: none is.
-    void askUpload(const QString& machine, std::function<void(base::Result<std::optional<MediaUploading>>)> done);
+    void askUpload(const QString& machine,
+                   std::function<void(base::Result<std::optional<MediaUploading>>)> done) override;
+    // Who is signed in at which server: its address and the session, hashed (MediaPlace::mediaIdentity).
+    QByteArray mediaIdentity() const override;
+    // Nothing came back from the server: it could not be reached, or its answer broke off (`unreachable`), or it said
+    // that it failed inside ("internal"). Its own `timeout` and `dropped` are its words, which say so.
+    bool saidNothing(const base::Error& error) const override;
+    // A server's list says nothing of where its machine is: nothing (the server holds to the name it was sent).
+    std::optional<base::Error> movedSince(const QString& /*machine*/, const QString& /*bound*/) const override
+    {
+        return std::nullopt;
+    }
     // For a test: how long an upload may go without a byte either way before it is cut off.
     void setUploadQuietMs(int ms) { m_uploadQuietMs = ms; }
 
@@ -325,8 +347,7 @@ public:
     // API is told as otherVersion, and a certificate that is not the server's as that: nothing
     // was sent then either.)
     static constexpr const char* notSent = "desktop:not_sent";
-    // An upload was stopped by whoever began it (the stop uploadMedia hands back): nothing more of it went.
-    static constexpr const char* uploadStopped = "desktop:stopped";
+    // (An upload stopped by whoever began it is MediaPlace::uploadStopped.)
     // An upload's file could not be read on the way (core::ReadAhead::failure, in the message): nothing more of it
     // went, and what the server has of it is a part.
     static constexpr const char* imageUnreadable = "desktop:image_unreadable";
@@ -353,6 +374,13 @@ private:
     // keeps a line that was idle all that while from being used; one line of several, idle as long while another is
     // busy, would be used all the same (Qt lets go of a whole pool, not of one of its lines).
     QNetworkReply* onALineOfItsOwn(const std::function<QNetworkReply*(QNetworkAccessManager&)>& send);
+    // Another server, or another certificate rule: no line the client kept is used again. Its own lines (m_network)
+    // end, and what it asks from now on goes on a manager made anew (prepare). The questions still out on the old
+    // lines are given up a turn later (aborted: told once, as a server that could not be reached, as Qt's
+    // clearConnectionCache had them told, and never sent again), and the old manager ends then, off the interface
+    // thread (network_end.h): clearConnectionCache waited up to five seconds there for the thread they were spoken on,
+    // which Windows may hold. (The lines for one question each are not the client's to end: each ends with its answer.)
+    void endItsLines();
     // The session a good answer to a sign-in brings, where the answer is to a question of this
     // `turn`: nobody has signed out and no other server was named since it was asked.
     void takeSessionFrom(const QNetworkReply& reply, quint64 turn);
@@ -408,7 +436,9 @@ private:
     // anything of Qt's that speaks is made, which is why it stands before that here. Where it
     // is not what is in use, no HTTPS address is taken (setAddress).
     const bool m_windowsOwnTls = useWindowsOwnTls();
-    QNetworkAccessManager m_network;
+    // Ended off the interface thread, its questions with it here (network_end.h): its end may wait five seconds. Made
+    // anew for another server and another certificate rule (endItsLines).
+    OwnNetwork m_network = ownNetwork();
     QUrl m_address;
     // The session the calls carry; empty: nobody is signed in here.
     QByteArray m_session;

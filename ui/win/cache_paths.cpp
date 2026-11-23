@@ -8,6 +8,8 @@
 #include <appmodel.h>
 #include <shlobj.h>
 
+#include <qkvm/base/machine.h>
+
 #include "installer_config.h"
 
 namespace qkvm::storage {
@@ -37,12 +39,20 @@ std::wstring currentFamily()
     return value.data();
 }
 
+unsigned int familyArchitecture()
+{
+    return base::programArchitecture() == base::Architecture::Arm64 ? PROCESSOR_ARCHITECTURE_ARM64
+                                                                    : PROCESSOR_ARCHITECTURE_AMD64;
+}
+
 std::wstring familyFor(std::wstring name, std::wstring publisher)
 {
     PACKAGE_ID id{};
     id.name = name.data();
     id.publisher = publisher.data();
-    id.processorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
+    // (The program's own kind of Windows: a family has none in it, so an x64 and an ARM64 package of the program share
+    // their family and its cache.)
+    id.processorArchitecture = familyArchitecture();
     UINT32 count = 0;
     if (PackageFamilyNameFromId(&id, &count, nullptr) != ERROR_INSUFFICIENT_BUFFER ||
         count > PACKAGE_FAMILY_NAME_MAX_LENGTH + 1)

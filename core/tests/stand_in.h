@@ -3,11 +3,13 @@
 #include <functional>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHash>
+#include <QHostAddress>
 #include <QList>
 #include <QPointer>
 #include <QSslCertificate>
@@ -31,7 +33,8 @@ struct Asked {
     QByteArray path;                       // with what stands behind the question mark
     QHash<QByteArray, QByteArray> headers; // names in small letters
     QByteArray body;
-    int line = 0; // the line it came on: counted from 1, in the order the lines came
+    int line = 0;    // the line it came on: counted from 1, in the order the lines came
+    QHostAddress at; // the address of this PC's it came to (StandIn::alsoAt)
 };
 
 struct Answered {
@@ -44,12 +47,15 @@ struct Answered {
     QByteArray body;
     QByteArray type;
     QList<QByteArray> more; // further header lines, each whole: "Set-Cookie: a=b"
-    bool never = false;     // say nothing at all, and keep the line open: a server that does not answer
-    bool hangUp = false;    // say nothing and close the line: a server that falls over at this question
-    int afterMs = 0;        // answer only after this long: a server that is waiting for a machine
-    int bodyAfterMs = 0;    // and the body this much later than what comes before it
-    int byteEveryMs = 0;    // send the answer a byte at a time, this far apart, and never all of it
-    int shortBy = 0;        // say the answer is this many bytes longer than it is, and close the line
+    // The words of its status line, after the status: "X" unless a test says otherwise (a Proxmox says why it refused
+    // there, and nowhere else).
+    QByteArray reason = "X";
+    bool never = false;  // say nothing at all, and keep the line open: a server that does not answer
+    bool hangUp = false; // say nothing and close the line: a server that falls over at this question
+    int afterMs = 0;     // answer only after this long: a server that is waiting for a machine
+    int bodyAfterMs = 0; // and the body this much later than what comes before it
+    int byteEveryMs = 0; // send the answer a byte at a time, this far apart, and never all of it
+    int shortBy = 0;     // say the answer is this many bytes longer than it is, and close the line
     // An answer that does not end: what comes before the body, with no length to it, then the
     // body, and the line is kept. What follows on it is the test's to send (StandIn::sendMore).
     bool streams = false;
@@ -59,6 +65,11 @@ struct Answered {
     // question to the server that still waits for a line of its own, as if the server had hung up
     // on each. Seen.)
     int moreToCome = 0;
+    // Told once, when the answer has been written whole, or, where its line has gone before that, when it would have
+    // been written (as a real KVM works on): until then the server is at work on the question (a made-up KVM's books of
+    // how many are with it at once). By the writing itself where there is one, not by a clock's guess of when that will
+    // be: a timer may fire well before its time (one asked for 30 ms, at 15).
+    std::function<void()> whenOver;
 };
 
 // A picture of a machine's screen, as far as a stand-in's has to be one: it begins as a JPEG
@@ -137,12 +148,39 @@ public:
             configuration.setPrivateKey(QSslKey(key.readAll(), QSsl::Rsa, QSsl::Pem));
         }
         server->setSslConfiguration(configuration);
+        m_configuration = configuration;
         m_server = std::move(server);
         listen(port);
     }
 
-    // The server goes first, and its callers with it, while what they are noted in is still there.
-    ~StandIn() override { m_server.reset(); }
+    // The servers go first, and their callers with them, while what they are noted in is still there.
+    ~StandIn() override
+    {
+        m_more.clear();
+        m_server.reset();
+    }
+
+    // It answers at another address of this PC's loopback as well (127.0.0.2 and on: Windows has the whole of
+    // 127.0.0.0/8 there), at `port` (0: its own), as one KVM that answers at two addresses would, over TLS where it
+    // speaks so: what it is asked there is noted with the rest (Asked::at says where it came). Whether it was let
+    // listen there.
+    bool alsoAt(const QHostAddress& host, quint16 port = 0)
+    {
+        std::unique_ptr<QTcpServer> more;
+        if (m_encrypted) {
+            auto secure = std::make_unique<QSslServer>();
+            secure->setSslConfiguration(m_configuration);
+            more = std::move(secure);
+        } else {
+            more = std::make_unique<QTcpServer>();
+        }
+        if (!host.isLoopback() || !more->listen(host, port == 0 ? serverPort() : port)) {
+            return false;
+        }
+        take(more.get());
+        m_more.push_back(std::move(more));
+        return true;
+    }
 
     static QSslCertificate certificateIn(const QString& file)
     {
@@ -182,6 +220,8 @@ public:
     // Called after a complete request is recorded, before its answer is queued. Certificate
     // replacement tests can switch listeners at the last probe without racing a wall clock.
     std::function<void()> beforeAnswer;
+    // Told how much of a question's body has come so far, each time more of it comes (an upload's, as it is sent).
+    std::function<void(qint64 bodySoFar)> hearing;
     // Whether a caller's line is kept for its next question, as a real server keeps it; else it
     // is closed after every answer. And how many lines callers have made.
     bool keepsLines = false;
@@ -244,9 +284,14 @@ private:
     void listen(quint16 port)
     {
         m_server->listen(QHostAddress::LocalHost, port);
+        take(m_server.get());
+    }
+    // The callers of `server`, which is this stand-in's.
+    void take(QTcpServer* server)
+    {
         // Over TLS a caller is there once the two have agreed on how they speak.
-        connect(m_server.get(), &QTcpServer::pendingConnectionAvailable, this, [this] {
-            while (QTcpSocket* line = m_server->nextPendingConnection()) {
+        connect(server, &QTcpServer::pendingConnectionAvailable, this, [this, server] {
+            while (QTcpSocket* line = server->nextPendingConnection()) {
                 ++lines;
                 m_lineNumbers.insert(line, lines);
                 connect(line, &QTcpSocket::readyRead, this, [this, line] { read(line); });
@@ -287,6 +332,9 @@ private:
         }
         QByteArray& soFar = m_reading[line];
         soFar += line->readAll();
+        if (const qsizetype head = soFar.indexOf("\r\n\r\n"); hearing && head >= 0) {
+            hearing(soFar.size() - head - 4);
+        }
         if (!soFar.isEmpty() && (soFar.front() < 'A' || soFar.front() > 'Z')) {
             ++notHttp;
             m_reading.remove(line);
@@ -314,6 +362,7 @@ private:
         }
         one.body = soFar.mid(end + 4, length);
         one.line = m_lineNumbers.value(line);
+        one.at = line->localAddress();
         m_reading.remove(line);
         asked.append(one);
 
@@ -321,6 +370,32 @@ private:
             beforeAnswer();
         }
         const Answered answer = m_answer(one);
+        // Its end, told once: as the last of it is written below; or, where its line goes first, when it would have
+        // been written: a real KVM works on a question whose asker has gone, and makes its picture all the same (a
+        // driver that let go of a picture's line at its patience and asked again at once has two out, review arm 1,
+        // L6). A server that never answers, hangs up, streams or drips is at work on the question for as long as the
+        // line is there.
+        const auto over = std::make_shared<std::function<void()>>(answer.whenOver);
+        if (*over) {
+            const bool written = !answer.never && !answer.hangUp && !answer.streams && answer.byteEveryMs <= 0;
+            const qint64 writtenByMs =
+                m_clock.elapsed() + (written ? std::max(0, answer.afterMs) + std::max(0, answer.bodyAfterMs) : 0);
+            connect(line, &QObject::destroyed, this, [this, over, writtenByMs] {
+                const qint64 leftMs = writtenByMs - m_clock.elapsed();
+                if (!*over) {
+                    return;
+                }
+                if (leftMs <= 0) {
+                    std::exchange(*over, nullptr)();
+                    return;
+                }
+                QTimer::singleShot(leftMs, this, [over] {
+                    if (*over) {
+                        std::exchange(*over, nullptr)();
+                    }
+                });
+            });
+        }
         if (answer.never) {
             return;
         }
@@ -329,8 +404,8 @@ private:
             return;
         }
         if (answer.streams) {
-            QByteArray begun = "HTTP/1.1 " + QByteArray::number(answer.status) + " X\r\nContent-Type: " + answer.type +
-                               "\r\nConnection: close\r\n";
+            QByteArray begun = "HTTP/1.1 " + QByteArray::number(answer.status) + " " + answer.reason +
+                               "\r\nContent-Type: " + answer.type + "\r\nConnection: close\r\n";
             for (const QByteArray& header : answer.more) {
                 begun += header + "\r\n";
             }
@@ -340,7 +415,7 @@ private:
         }
         const bool keeps = keepsLines && !closesSilently;
         QByteArray out =
-            "HTTP/1.1 " + QByteArray::number(answer.status) + " X\r\nContent-Type: " + answer.type +
+            "HTTP/1.1 " + QByteArray::number(answer.status) + " " + answer.reason + "\r\nContent-Type: " + answer.type +
             "\r\nContent-Length: " + QByteArray::number(answer.body.size() + answer.shortBy + answer.moreToCome) +
             (closesSilently ? QByteArray("\r\n")
              : keeps        ? QByteArray("\r\nConnection: keep-alive\r\n")
@@ -362,9 +437,12 @@ private:
         const qsizetype body = answer.body.size();
         QTimer::singleShot(answer.afterMs, line,
                            [this, line, out, body, keeps, breaksOff = answer.shortBy > 0, later = answer.bodyAfterMs,
-                            goesOn = answer.moreToCome > 0] {
-                               const auto rest = [this, line, keeps, breaksOff, goesOn](const QByteArray& bytes) {
+                            goesOn = answer.moreToCome > 0, over] {
+                               const auto rest = [this, line, keeps, breaksOff, goesOn, over](const QByteArray& bytes) {
                                    line->write(bytes);
+                                   if (*over) {
+                                       std::exchange(*over, nullptr)();
+                                   }
                                    m_answeredAt.insert(line, m_clock.elapsed());
                                    // (A server that is still sending keeps its line, whatever it
                                    // said of keeping lines: whoever asked ends it.)
@@ -383,9 +461,11 @@ private:
 
     std::function<Answered(const Asked&)> m_answer;
     bool m_encrypted = false;
+    QSslConfiguration m_configuration; // over TLS: its certificate and key
     // The server, where it is one over TLS: it is `m_server`'s, and goes with it.
     LateToLetIn* m_late = nullptr;
     std::unique_ptr<QTcpServer> m_server;
+    std::vector<std::unique_ptr<QTcpServer>> m_more; // at other addresses (alsoAt)
     QHash<QTcpSocket*, QByteArray> m_reading;
     QHash<QTcpSocket*, int> m_lineNumbers;
     // When each line was last answered (forgetsIdleAfterMs), by m_clock.

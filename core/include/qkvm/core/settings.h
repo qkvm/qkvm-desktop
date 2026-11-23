@@ -55,6 +55,36 @@ struct Workspace {
     bool operator==(const Workspace&) const = default;
 };
 
+// The boot order of a Proxmox guest that the program replaced to start it from the image in its CD-ROM drive
+// (proxmox_media.cpp; review c9b-3, M1): what it was, what was written in its place, and the guest it is of (its
+// number, and the number it gives for itself: rule 30). Kept with the guest from before the order is written until it
+// is put back, or found changed on Proxmox since, so that a start that failed halfway, and a restart of the program,
+// never lose the order from before: an unmount, and the next start "once", put it back where the guest's order is
+// still the one written.
+struct BootOrderWas {
+    QString order;   // "scsi0;ide2;net0"
+    QString written; // "ide2;scsi0;net0"
+    qint64 vmid = 0;
+    QString machine;
+
+    bool operator==(const BootOrderWas&) const = default;
+};
+
+// Where a server's controller keeps the computer its card is for, as the card's driver found it (RedfishDevice,
+// judge): the place its computer was last found at by the number kept for it (its place at its controller,
+// "/redfish/v1/Systems/Self"; of a card known by its controller alone, the place its computer was taken at); and
+// whether that controller was ever seen to list more than one computer. A computer that gives no number of its own is
+// taken for the card's only at that place, and never where its controller was seen to list several: so another node
+// of a chassis does not pass for it after a restart of the program, nor at the card's own place (outside review of
+// 0.2.0's Redfish fixes, M1). None kept (a card from before 0.2.0, or from a file of the wall): as before, until its
+// computer next gives its number.
+struct ServerPlace {
+    QString place;
+    bool amongSeveral = false;
+
+    bool operator==(const ServerPlace&) const = default;
+};
+
 // One KVM of this PC's own wall, as the program knows it (SPEC.md section 4, M3a). Nothing of it
 // is secret: its password is kept elsewhere (secrets.h), by its `id`.
 struct OwnKvm {
@@ -67,14 +97,23 @@ struct OwnKvm {
     QString user = QStringLiteral("admin");
     QString group;
     // Which family of KVM it is, by the name a wall's file gives each (exchange.h): "kvmd" (PiKVM,
-    // GL.iNet Comet), "jetkvm", or "redfish" (a server's management controller, M7), the families this
-    // program speaks to by itself (namesAFamily).
+    // GL.iNet Comet), "jetkvm", "redfish" (a server's management controller, M7), "vnc" (a VNC server, wave 2), or
+    // "proxmox" (a virtual machine on Proxmox VE, wave 2: `address` its Proxmox's API, https as kvm::addressFrom
+    // writes it, 8006 kept; `node` and `vmid` the guest; `user` the API token's ID; `machine` the number it gives for
+    // itself, rule 30), the families this program speaks to by itself (namesAFamily).
     // The asking of what answers at its address takes its family and no other (local_wall.h). In the
     // settings' file it is so only where the file says a family the program speaks to in so many
-    // words: a KVM that says none is none this program wrote, and is not read (there is no older
-    // shape of the file to read).
+    // words, in the form this build writes it: any other entry of the program's shape (one that says
+    // no family, another family, or one of these in another form) is not read, and is kept as it
+    // stands (Remembered::kvmsItDoesNotRead).
     QString kind = QStringLiteral("kvmd");
     static bool namesAFamily(const QString& kind);
+    // It is spoken to in the clear: its address is neither an https:// one nor a VNC server's vncs:// (TLS from the
+    // first byte), so what is seen and typed there can be read on the way, and its password, or what a VNC server's is
+    // worked out from. The one rule for whatever says so of a KVM of this PC's wall: its card (Machine::plain), its row
+    // in the settings and the bar's "Not encrypted" (outside review c9a-4, M1), as the web's row in its settings has it
+    // (/^(https|vncs):/ is encrypted, and anything else is not).
+    bool isInTheClear() const;
     // Over HTTPS: whether it is known by a certificate, and that certificate's SHA-256. One that
     // is known by none has to be trusted by Windows for its name.
     bool knownByCertificate = false;
@@ -115,11 +154,28 @@ struct OwnKvm {
     // gives one (exchange::isADevicesOwnNumber): one that stands there in any other shape is no "none", and the
     // entry is one this build does not read, kept as it stands.
     QString machine;
+    // ...and where its controller keeps that server's computer (ServerPlace), noted by the wall as its driver finds it
+    // (LocalWall), from 0.2.0. It goes with the mark: a change keeps it where it keeps the mark, and one that takes
+    // another server takes the place it was found at. In the settings' file only of a "redfish" one, where something is
+    // kept (`server_place`); one that stands there in any other shape is read as one of several computers, so that none
+    // that gives no number passes for the card's.
+    ServerPlace serverPlace;
     // Its screen watches (screen_watch.h; the web's `no_signal_minutes`, `unchanged_minutes`): an alert where its
     // computer has shown no picture for so many minutes, or its screen has not changed; 0 (the most 1440): not watched.
     // In the settings' file only where one is set.
     int noSignalMinutes = 0;
     int unchangedMinutes = 0;
+    // Of a Proxmox guest ("proxmox"): the node it was added on and its number there (proxmox_device.h; the web's url,
+    // https://host:8006/nodes/<node>/qemu/<vmid>, split so that `address` stays one the published 0.1.2 keeps as it
+    // stands). In the settings' file only of such a guest, where both are one (proxmox::isNode, isGuestNumber): one
+    // that is not is an entry this build does not read, kept as it stands. Of anything else, empty and 0.
+    QString node;
+    qint64 vmid = 0;
+    // Of a Proxmox guest: the boot order its driver replaced and has not put back yet (BootOrderWas), noted by the wall
+    // as the driver hands it over (LocalWall), and the wall's own to say: whatever stands here in a KVM that is handed
+    // to the wall is not looked at. In the settings' file only where there is one (`boot_order_was`); one that stands
+    // there in any other shape is no "none", and the entry is one this build does not read, kept as it stands.
+    std::optional<BootOrderWas> bootOrderWas;
 
     bool operator==(const OwnKvm&) const = default;
 };
@@ -244,13 +300,14 @@ struct Remembered {
     // of entries that are no KVMs is not gone through to its end.)
     QList<OwnKvm> kvms;
     static constexpr qsizetype mostKvms = 2000;
-    // The KVMs of the file that this build does not read: of the program's shape (an id and an
-    // address it writes) and of a family it does not speak to (OwnKvm::kind), as another build of
-    // the program wrote them, or an older one (a KVM that says no family at all). Kept as they
-    // stood, never on the wall, and written back as they stood, before the wall's own: a build that
-    // is gone back to (an update undone) does not lose the KVMs of a family it does not know, and
-    // the build after it finds them again. Their ids are taken: no KVM is given one of them. With
-    // the wall's own, no more than `mostKvms`.
+    // The KVMs of the file that this build does not read: of the program's shape (an id of it) and
+    // of a family it does not speak to (OwnKvm::kind), as another build of the program wrote them, or
+    // an older one (a KVM that says no family at all); or of a family it speaks to in a form it cannot
+    // read as one of it (an address that is none of the family's: a later version's form). Kept as
+    // they stood, never on the wall and never dropped, and written back as they stood, behind the
+    // wall's own (their room kept first): a build that is gone back to (an update undone) does not
+    // lose the KVMs it does not read, and the build after it finds them again. Their ids are taken:
+    // no KVM is given one of them. With the wall's own, no more than `mostKvms`.
     QJsonArray kvmsItDoesNotRead;
     // The certificate itself of a KVM that is known by one, by the KVM's `id`: its text as a file
     // of the wall holds one (PEM, in lines of 64; exchange.h), for the day the wall is written to
@@ -279,8 +336,10 @@ struct Remembered {
     QHash<QString, QString> kvmsFollowedOntoHttps;
     // The JetKVMs over plain HTTP that the wall holds back for a twin (LocalWall: their HTTPS showed the certificate
     // another KVM of the wall is known by), each with the id of that other one: held so from the start of the next run
-    // too, until a sign lets go of it (SPEC.md section 8). In the file it stands with its KVM ("held_for_twin": that
-    // id), only of a JetKVM over plain HTTP, and only where the id is another KVM of the list.
+    // too, until a sign lets go of it (SPEC.md section 8); where that other one is taken off, with the id of another
+    // KVM of the list still known by its certificate, where there is one (LocalWall::remember). In the file it stands
+    // with its KVM ("held_for_twin": that id), only of a JetKVM over plain HTTP, and only where the id is another KVM
+    // of the list.
     QHash<QString, QString> kvmsHeldForATwin;
 
     // The saved actions of this PC's own wall, in the order they were added in. No more than
@@ -330,11 +389,23 @@ public:
     // There was a file when the program started, and it could not be read or is not what this
     // writes: the program began as one that remembers nothing.
     bool wasUnreadable() const { return m_wasUnreadable; }
+    // The list of this PC's own KVMs was read whole when the program started: the file was read (or there was none),
+    // its list is a list or none, and each entry of it is a KVM this build reads, none of them one it keeps as it
+    // stands (Remembered::kvmsItDoesNotRead: a later version's) and none dropped in the reading (no entry the program
+    // wrote, an id twice, one past the most). Only then does a server on no card of it say that it is on no card of
+    // the wall (SetupOverrides::prune, outside review of the prune, M2). The start's, for the whole run: what is
+    // remembered later is the program's own, and the next start reads it again.
+    bool listReadWhole() const { return m_listReadWhole; }
     // The file holds KVMs this build does not read (Remembered::kvmsItDoesNotRead): a wall was
     // kept in it, whatever this build can make of it (the app lock asks: app_lock.h).
     bool heldKvmsItDoesNotRead() const { return !m_remembered.kvmsItDoesNotRead.isEmpty(); }
     // Where that file is now; empty while it is where it was, and where there was none.
     QString putAside() const { return m_putAside; }
+    // Whether settings that could not be read at a start stand put aside beside these (`settings.unreadable.json`,
+    // `settings.unreadable-N.json`: put aside at this start or at one before). Their list of KVMs may be put back, as
+    // the start's notice invites, and their cards with it: a list read whole beside them is no proof that a server is
+    // on no card (SetupOverrides::prune, outside review of the fuzz work, round 3, M2). Looked at anew at each asking.
+    bool keepsAsideWhatCouldNotBeRead() const;
     // Puts the file that could not be read aside, where it still is where it was: beside it,
     // under the first name of its kind that is free. Moved, and never copied: a file that cannot
     // be moved (something holds it) stays what and where it is, that is told, and nothing is
@@ -380,6 +451,7 @@ private:
     bool m_unwritten = false;
     quint64 m_writings = 0;
     bool m_wasUnreadable = false;
+    bool m_listReadWhole = true;
     // The file that could not be read is still where it was, and in the way of what is written.
     bool m_inTheWay = false;
     QString m_putAside;

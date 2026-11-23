@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 
 #include <QByteArray>
 #include <QElapsedTimer>
+#include <QHostAddress>
 #include <QJsonObject>
 #include <QList>
 #include <QPointer>
@@ -16,11 +18,13 @@
 #include <qkvm/base/result.h>
 #include <qkvm/core/device_asker.h>
 #include <qkvm/core/jetkvm_kept.h>
+#include <qkvm/core/jetkvm_media.h>
 #include <qkvm/core/jetkvm_typing.h>
 #include <qkvm/core/jetkvm_viewer.h>
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/kvm_times.h>
 #include <qkvm/core/own_device.h>
+#include <qkvm/core/own_media.h>
 #include <qkvm/core/sign_in_pacing.h>
 #include <qkvm/core/wiped.h>
 
@@ -84,9 +88,12 @@ class DeviceLine;
 //   a time (jetkvm_typing.h), a text in the keyboard layout the JetKVM says its computer uses (jetkvm_layouts.h).
 //   Power and reset by its ATX extension, a restart, Wake-on-LAN and its jiggler: one call each over its connection
 //   (press). What it can be asked is said in its status (abilities).
+// * Its virtual media (jetkvm_media.cpp, jetkvm_media.h; the web's 0.3.0, A3): the images on its own storage, one of
+//   them in its drive at a time, over its connection as a key is (OwnMedia, below), which is only ever with the JetKVM
+//   its card was added for (its number asked before every connection, above).
 //
 // On the interface thread, as every driver is (own_device.h).
-class JetKvmDevice : public OwnDevice {
+class JetKvmDevice : public OwnDevice, public OwnMedia {
     Q_OBJECT
 
 public:
@@ -136,6 +143,21 @@ public:
         JetKvmViewer::Pace viewer;
         // An action that types (jetkvm_typing.h): its waits and pauses.
         jetkvm::TypingPace typing;
+        // Its virtual media (jetkvm_media.cpp): a mount or an unmount that binds its USB device anew (a change between
+        // CD-ROM and disk) takes it a second and more, and is waited for this long (the web's MOUNT_WITHIN).
+        int mountWithinMs = 30'000;
+        // An upload (jetkvm_upload.cpp): given as long as something moves either way, and its answer after its last
+        // byte for as long as the JetKVM may take (the web's UPLOAD_ANSWER); a day all told (UPLOAD_MOST).
+        int uploadQuietMs = 300'000;
+        int uploadMostMs = 86'400'000;
+        // How the name of its address is found for an upload (jetkvm_upload.cpp), whose asking of which JetKVM it is
+        // and whose bytes then go to the one address it was found at, and to no other: the addresses it was found at,
+        // handed to `found` on `context`'s thread, and not at all once `context` has ended (it ends with the driver, or
+        // once `found` was called). `found` holds only `context`'s pointer: it may be let go of on any thread. None: as
+        // Windows finds it (QHostInfo). A test has it found at another address each time.
+        using LookUp =
+            std::function<void(const QString& name, QObject* context, std::function<void(QList<QHostAddress>)> found)>;
+        LookUp lookUp;
     };
 
     // What it says it is.
@@ -200,8 +222,9 @@ public:
     static base::Error anotherJetKvm();
     static base::Error noJetKvmNumber();
     // What a JetKVM can be asked (the web's `can` of one, jetkvm.py): power and reset only where its ATX extension is
-    // on. Said in its status, which is all its menu offers.
-    static QStringList abilities(bool atx);
+    // on, and its virtual media where it has them (`media`: mediaOffer). Said in its status, which is all its menu
+    // offers.
+    static QStringList abilities(bool atx, bool media = false);
     // Its one viewer (the cards' and the windows' connection).
     JetKvmViewer& viewer() { return *m_viewer; }
 
@@ -213,7 +236,59 @@ public:
     void act(const Action& what, std::function<void(base::Result<Done>)> done) override;
     void askWakeTargets(std::function<void(base::Result<QList<WakeTarget>>)> done) override;
     void tidy() override;
+    // Its typing goes key by key, as a VNC server's: the one under way ends where it stands, and every one that waits
+    // behind it is answered "stopped" without a key of it (jetkvm::type; review cx6-1, M3).
+    void stopTyping() override;
     std::unique_ptr<OwnLive> makeLive() override;
+
+    // Its virtual media (jetkvm_media.cpp; the web's 0.3.0, A3: jetkvm.py's media parts, and server.py's media routes,
+    // whose checks and words a KVM of this PC's own wall has here, the wall being its own server). Over its connection,
+    // the one its card holds or one made now, as for a key (a person asks: tried now, whatever hold stands), which is
+    // only ever arranged with the JetKVM its card was added for; refused where another viewer has the JetKVM
+    // ("in_use"). What is in its drive is kept as the web keeps it: as getVirtualMediaState answered last, asked beside
+    // every look that goes over its connection (a look never connects) and at every change; it is on its card
+    // (Status::media), as long as the card says nothing amiss and its last look went over its connection (one that
+    // went the plain way did not ask it, and says nothing of it).
+    //
+    // What it can do: nothing until it said what is in its drive, and nothing of an older JetKVM that has no such
+    // methods ("Method not found").
+    std::optional<MediaOffer> mediaOffer() const override;
+    // The images of its own storage, its space, and what is in its drive, asked now; "no_virtual_media" where it has
+    // none. A space it does not say is said as none.
+    void askMedia(std::function<void(base::Result<MediaList>)> done) override;
+    // As the web's server and driver take them together, in their words, `MediaMount::machine` naming the machine in
+    // them: an image it lists now, whole, as a CD-ROM drive (300 sectors at least: else "mount it as a disk") or a
+    // disk, read-only (mountWithStorage, `CDROM` or `Disk`, given Pace::mountWithinMs); never started from; restarted
+    // after the mount where its ATX extension is on and that is asked (a press of it, by every rule of one: switched on
+    // where it is off, else reset). Not over another image that is in its drive; asked again after it, and said where
+    // it does not say it has it as asked. One that is in already as asked: done, with that said.
+    void mountMedia(const MediaMount& mount, std::function<void(base::Result<MediaDone>)> done) override;
+    // `image`: what was in its drive when it was asked (its own storage's, or one from an address by its id,
+    // jetkvm::fromAnAddressId). Nothing in it: done, with that said. Another (one from another address too): refused.
+    // Asked again after it.
+    void unmountMedia(const QString& image, std::function<void(base::Result<MediaDone>)> done) override;
+    // From its own storage (deleteStorageFile): whole, or what an upload cut off left; not while it is in its drive,
+    // and said where it is listed still after it. One that is not there any more: done, with that said.
+    void deleteMedia(const QString& image, std::function<void(base::Result<MediaDone>)> done) override;
+    // An image carried from this PC to its own storage as `name` (jetkvm_upload.cpp; the web's `media_upload`, `_carry`
+    // and `media_discard`): opened over its connection (startStorageFileUpload, its name and length: an upload it opens
+    // anew, with an id of an upload's shape, or none goes), then its bytes by POST /storage/upload?uploadId= on a line
+    // of their own, after the JetKVM that answers at its address was asked again which it is under the very session the
+    // bytes go with (another one is sent none of them), the asking and the bytes at the one address the name of its
+    // address was found at (Pace::lookUp; stricter than the web); from `image` as it is read (moved to a thread of its
+    // own where it is not one that reads ahead: ReadAhead), its length said first, counted and hashed as it goes, kept
+    // nowhere. Refused at once, nothing asked: no file read at a place, an empty one, one over 16 GB, a name the web
+    // does not take (isImageName), one while another is on its way. Refused once its storage was listed, nothing
+    // opened: a name there already, or a part of an earlier upload of it (resumed, it would be added to), no room.
+    // Given as long as something moves (Pace::uploadQuietMs), a day all told; its connection kept meanwhile. Answered
+    // with its SHA-256 once it lists it whole. What an upload that ended otherwise left (`<name>.incomplete`: cut off,
+    // stopped, not taken whole, refused, sent to nobody) is taken off over its connection and said in the web's words.
+    // What is handed back stops it: nothing more of it goes, and `done` is told MediaPlace::uploadStopped where nothing
+    // of it is left.
+    std::function<void()> uploadMedia(const QString& name, std::unique_ptr<QIODevice> image,
+                                      std::function<void(base::Result<MediaUploaded>)> done) override;
+    // The image this driver is carrying to it, and how far it has come (what Qt has written of it); nothing: none.
+    std::optional<MediaUploading> uploading() const override;
 
 signals:
     // Its other way, HTTPS at `at`, answered as a JetKVM does (`found`): for the wall, which decides
@@ -286,6 +361,11 @@ private:
     // Whether what gives this number for itself (`seen`; empty: none) is the JetKVM it is known by (the web's _judge):
     // what stands against it, where it is not.
     std::optional<base::Error> judge(const QString& seen);
+    // What GET /device answered (`reply`, but for a 401, which its asker reads first), judged (the web's _same_jetkvm):
+    // what stands against it, or nothing; `seen` is the number it gave, or none where it was not read. Where it could
+    // not be read and one is known, the asking's error; where none is known, nothing (there is nothing to tell it
+    // apart from), but where the number is being taken (`taking`: identify), which then takes none.
+    std::optional<base::Error> judged(const base::Result<Reply>& reply, bool taking, std::optional<QString>& seen);
     // Another JetKVM answers at its address: noted, and said from now on.
     base::Error noteAnother(const base::Error& why);
     void arrive(const std::shared_ptr<Road>& road, const base::Error& why);
@@ -325,8 +405,11 @@ private:
     void typeOn(std::vector<typed::Report> reports, std::optional<QString> text,
                 std::function<void(base::Result<Done>)> done);
     void typeNext();
-    QList<std::function<void()>> m_typingWaits;
+    // Each begun with `stopped` false, or answered "stopped" without being begun (stopTyping).
+    QList<std::function<void(bool stopped)>> m_typingWaits;
     bool m_typingNow = false;
+    // How often whoever had it type said to stop: a typing asked for before the last stop goes no further.
+    std::uint64_t m_typingStops = 0;
     // What else is done to it (power and reset by its ATX extension, a restart, Wake-on-LAN, the jiggler): one call
     // over its connection, once that is open.
     void press(const Action& what, std::function<void(base::Result<Done>)> done);
@@ -340,7 +423,73 @@ private:
     void lookTheOtherWay(bool down);
     // Its status, which anybody may ask, and what its viewer last showed or stands for (busy while aside).
     void lookThePlainWay();
-    void lookOver(Status status);
+    // What a look came to; `overItsConnection`: it went over its connection, and asked its drive too.
+    void lookOver(Status status, bool overItsConnection = false);
+
+    // Its virtual media (jetkvm_media.cpp). What its notes of images carried there know it by: its address and the
+    // mark of its number.
+    QString mediaKey() const;
+    // What getVirtualMediaState answered beside a look (an error where it did not): kept, and whether it has the
+    // methods (the web's `_vm_said`: "Method not found" says it has none; any other error, nothing, and what was known
+    // stays).
+    void vmSaid(const base::Result<json::Value>& said);
+    // What is in its drive, as it said last; nothing where nothing is, or nothing is known.
+    std::optional<MountedMedia> mediaNow() const;
+    // The connection a call of its media goes over: the one held, or one made now (the web's `_media_session`).
+    using Connected = QPointer<JetKvmConnection>;
+    void withMediaConnection(std::function<void(base::Result<Connected>)> then);
+    // One call of its media over `on` (Pace::viewer's callWithinMs, or `withinMs`).
+    static void callOver(const Connected& on, const QString& method, const QJsonObject& params,
+                         std::function<void(base::Result<json::Value>)> then,
+                         std::optional<int> withinMs = std::nullopt);
+    // getVirtualMediaState over `on`, noted: what is in its drive now, or why it was not said.
+    void askVm(const Connected& on, std::function<void(base::Result<std::optional<MountedMedia>>)> then);
+    // listStorageFiles over `on`, noted as what it listed last.
+    void listFiles(const Connected& on, std::function<void(base::Result<jetkvm::Files>)> then);
+    // A mount, from the image found on its storage on: what is in its drive asked, the image put in and asked again,
+    // and the machine restarted where that is asked.
+    void mountFound(const Connected& on, const MediaMount& mount, bool restart,
+                    const std::function<void(base::Result<MediaDone>)>& done);
+    // The machine restarted after a mount (`named`: what it is called in a sentence): switched on where its ATX
+    // extension, asked then (getATXState), plainly says it is off, else reset. A note, or why not.
+    void restartForMedia(const QString& named, std::function<void(base::Result<QString>)> then);
+    // An upload (jetkvm_upload.cpp), from its asking to its answer: opened as its start answered (`started`), its bytes
+    // carried after it was asked which JetKVM it is, sent, and what came of it; cut off (`why`) with what it left taken
+    // off; and over.
+    struct Upload;
+    // Its start ended so (`why`): over, and where it may have been done what it opened taken off first.
+    void notStarted(const std::shared_ptr<Upload>& upload, const base::Error& why);
+    void opened(const std::shared_ptr<Upload>& upload, const jetkvm::Started& started);
+    void carry(const std::shared_ptr<Upload>& upload, const QString& id);
+    // The addresses the name of its address is found at now (Pace::lookUp; an address that is one already: itself).
+    void foundAt(std::function<void(QList<QHostAddress>)> then);
+    // A line of an upload's own, held to `at` alone (DeviceAsker::onlyTo) and to the certificate the JetKVM is known
+    // by, a child of this driver until it is let go of; none where `at` can be gone to by no address of the web.
+    DeviceAsker* uploadLine(const QHostAddress& at);
+    // Which JetKVM answers at the first of `at` that a line goes to, asked under `token` and judged; the next where
+    // none answers at one; then the bytes, to that very address.
+    void askWhichAt(const std::shared_ptr<Upload>& upload, const QString& id, const QByteArray& token,
+                    QList<QHostAddress> at);
+    void post(const std::shared_ptr<Upload>& upload, const QString& id, const QByteArray& token,
+              const QHostAddress& at);
+    void written(const std::shared_ptr<Upload>& upload, const base::Result<Reply>& reply);
+    // The session `used` refused for an upload (401): let go of where it is the one kept, so that the next asking
+    // signs in anew.
+    void uploadSessionRefused(const QByteArray& used);
+    void cut(const std::shared_ptr<Upload>& upload, const base::Error& why);
+    // ...said, once that was taken off: `failed`, its file could not be read; `left`, what is left, where anything is.
+    void cutSaid(const std::shared_ptr<Upload>& upload, const base::Error& why, const QString& failed,
+                 const std::optional<QString>& left);
+    // What an upload of `name` that ended otherwise left (`<name>.incomplete`), taken off over its connection (the
+    // web's `media_discard`): nothing said where nothing is left, else what is.
+    void discard(const QString& name, std::function<void(std::optional<QString>)> then);
+    void uploadOver(const std::shared_ptr<Upload>& upload, const base::Result<MediaUploaded>& result);
+    std::shared_ptr<Upload> m_upload;
+
+    bool m_vmKnown = false; // it said what is in its drive: it has the methods
+    json::Value m_vm;       // what it said last of its drive (null, or what is in it)
+    // Of each image it listed last, by its id: its size and stamp (for the SHA-256 of what is in its drive).
+    QHash<QString, jetkvm::Files::Listed> m_listed;
 
     Where m_where;
     // Its password, for as long as it signs in with it: its own, written over when it goes (wiped.h; from the outside
@@ -386,6 +535,7 @@ private:
 
     QString m_version; // as it last said it
     std::optional<Status> m_status;
+    bool m_drivesLook = false; // the last look went over its connection, and asked what is in its drive
     qint64 m_statusAt = 0;
     bool m_looking = false;
 

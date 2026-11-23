@@ -11,6 +11,7 @@
 #include <QUrl>
 
 #include <qkvm/core/server_client.h>
+#include <qkvm/core/vnc_device.h>
 
 using namespace Qt::StringLiterals;
 
@@ -41,9 +42,10 @@ QByteArray knownBy(const core::OwnKvm& kvm)
     return kvm.knownByCertificate ? kvm.certificate : QByteArray();
 }
 
+// Spoken to in the clear: over plain HTTP, or a VNC server's vnc:// (the wall's one rule for it).
 bool isPlain(const core::OwnKvm& kvm)
 {
-    return QUrl(kvm.address).scheme() == "http"_L1;
+    return kvm.isInTheClear();
 }
 
 // Whether a saving left what a KVM is known by, or how it is spoken to, another than its box
@@ -56,9 +58,23 @@ bool isToBeSeen(const core::KvmEditing::Changed& changed, const core::OwnKvm& sh
 
 // Whether an address as it was typed is the one something was offered for: that host and port,
 // over HTTPS where a certificate was shown there, and over plain HTTP where it is that way of
-// speaking to it that was offered.
-bool isTypedFor(const QString& typed, const EditKvmView::Offer& offered)
+// speaking to it that was offered. A VNC server's as its family reads it (core::vnc::addressFrom,
+// where an address without vnc:// or vncs:// is a vnc:// one): a certificate was shown at vncs://
+// alone, so it is that scheme, that host and that port (outside review c9a-2, H1); and the way in
+// the clear that was offered, at vnc:// alone, that very address (outside review c9a-3, M1).
+bool isTypedFor(const QString& typed, const EditKvmView::Offer& offered, bool aVncServer)
 {
+    if (aVncServer) {
+        const base::Result<QString> address = core::vnc::addressFrom(typed);
+        if (!address || !core::vnc::namesOne(offered.at)) {
+            return false;
+        }
+        const core::vnc::Place is = core::vnc::placeOf(address.value());
+        const core::vnc::Place was = core::vnc::placeOf(offered.at);
+        const bool there = is.host == was.host && is.port == was.port;
+        return offered.plainHttp ? !is.tls && !was.tls && there && address.value() == offered.at
+                                 : is.tls && was.tls && there;
+    }
     const base::Result<QUrl> address = core::kvm::addressFrom(typed);
     return address && address.value().scheme() == (offered.plainHttp ? "http"_L1 : "https"_L1) &&
            address.value().authority(QUrl::FullyEncoded) == offered.at;
@@ -72,8 +88,8 @@ OwnWall::OwnWall(core::Settings& settings, core::SecretStore& secrets, QObject* 
 
 OwnWall::OwnWall(core::Settings& settings, core::SecretStore& secrets, const core::KvmAdding::Pace& pace,
                  QObject* parent)
-    : QObject(parent), m_wall(settings, secrets, pace.drivers()), m_adding(m_wall, pace), m_pace(pace),
-      m_editing(std::make_unique<core::KvmEditing>(m_wall, pace)),
+    : QObject(parent), m_wall(settings, secrets, pace.drivers()), m_adding(m_wall, pace),
+      m_proxmox(m_wall, pace.drivers()), m_pace(pace), m_editing(std::make_unique<core::KvmEditing>(m_wall, pace)),
       m_review(std::make_unique<core::KvmCertificateReview>(m_wall, pace.probe))
 {
     connect(&m_wall, &core::LocalWall::changed, this, &OwnWall::followTheWallInTheBoxes);
@@ -90,6 +106,7 @@ OwnWall::OwnWall(core::Settings& settings, core::SecretStore& secrets, const cor
 void OwnWall::letGoOfEverything()
 {
     m_adding.giveUp();
+    m_proxmox.giveUp();
     if (m_editing != nullptr) {
         m_editing->giveUp();
     }
@@ -145,28 +162,163 @@ void OwnWall::serve(AddKvmView& view)
                         return;
                     }
                     if (added) {
-                        box->took(saidOf(added.value(), calledInASentence(added.value().id, added.value().name)),
-                                  core::ServerClient::written(added.value().certificate));
+                        const QList<core::OwnKvm>& kvms = m_wall.kvms();
+                        const bool aVncServer = std::ranges::any_of(kvms, [&added](const core::OwnKvm& one) {
+                            return one.id == added.value().id && one.kind == u"vnc"_s;
+                        });
+                        box->took(
+                            saidOf(added.value(), calledInASentence(added.value().id, added.value().name), aVncServer),
+                            core::ServerClient::written(added.value().certificate));
                     } else if (added.error().code == "given_up") {
                         box->gaveUp();
                     } else {
-                        // (Where it says by its number that it is a KVM of the wall, the person may keep both.)
+                        // (Where it says by its number that it is a KVM of the wall, the person may keep both; where
+                        // its plain address sends everybody on to HTTPS, that address is offered.)
+                        const std::optional<QUrl> instead = core::kvm::httpsOffered(added.error());
                         box->refused(QString::fromStdString(added.error().message),
-                                     core::LocalWall::saysItIsTheSame(added.error()));
+                                     core::LocalWall::saysItIsTheSame(added.error()),
+                                     instead ? instead->toString(QUrl::FullyEncoded) : QString());
                     }
                 });
+            });
+    // A Proxmox's guests (the page's fromProxmox): listed to tick; where the address names one, that one at once.
+    connect(&view, &AddKvmView::listGuestsAsked, this,
+            [this, box](const QString& address, const QString& tokenId, const QString& secret, const QString& group) {
+                if (box == nullptr || !mayChange()) {
+                    return;
+                }
+                // (A box that asks while another's is under way is told so: review c9b-1, L2.)
+                if (m_proxmox.busy()) {
+                    box->refused(tr("A Proxmox is being asked already. Wait for it to finish."));
+                    return;
+                }
+                box->began();
+                m_proxmoxFor = box.data();
+                m_proxmoxBox = box;
+                const core::ProxmoxAdding::Typed typed{address, tokenId, secret, group};
+                m_proxmox.list(typed, [this, box, typed](const base::Result<core::ProxmoxAdding::Offered>& offered) {
+                    // (Given up meanwhile, as a refusal ProxmoxAdding answers a turn of the loop later may be: told to
+                    // nobody. Review c9b-2, L4.)
+                    if (box == nullptr || m_proxmoxFor != box.data()) {
+                        return;
+                    }
+                    if (!offered) {
+                        m_proxmoxFor = nullptr;
+                        box->refused(QString::fromStdString(offered.error().message));
+                        return;
+                    }
+                    m_listed.insert(box.data(), offered.value());
+                    if (const std::optional<core::proxmox::Listed> named = offered.value().named) {
+                        // (A run of its own, which begins with its own lines, as one of the ticked ones does: review
+                        // c9b-4, L7.)
+                        box->beganARun();
+                        addGuests(box, typed, {named->vmid});
+                        return;
+                    }
+                    QVariantList guests;
+                    for (const core::proxmox::Listed& guest : offered.value().guests) {
+                        // (A VM made under the number of a guest that was deleted is not that card's guest: said so,
+                        // and its box stays off while that card has the number. The page's words.)
+                        const QString taken =
+                            offered.value().onTheWall.contains(guest.vmid)
+                                ? tr("on the wall as %1").arg(offered.value().onTheWall.value(guest.vmid))
+                            : offered.value().newUnder.contains(guest.vmid)
+                                ? tr("a new VM under the number of %1, whose guest it is not: remove that card to add "
+                                     "this one")
+                                      .arg(offered.value().newUnder.value(guest.vmid))
+                                : QString();
+                        guests.append(QVariantMap{{u"vmid"_s, guest.vmid},
+                                                  {u"node"_s, guest.node},
+                                                  {u"name"_s, guest.name},
+                                                  {u"status"_s, guest.status},
+                                                  {u"taken"_s, taken}});
+                    }
+                    m_proxmoxFor = nullptr;
+                    box->listed(guests, offered.value().containers);
+                });
+            });
+    connect(&view, &AddKvmView::addGuestsAsked, this,
+            [this, box](const QString& address, const QString& tokenId, const QString& secret, const QString& group,
+                        const QList<qint64>& vmids) {
+                if (box == nullptr || !mayChange()) {
+                    return;
+                }
+                if (m_proxmox.busy() || m_proxmoxFor != nullptr) {
+                    box->refused(tr("A Proxmox is being asked already. Wait for it to finish."));
+                    return;
+                }
+                // (Added from what this box listed, and only where that is the Proxmox typed now: never from what
+                // another box listed, which may be known by another certificate. Outside review of 0.2.0, 3.7.)
+                const base::Result<core::proxmox::Address> typedAt = core::proxmox::addressOf(address);
+                const auto listed = m_listed.constFind(box.data());
+                if (listed == m_listed.cend() || !typedAt || typedAt.value().origin != listed->origin) {
+                    box->refused(tr("List the Proxmox's virtual machines again: what was typed is not what was "
+                                    "listed."));
+                    return;
+                }
+                box->beganARun();
+                m_proxmoxFor = box.data();
+                m_proxmoxBox = box;
+                addGuests(box, core::ProxmoxAdding::Typed{address, tokenId, secret, group}, vmids);
             });
     connect(&view, &AddKvmView::giveUpAsked, this,
             [this, which = static_cast<const QObject*>(&view)] { giveUpFor(which); });
     // A window that is closed over its box: nobody is there to be told, and nothing is added
-    // behind anybody's back.
-    connect(&view, &QObject::destroyed, this, [this](const QObject* gone) { giveUpFor(gone); });
+    // behind anybody's back. (And what it listed goes with it.)
+    connect(&view, &QObject::destroyed, this, [this](const QObject* gone) {
+        giveUpFor(gone);
+        m_listed.remove(gone);
+    });
+}
+
+void OwnWall::addGuests(const QPointer<AddKvmView>& box, const core::ProxmoxAdding::Typed& typed, QList<qint64> vmids)
+{
+    // (Given up meanwhile: the rest of the run is not added. Review c9b-1, L2.)
+    const auto listed = box == nullptr ? m_listed.cend() : m_listed.constFind(box.data());
+    if (box == nullptr || listed == m_listed.cend() || m_proxmoxFor != box.data()) {
+        return;
+    }
+    // (Read here, and taken along by the answer's own copy: the box's listing may be listed anew or go meanwhile.)
+    const core::ProxmoxAdding::Offered& at = *listed;
+    if (vmids.isEmpty()) {
+        m_proxmoxFor = nullptr;
+        box->guestsDone();
+        return;
+    }
+    const qint64 vmid = vmids.takeFirst();
+    m_proxmox.add(
+        typed, at, vmid, [this, box, typed, vmids, at](const base::Result<core::ProxmoxAdding::Added>& added) {
+            // Told only where the run is still this box's: ProxmoxAdding answers a refusal a turn of the loop later,
+            // and Cancel does not take that back (review c9b-2, L4). The rest of a run given up is not added either
+            // (addGuests).
+            if (box != nullptr && m_proxmoxFor == box.data()) {
+                if (added) {
+                    const QString model = QStringList{added.value().model, added.value().version}.join(u' ').trimmed();
+                    const QString called = calledInASentence(added.value().id, added.value().name);
+                    box->tookGuest(model.isEmpty() ? tr("%1 added").arg(called)
+                                                   : tr("%1 added (%2)").arg(called, model),
+                                   at.knownByCertificate ? core::ServerClient::written(at.certificate) : QString());
+                } else {
+                    box->refusedGuest(QString::fromStdString(added.error().message));
+                }
+            }
+            addGuests(box, typed, vmids);
+        });
 }
 
 void OwnWall::giveUpFor(const QObject* box)
 {
     if (m_asking != nullptr && m_asking == box) {
         m_adding.giveUp();
+    }
+    // A Proxmox's listing, or a run of its guests' adds, for that box: given up there and then, and the box told,
+    // where it is still there (review c9b-1, L2).
+    if (m_proxmoxFor != nullptr && m_proxmoxFor == box) {
+        m_proxmoxFor = nullptr;
+        m_proxmox.giveUp();
+        if (const QPointer<AddKvmView> told = std::exchange(m_proxmoxBox, nullptr); told != nullptr) {
+            told->gaveUp();
+        }
     }
 }
 
@@ -237,8 +389,9 @@ void OwnWall::serve(EditKvmView& view)
                 // address that is typed now; whatever certificate came with the wish. (Whatever
                 // was offered is offered no longer: to this saving, or to none.)
                 const std::optional<Offered> offered = takeOfferedTo(*box);
+                const bool aVncServer = m_seen.value(box.data()).kvm.kind == u"vnc"_s;
                 const bool saidYes = offered && !offered->at.isEmpty() && offered->machine == machine &&
-                                     offered->certificate == saidYesTo && isTypedFor(address, *offered);
+                                     offered->certificate == saidYesTo && isTypedFor(address, *offered, aVncServer);
                 if (saidYes && offered->plainHttp) {
                     typed.saidYesToPlainHttpAt = offered->at;
                 } else if (saidYes) {
@@ -253,52 +406,57 @@ void OwnWall::serve(EditKvmView& view)
                 // one's, and this one is told to wait (the editing says so itself).
                 const bool isThisOnes = m_changing.begin(m_editing->isUnderWay(), *box);
                 box->began(u"saving"_s);
-                m_editing->change(machine, std::move(typed),
-                                  [this, box, isThisOnes, machine, seen,
-                                   yes = saidYes ? offered : std::nullopt](const core::KvmEditing::Outcome& outcome) {
-                                      if (!m_changing.end(isThisOnes, box)) {
-                                          return;
-                                      }
-                                      const std::optional<core::KvmEditing::Seen> now = seenNow(machine);
-                                      if (outcome.result) {
-                                          // What it is known by now, or that it is spoken to in the clear now,
-                                          // is shown where it is another than this box showed: the box stays,
-                                          // on the KVM as it is. Otherwise it closes.
-                                          const core::KvmEditing::Changed& changed = outcome.result.value();
-                                          if (isToBeSeen(changed, seen.kvm) && now) {
-                                              m_seen.insert(box.data(), *now);
-                                              box->savedAndStays(shownOf(now->kvm), changed.ontoHttps);
-                                          } else {
-                                              box->saved(calledInASentence(machine, changed.name));
-                                          }
-                                      } else if (outcome.result.error().code == "certificate_differs") {
-                                          // What the box shows from here on is what a yes can be given to.
-                                          box->differing(outcome.remembered, outcome.presented, outcome.presentedAt,
-                                                         outcome.onWindowsWord);
-                                          // (Over HTTPS at that address, as it is typed: the yes goes with the
-                                          // address that was asked, which a JetKVM's two ways may have made
-                                          // another than the one typed.)
-                                          box->retype(outcome.presentedAt);
-                                          keepAsOffered(*box, Offered{machine, outcome.presented, outcome.presentedAt,
-                                                                      outcome.onWindowsWord, false});
-                                      } else if (outcome.result.error().code == "plain_http_there") {
-                                          // So where it is plain HTTP at that address that a yes is given to.
-                                          box->givingUpHttps(outcome.remembered, outcome.presentedAt);
-                                          // (And the plain way at that address, as it is typed.)
-                                          box->retype(u"http://"_s + outcome.presentedAt);
-                                          keepAsOffered(
-                                              *box, Offered{machine, QByteArray(), outcome.presentedAt, false, true});
-                                      } else if (outcome.result.error().code == "given_up") {
-                                          // (The box stays on what it showed: a yes can be given to that again.)
-                                          box->gaveUp();
-                                          if (yes) {
-                                              keepAsOffered(*box, *yes);
-                                          }
-                                      } else if (!fillAnewOver(*box, machine, outcome.result.error())) {
-                                          box->refused(sentenceOf(outcome.result.error()),
-                                                       core::LocalWall::saysItIsTheSame(outcome.result.error()));
-                                      }
-                                  });
+                m_editing->change(
+                    machine, std::move(typed),
+                    [this, box, isThisOnes, machine, seen,
+                     yes = saidYes ? offered : std::nullopt](const core::KvmEditing::Outcome& outcome) {
+                        if (!m_changing.end(isThisOnes, box)) {
+                            return;
+                        }
+                        const std::optional<core::KvmEditing::Seen> now = seenNow(machine);
+                        if (outcome.result) {
+                            // What it is known by now, or that it is spoken to in the clear now,
+                            // is shown where it is another than this box showed: the box stays,
+                            // on the KVM as it is. Otherwise it closes.
+                            const core::KvmEditing::Changed& changed = outcome.result.value();
+                            if (isToBeSeen(changed, seen.kvm) && now) {
+                                m_seen.insert(box.data(), *now);
+                                box->savedAndStays(shownOf(now->kvm), changed.ontoHttps);
+                            } else {
+                                box->saved(calledInASentence(machine, changed.name));
+                            }
+                        } else if (outcome.result.error().code == "certificate_differs") {
+                            // What the box shows from here on is what a yes can be given to.
+                            box->differing(outcome.remembered, outcome.presented, outcome.presentedAt,
+                                           outcome.onWindowsWord);
+                            // (Over HTTPS at that address, as it is typed: the yes goes with the
+                            // address that was asked, which a JetKVM's two ways may have made
+                            // another than the one typed. A VNC server's whole, vncs:// and all.)
+                            box->retype(outcome.presentedAt);
+                            keepAsOffered(*box, Offered{machine, outcome.presented, outcome.presentedAt,
+                                                        outcome.onWindowsWord, false});
+                        } else if (outcome.result.error().code == "plain_http_there") {
+                            // So where it is plain HTTP at that address that a yes is given to.
+                            box->givingUpHttps(outcome.remembered, outcome.presentedAt);
+                            // (And the plain way at that address, as it is typed: a VNC server's
+                            // whole, vnc:// and all, as it was handed over.)
+                            box->retype(seen.kvm.kind == u"vnc"_s ? outcome.presentedAt
+                                                                  : u"http://"_s + outcome.presentedAt);
+                            keepAsOffered(*box, Offered{machine, QByteArray(), outcome.presentedAt, false, true});
+                        } else if (outcome.result.error().code == "given_up") {
+                            // (The box stays on what it showed: a yes can be given to that again.)
+                            box->gaveUp();
+                            if (yes) {
+                                keepAsOffered(*box, *yes);
+                            }
+                        } else if (!fillAnewOver(*box, machine, outcome.result.error())) {
+                            // (Its plain address sends everybody on to HTTPS: that address is offered.)
+                            const std::optional<QUrl> instead = core::kvm::httpsOffered(outcome.result.error());
+                            box->refused(sentenceOf(outcome.result.error()),
+                                         core::LocalWall::saysItIsTheSame(outcome.result.error()),
+                                         instead ? instead->toString(QUrl::FullyEncoded) : QString());
+                        }
+                    });
             });
     connect(&view, &EditKvmView::removeAsked, this, [this, box](const QString& machine) {
         if (box == nullptr || !mayChange()) {
@@ -306,6 +464,19 @@ void OwnWall::serve(EditKvmView& view)
         }
         const QString called = box->called();
         box->began(u"removing"_s);
+        // The question said what becomes of a guest's boot order as the box was filled with it. Where that changed
+        // since (started from an image, or the image taken out, in a KVM window meanwhile: the wall writes it and says
+        // nothing of it), it is asked again over what stands now, and nothing is taken off (review cx6-1, L1).
+        if (const std::optional<core::KvmEditing::Seen> now = seenNow(machine)) {
+            const EditKvmView::Shown shown = shownOf(now->kvm);
+            if (shown.bootOrderWas != box->bootOrderWas() || shown.bootOrderWritten != box->bootOrderWritten()) {
+                m_seen.insert(box.data(), *now);
+                box->refusedOver(shown,
+                                 QCoreApplication::translate(
+                                     "OwnWall", "The guest's boot order changed meanwhile: read the question again."));
+                return;
+            }
+        }
         // (The wall says aloud that it has changed while it takes the KVM off, and whoever hears
         // that may close the box, or end its window.)
         const base::Result<void> taken = m_wall.remove(machine);
@@ -421,7 +592,8 @@ void OwnWall::showTheTwoTo(EditKvmView& box, const QString& machine, const core:
     // (That one is named in a sentence of the box's: as a sentence calls it.)
     const bool isAnothers = !shown.presentedIsOf.isEmpty() || !shown.presentedIsCalled.isEmpty();
     box.reviewed(shown.remembered, shown.presented,
-                 isAnothers ? calledInASentence(shown.presentedIsOf, shown.presentedIsCalled) : QString());
+                 isAnothers ? calledInASentence(shown.presentedIsOf, shown.presentedIsCalled) : QString(),
+                 isAnothers && shown.presentedSaysSo);
     keepAsOffered(box, Offered{machine, shown.presented, QString(), false, false});
 }
 
@@ -542,19 +714,33 @@ EditKvmView::Shown OwnWall::shownOf(const core::OwnKvm& kvm)
     shown.inASentence = core::LocalWall::calledInASentence(kvm);
     shown.name = kvm.name;
     shown.https = scheme == "https"_L1;
-    shown.overPlainHttp = scheme == "http"_L1;
+    // (In the clear: a VNC server's vnc:// too, which its box says in its family's words. Outside review c9a-2, L4. By
+    // the wall's one rule for it, as its card, its row and the bar say it: c9a-4, M1.)
+    shown.overPlainHttp = kvm.isInTheClear();
     // As it is typed, and as what is typed is read back (kvm::addressFrom): an address without
     // "http://" before it is one that is spoken to over HTTPS. Its host stands as the address
     // has it, and not as it reads best: a name that is written "xn--" is typed so.
     shown.address = shown.https ? address.authority(QUrl::FullyEncoded) : kvm.address;
+    // A Proxmox guest's with its port written, 443 too: what is typed for a guest is read as the Add box reads it
+    // (proxmox::addressOf), where an address without a port is one at 8006 (review cx3-3, M1).
+    if (kvm.kind == "proxmox"_L1 && shown.https && address.port() < 0) {
+        shown.address += u":443"_s;
+    }
     shown.user = kvm.user;
     shown.group = kvm.group;
     shown.family = kvm.kind;
     shown.certificate = kvm.knownByCertificate ? core::kvm::fingerprint(kvm.certificate) : QString();
-    // (A server's controller hands out no picture of a KVM's here: nothing to watch.)
-    shown.watchable = kvm.kind != "redfish"_L1;
+    // (A server's controller hands out no picture of a KVM's here: nothing to watch. Nor a Proxmox guest's console,
+    // which is said as a server is: the web watches a tile with a picture of its own alone.)
+    shown.watchable = kvm.kind != "redfish"_L1 && kvm.kind != "proxmox"_L1;
     shown.noSignalMinutes = kvm.noSignalMinutes;
     shown.unchangedMinutes = kvm.unchangedMinutes;
+    // (The boot order a start from an image replaced, which only the card remembers: its box says so before the card
+    // goes, 6.4.)
+    if (kvm.kind == "proxmox"_L1 && kvm.bootOrderWas) {
+        shown.bootOrderWas = kvm.bootOrderWas->order;
+        shown.bootOrderWritten = kvm.bootOrderWas->written;
+    }
     return shown;
 }
 
@@ -572,7 +758,8 @@ void OwnWall::openFor(EditKvmView& view, const QString& machine, bool withReview
     m_seen.insert(&view, *now);
     m_offered.remove(&view);
     const EditKvmView::Shown shown = shownOf(now->kvm);
-    view.show(shown, withReview && shown.https);
+    // (A vncs:// server's certificate is looked at and said yes to as a KVM's over HTTPS: outside review c9a-2, M1.)
+    view.show(shown, withReview && EditKvmView::showsACertificate(shown));
 }
 
 QString OwnWall::saidOfSettingsThatCouldNotBeRead(core::Settings& settings)
@@ -630,6 +817,8 @@ void OwnWall::useAppLock(AppLock& lock)
         &lock, &AppLock::changed, this,
         [this] {
             if (!mayChange()) {
+                // A typing handed to a driver goes no further: whoever had it typed may have it no longer (6.18).
+                m_wall.stopEveryTyping();
                 m_adding.giveUp();
                 for (const QPointer<AddKvmView>& box : m_addBoxes) {
                     if (box != nullptr) {
@@ -646,7 +835,7 @@ void OwnWall::useAppLock(AppLock& lock)
         Qt::DirectConnection);
 }
 
-QString OwnWall::saidOf(const core::KvmAdding::Added& added, const QString& called)
+QString OwnWall::saidOf(const core::KvmAdding::Added& added, const QString& called, bool aVncServer)
 {
     // "Build server" added, and in brackets what else is to be said, with commas between (the page has a long
     // dash and a dot there; the owner's rule writes neither, 2026-11-13). (What it is called stands as a
@@ -655,8 +844,9 @@ QString OwnWall::saidOf(const core::KvmAdding::Added& added, const QString& call
     if (!added.model.isEmpty()) {
         more.append(added.model);
     }
+    // (A VNC server's vnc:// is no HTTP: said in its family's words, as its row's "Unencrypted (vnc)".)
     if (added.overPlainHttp) {
-        more.append(u"over plain HTTP"_s);
+        more.append(aVncServer ? u"unencrypted"_s : u"over plain HTTP"_s);
     }
     QString said = u"%1 added"_s.arg(called);
     if (!more.isEmpty()) {

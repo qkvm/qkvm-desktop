@@ -72,16 +72,33 @@ bool isNotRouted(const QString& host)
 // can be taken, each with what it is called in a sentence.
 class Taken {
 public:
+    // `keptBesideToo`: a KVM kept beside its twin is the twin, by what a VNC server's certificate says, of one that
+    // comes (the wall's, as LocalWall::twinOfOneComing; review cx6-2, L1). Not among the devices of one file, where a
+    // wall's two that were kept both stand as that wall had them.
+    explicit Taken(bool keptBesideToo = false) : m_keptBesideToo(keptBesideToo) {}
+
     void add(const OwnKvm& kvm, const QString& called)
     {
         const LocalWall::Place place = LocalWall::placeOf(kvm);
         m_atHost[place.host].append(One{place, called});
-        // (A server's controller is no twin by a certificate, whichever of the two: LocalWall::sameCertificate.)
-        if (kvm.knownByCertificate && kvm.kind != "redfish"_L1 && !m_byCertificate.contains(kvm.certificate)) {
+        // (A server's controller is no twin by a certificate, whichever of the two: LocalWall::sameCertificate. Nor a
+        // VNC server, whose certificate says it, and which may be kept beside its twin: certificateSaysSo, 6.5.)
+        const bool byCertificate = kvm.knownByCertificate && kvm.kind != "redfish"_L1 && kvm.kind != "proxmox"_L1;
+        if (byCertificate && kvm.kind != "vnc"_L1 && !m_byCertificate.contains(kvm.certificate)) {
             m_byCertificate.insert(kvm.certificate, called);
+        }
+        if (byCertificate && (m_keptBesideToo || !LocalWall::isKeptBeside(kvm))) {
+            QHash<QByteArray, QString>& said = kvm.kind == "vnc"_L1 ? m_saidByAVncServer : m_saidByAnother;
+            if (!said.contains(kvm.certificate)) {
+                said.insert(kvm.certificate, called);
+            }
         }
         if (!kvm.number.isEmpty() && !LocalWall::isKeptBeside(kvm) && !m_byNumber.contains(kvm.number)) {
             m_byNumber.insert(kvm.number, called);
+        }
+        // (A Proxmox guest by the number it gives for itself: its machine, LocalWall::twinOf.)
+        if (kvm.kind == "proxmox"_L1 && !kvm.machine.isEmpty() && !m_byGuest.contains(kvm.machine)) {
+            m_byGuest.insert(kvm.machine, called);
         }
     }
 
@@ -102,15 +119,32 @@ public:
     // The one that is known by the certificate this KVM is to be known by; or, where none is, the
     // one that gives the number this KVM gives: that one is this KVM, under another address
     // (LocalWall::twinOf). Nothing: none is. `byNumber`: by the number, which is said.
+    // `bySaidCertificate`: by the certificate a VNC server is known by, which says it and proves nothing (6.5).
     struct Twin {
         QString called;
         bool byNumber = false;
+        bool bySaidCertificate = false;
     };
     std::optional<Twin> twinOf(const OwnKvm& kvm) const
     {
-        if (kvm.knownByCertificate && kvm.kind != "redfish"_L1) {
+        if (kvm.kind == "proxmox"_L1) {
+            const auto twin = kvm.machine.isEmpty() ? m_byGuest.constEnd() : m_byGuest.constFind(kvm.machine);
+            return twin == m_byGuest.constEnd() ? std::nullopt : std::optional<Twin>(Twin{*twin, false});
+        }
+        if (kvm.knownByCertificate && kvm.kind != "redfish"_L1 && kvm.kind != "vnc"_L1) {
             if (const auto twin = m_byCertificate.constFind(kvm.certificate); twin != m_byCertificate.constEnd()) {
                 return Twin{*twin, false};
+            }
+        }
+        // (As LocalWall::twinOf: where one of the two is a VNC server, and neither is to stay beside its twin.)
+        if (kvm.knownByCertificate && kvm.kind != "redfish"_L1 && !LocalWall::isKeptBeside(kvm)) {
+            if (const auto twin = m_saidByAVncServer.constFind(kvm.certificate);
+                twin != m_saidByAVncServer.constEnd()) {
+                return Twin{*twin, false, true};
+            }
+            if (const auto twin = m_saidByAnother.constFind(kvm.certificate);
+                kvm.kind == "vnc"_L1 && twin != m_saidByAnother.constEnd()) {
+                return Twin{*twin, false, true};
             }
         }
         if (kvm.number.isEmpty() || LocalWall::isKeptBeside(kvm)) {
@@ -130,14 +164,18 @@ private:
     };
     QHash<QString, QList<One>> m_atHost;
     QHash<QByteArray, QString> m_byCertificate;
+    QHash<QByteArray, QString> m_saidByAVncServer;
+    QHash<QByteArray, QString> m_saidByAnother;
     QHash<QString, QString> m_byNumber;
+    QHash<QString, QString> m_byGuest;
     qsizetype m_count = 0;
+    bool m_keptBesideToo = false;
 };
 
 // The KVMs of a wall, each as a sentence calls it.
 Taken thoseOn(const QList<OwnKvm>& wall)
 {
-    Taken onTheWall;
+    Taken onTheWall(true);
     for (const OwnKvm& kvm : wall) {
         onTheWall.add(kvm, calledAt(kvm.name, kvm.address));
     }
@@ -166,6 +204,15 @@ std::optional<InTheWay> onTheWallAlready(const Taken& onTheWall, const OwnKvm& k
         return InTheWay{"duplicate", words("it is on the wall already (%1).").arg(*there)};
     }
     if (const std::optional<Taken::Twin> twin = onTheWall.twinOf(kvm)) {
+        if (twin->bySaidCertificate) {
+            return InTheWay{"same_device",
+                            words("it says it is the same device as one that is on the wall already at another "
+                                  "address (%1): the file names the certificate that one is known by. Where they "
+                                  "are two VNC servers behind one certificate, the file of a wall that keeps both "
+                                  "says so.")
+                                .arg(twin->called),
+                            true};
+        }
         return InTheWay{"same_device",
                         twin->byNumber
                             ? words("it says it is the same device as one that is on the wall already at another "
@@ -208,7 +255,13 @@ void cannot(WallExchange::Offered& row, const InTheWay& what)
 QString knownAs(const exchange::Device& device, WallExchange::Offered& row, OwnKvm& kvm)
 {
     using KnownBy = WallExchange::KnownBy;
-    if (!device.address.startsWith("https://"_L1)) {
+    if (device.address.startsWith("vnc://"_L1)) {
+        row.passwordInTheClear = true;
+        row.knownBy = KnownBy::Nothing;
+        return words("It is a VNC server spoken to in the clear: everything that is seen and typed there goes "
+                     "unencrypted, and nothing shows who answers at that address.");
+    }
+    if (!device.address.startsWith("https://"_L1) && !device.address.startsWith("vncs://"_L1)) {
         row.passwordInTheClear = true;
         row.knownBy = KnownBy::Nothing;
         return words("It is spoken to over plain HTTP: its password goes in the clear, and so does everything "
@@ -249,6 +302,16 @@ QString knownAs(const exchange::Device& device, WallExchange::Offered& row, OwnK
                              ? words("The file says that its certificate is not checked.")
                              : words("The file names no certificate for it: a qKVM server would know it by the first "
                                      "certificate it shows.");
+    // (A VNC server's vncs:// in its family's words: it is no KVM, and its greeting is what it is heard by, not a
+    // question of what it is. Outside review c9a-4, L3.)
+    if (device.address.startsWith("vncs://"_L1)) {
+        return words("%1 This program does not take the first certificate a device from a file shows. It will be "
+                     "known by Windows' word. A VNC server's own certificate does not have that: then its tile says "
+                     "that its certificate is not trusted, and nothing is sent to it before somebody has looked at "
+                     "that certificate and trusted it. Where Windows does trust the certificate it shows, it is "
+                     "signed in to on Windows' word, with nobody having looked at that certificate.")
+            .arg(said);
+    }
     return words("%1 This program does not take the first certificate a device from a file shows. It will be "
                  "known by Windows' word. A KVM's own certificate does not have that: then its tile says "
                  "that its certificate is not trusted, and nothing is sent to it before somebody has looked "
@@ -278,9 +341,15 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
 
         // Its address, as it will be kept and may be shown: by the one function that hands out an
         // address in plain signs only, with a name in its "xn--" form left in that form.
-        const std::optional<exchange::ConsoleAddress> shown =
-            exchange::consoleAddress(exchange::LinkAsWritten(device.address));
-        const bool showable = shown && shown->toOpen() == device.address;
+        // (A VNC server's as its family writes it, its host looked at as a web address's would be.)
+        const bool ofAVncServer = vnc::namesOne(device.address);
+        const vnc::Place vncPlace = vnc::placeOf(device.address);
+        const QString vncHost = vncPlace.host.contains(u':') ? u'[' + vncPlace.host + u']' : vncPlace.host;
+        const std::optional<exchange::ConsoleAddress> shown = exchange::consoleAddress(exchange::LinkAsWritten(
+            ofAVncServer ? u"https://%1:%2"_s.arg(vncHost).arg(vncPlace.port) : device.address));
+        const bool showable = shown && (ofAVncServer ? vnc::addressFrom(device.address).ok() &&
+                                                           vnc::addressFrom(device.address).value() == device.address
+                                                     : shown->toOpen() == device.address);
         // A device that has no name in its file is named by its address there (the reader's
         // rule, and a server's). Here it has none, as a KVM has none that was added by hand
         // without one: it is called by where it is wherever it is shown, and so by where it is
@@ -295,6 +364,8 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
 
         OwnKvm kvm;
         kvm.kind = device.kind;
+        kvm.node = device.node;
+        kvm.vmid = device.vmid;
         // The number it gives for itself, as the file carries it (read only where it is one a driver gives).
         kvm.number = device.ident;
         // And that somebody said it is to stay beside its twin (the web's keep_both).
@@ -310,7 +381,7 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
         QStringList ofItsAddress;
         QString ofHowItIsKnown;
         if (showable) {
-            row.address = shown->toOpen();
+            row.address = ofAVncServer ? device.address : shown->toOpen();
             row.nameAndAddress = calledAt(name ? name.value() : device.name, row.address);
             row.nameInXnForm = isInXnForm(shown->host());
             if (shown->isThisPcsOwn()) {
@@ -330,11 +401,14 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
             }
             ofHowItIsKnown = knownAs(device, row, kvm);
         }
-        // (A JetKVM out of its box runs without a password: that the file has none for one is no
-        // problem of its own, and is said calmly.)
+        // (Of a VNC server, in its family's words: outside review c9a-4, L3. A JetKVM out of its box
+        // runs without a password: that the file has none for one is no problem of its own, and is
+        // said calmly.)
         const QString ofItsPassword =
-            row.hasPassword ? words("The file has its password. It is kept with Windows, for this address and for "
-                                    "what the KVM is known by.")
+            row.hasPassword && ofAVncServer ? words("The file has its password. It is kept with Windows, for this "
+                                                    "address and for what the VNC server is known by.")
+            : row.hasPassword ? words("The file has its password. It is kept with Windows, for this address and for "
+                                      "what the KVM is known by.")
             : device.kind == "jetkvm"_L1
                 ? words("The file has no password for it. It is taken without one: fine for a JetKVM that runs "
                         "without one, and where it asks for one, it is typed on this PC.")
@@ -373,13 +447,19 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
                              words("device %1 of this file is at the same address and stands before it.").arg(*first)});
             } else if (const std::optional<Taken::Twin> firstTwin = ofTheFile.twinOf(kvm)) {
                 cannot(row, {"same_device",
-                             firstTwin->byNumber ? words("it says it is the same device as device %1 of this file, "
-                                                         "which stands before it: the file names one number for both.")
-                                                       .arg(firstTwin->called)
-                                                 : words("it is the same device as device %1 of this file, which "
-                                                         "stands before it: the file names one certificate for both.")
-                                                       .arg(firstTwin->called),
-                             firstTwin->byNumber});
+                             firstTwin->bySaidCertificate
+                                 ? words("it says it is the same device as device %1 of this file, which stands "
+                                         "before it: the file names one certificate for both. Where they are two VNC "
+                                         "servers behind one certificate, the file of a wall that keeps both says so.")
+                                       .arg(firstTwin->called)
+                             : firstTwin->byNumber
+                                 ? words("it says it is the same device as device %1 of this file, which stands "
+                                         "before it: the file names one number for both.")
+                                       .arg(firstTwin->called)
+                                 : words("it is the same device as device %1 of this file, which stands before it: "
+                                         "the file names one certificate for both.")
+                                       .arg(firstTwin->called),
+                             firstTwin->byNumber || firstTwin->bySaidCertificate});
             } else if (wall.size() + kept.size() + ofTheFile.size() >= Remembered::mostKvms) {
                 cannot(row, wallIsFull());
             } else {
@@ -388,6 +468,8 @@ QList<Judged> judged(const QList<exchange::Device>& devices, const QList<OwnKvm>
                 row.verdict = kvm.kind == "jetkvm"_L1    ? words("It can be taken, as a JetKVM.")
                               : kvm.kind == "redfish"_L1 ? words("It can be taken, as a server's management "
                                                                  "controller (BMC).")
+                              : kvm.kind == "vnc"_L1     ? words("It can be taken, as a VNC server.")
+                              : kvm.kind == "proxmox"_L1 ? words("It can be taken, as a virtual machine on Proxmox VE.")
                                                          : words("It can be taken, as a KVM that runs kvmd "
                                                                  "(PiKVM, GL.iNet Comet).");
                 ofTheFile.add(kvm, QString::number(row.place));

@@ -45,6 +45,11 @@ void ActionsView::answerWith(bool yes, int paceSeconds, bool ticked)
     emit answered(yes, paceSeconds, ticked);
 }
 
+void ActionsView::answerNo()
+{
+    emit saidNo();
+}
+
 void ActionsView::openPicked()
 {
     emit pickedAsked();

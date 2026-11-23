@@ -3,12 +3,19 @@
 .SYNOPSIS
 Checks the runnable folder with only Windows on PATH, without opening a user profile.
 -WithSetup: the content of an MSIX, which carries qKVM Setup beside the program (tools/test_installer.ps1).
+-Arch: the kind of processor its images are for (x64 or arm64); by default what its manifest says, else x64.
 #>
-param([Parameter(Mandatory)] [string] $PackageDirectory, [switch] $WithSetup)
+param([Parameter(Mandatory)] [string] $PackageDirectory, [switch] $WithSetup, [string] $Arch = '')
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot\build_common.ps1"
 $package = (Resolve-Path -LiteralPath $PackageDirectory).Path
+if (-not $Arch) {
+    $manifestFile = Join-Path $package 'package-manifest.json'
+    $Arch = if (Test-Path -LiteralPath $manifestFile) { [string] (Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json).architecture } else { 'x64' }
+}
+if ($Arch -notin 'x64', 'arm64') { throw "The runnable package says it is for $Arch." }
 # One program ships in the portable ZIP, qkvm-desktop.exe: no setup while it can install nothing (owner, D1), no test,
 # bench or stand-in program, and no symbols. An MSIX carries qKVM Setup as well.
 $programs = @('qkvm-desktop.exe') + @(if ($WithSetup) { 'qkvm-setup.exe' })
@@ -28,9 +35,13 @@ foreach ($required in @(
     'qkvm-desktop.exe', 'Qt6Quick.dll', 'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Network.dll',
     'Qt6Qml.dll', 'Qt6Svg.dll', 'Qt6QuickTemplates2.dll',
     'avcodec-63.dll', 'avutil-61.dll', 'datachannel.dll',
-    'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
+    'msvcp140.dll', 'msvcp140_atomic_wait.dll', 'vcruntime140.dll',
     'plugins/platforms/qwindows.dll', 'plugins/tls/qschannelbackend.dll',
     'qml/QtQuick/qmldir', 'qml/QtQuick/Templates/qmldir', 'qt.conf'
+) + @(
+    # (x64's runtime of the second kind of exception handling; ARM64 has none: the Build Tools' ARM64 runtime folder's
+    # vcruntime140_1.dll is an x64 one, for emulated code.)
+    if ($Arch -eq 'x64') { 'vcruntime140_1.dll' }
 ) + @(
     # The development FFmpeg's avcodec asks for swresample; the project's own does not.
     $avcodec = Join-Path $package 'avcodec-63.dll'
@@ -42,6 +53,14 @@ foreach ($required in @(
         throw "The runnable package is incomplete: $required is missing from $package."
     }
 }
+# Every program and library of it is of its kind (an x64 one in an ARM64 package, or the other way round, is never
+# loaded and is no part of it), 2026-11-19. (What a library it lacks would mean is the program's own start to find.)
+$otherKind = @(Get-PackageImageRefusals $package $Arch -KindsOnly)
+if ($otherKind.Count) { throw "The runnable package holds an image that is not for ${Arch}: $($otherKind -join '; ')." }
+# And each is built with what tools/image-protections.json asks of its kind (ASLR, DEP, CFG and the guard of returns of
+# its kind where its row asks them), read from its bytes, 2026-11-21.
+$unprotected = @(Get-ImageProtectionRefusals $package $Arch)
+if ($unprotected.Count) { throw "The runnable package holds an image not built with what its table asks: $($unprotected -join '; ')." }
 
 $start = [Diagnostics.ProcessStartInfo]::new()
 $start.FileName = Join-Path $package 'qkvm-desktop.exe'

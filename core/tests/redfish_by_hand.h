@@ -54,6 +54,9 @@ public:
         const auto answer = [this](const Asked& asked) { return answered(asked); };
         stand = tls ? std::make_unique<StandIn>(answer, *tls, port) : std::make_unique<StandIn>(answer, port);
         stand->handsLinesOver = false;
+        // A controller keeps a caller's line for the next question, as a real one does (its sign-in goes only on the
+        // line its root was read on: outside review of 0.2.0, 5.4). A test of one that closes it says so.
+        stand->keepsLines = true;
     }
 
     // What it is.
@@ -97,11 +100,26 @@ public:
     QJsonValue led = QStringLiteral("Off");
     QJsonValue ledKinds = QJsonArray{QStringLiteral("Lit"), QStringLiteral("Blinking"), QStringLiteral("Off")};
     QJsonValue locating;
-    QString systemLink;          // what it says its computer is (empty: the usual)
+    QString systemLink; // what it says its computer is (empty: the usual)
+    // Other computers its controller lists beside this one (the nodes of a chassis that one controller manages): each
+    // by the last part of its place, its own number (a null: it says none), and its power; listed after this one, or
+    // before it (othersFirst); and whether this one is listed at all (ownListed: false, as when its node left). One
+    // whose `status` is set answers every read of it with that error (503: a node that cannot be read just then).
+    struct Other {
+        QString id;
+        QJsonValue uuid;
+        QString power = QStringLiteral("Off");
+        int status = 0;
+    };
+    QList<Other> others;
+    bool othersFirst = false;
+    bool ownListed = true;
     bool managerNamed = true;    // its computer names the controller that manages it
     int managerFails = 0;        // its controller answers so many reads with 503 first
+    int managerByteEveryMs = 0;  // ...or a byte at a time, this far apart (0: whole)
     int rootTakesMs = 0;         // its root is answered only after this long
     int systemTakesMs = 0;       // its computer is answered only after this long
+    int systemByteEveryMs = 0;   // ...or a byte at a time, this far apart, and never to its end (0: whole)
     int rootUnsignedTakesMs = 0; // its root, asked with no session, is answered only after this long
     bool systemUnwell = false;   // its computer is answered with an error of its own (503), the rest as ever
     // The sensors (fake_redfish.py): the first processor's temperature and health; a list of chassis that begins
@@ -117,10 +135,14 @@ public:
     int rootFails = 0;           // so many reads of its root without a session are answered 503 first
     bool rootFailsIn200 = false; // ...or with an error said as 200, as some controllers do at their moments
     int rootHangsUp = 0;         // so many reads of its root without a session are taken and hung up on
-    int loginStatus = 201;       // another: a sign-in is answered with it, whatever the password
-    int loginTakesMs = 0;        // a sign-in is answered only after this long
-    bool loginNever = false;     // a sign-in is taken, and never answered
-    int loginsNever = 0;         // ...so many of them, from the next one on
+    // ...or answered as by something that is no Redfish service at all, with this status (a camera's sign-in page,
+    // 401; a page that is not there, 404; 200 with a JSON that says no RedfishVersion).
+    int rootIsNone = 0;
+    int rootIsNoneWith = 401;
+    int loginStatus = 201;          // another: a sign-in is answered with it, whatever the password
+    int loginTakesMs = 0;           // a sign-in is answered only after this long
+    bool loginNever = false;        // a sign-in is taken, and never answered
+    int loginsNever = 0;            // ...so many of them, from the next one on
     bool bodyNamesItsPlace = false; // a sign-in's answer names the session's place (@odata.id)
     QString unauthorizedAt;         // a place it refuses (401) under a session it knows: one the account may not read
     bool signOutNever = false;      // a sign-out is taken, and never answered
@@ -157,6 +179,10 @@ public:
     // restarted or switched on with its setup override set takes it as it starts, after so long (the override back
     // to Disabled, and the server in its setup).
     QJsonValue bootTargets;
+    // ...the kinds of override it says it allows (BootSourceOverrideEnabled@Redfish.AllowableValues; none: not said)
+    QJsonValue bootEnabledKinds;
+    // ...a change to "Once" kept as this instead (a board that keeps "Once" as "Continuous"; empty: as it is sent)
+    QString keepsOnceAs;
     QString bootEnabled = QStringLiteral("Disabled");
     QString bootTarget = QStringLiteral("None");
     int bootStatus = 0;
@@ -164,12 +190,15 @@ public:
     // A change of it answered with this, and not kept (a task the controller only queued: a 200 with a Task body and
     // its monitor's Location, say).
     std::optional<Answered> bootQueuedAs;
+    // Its tasks (D1): what a look at each of these places answers, in turn, the last of them again and again.
+    QHash<QString, QList<Answered>> tasks;
     int bootTakesMs = 0;
     int clearStatus = 0;
     // ...a clearing made and answered with this in place of 204 (200: with no body, as some controllers do); and, where
     // set, what its computer says as its Boot in place of the override as it stands (undefined: no Boot at all; a
     // null; an empty one), whatever the override is.
     int clearAnswer = 204;
+    bool clearNotKept = false; // ...and the clearing answered so, and not made
     std::optional<QJsonValue> bootSaidAs;
     bool startsIntoSetup = true;
     int setupTakesMs = 0;
@@ -182,6 +211,8 @@ public:
     bool ownConsole = true;
     int webLoginStatus = 0;
     int webSignInTakesMs = 0;
+    // (openbmc layout) Its manager announces a graphical console of the KVM-over-IP kind (bmcweb's /kvm/0).
+    bool announcesKvm = false;
     QJsonValue automaticOff = 0;
     QJsonValue localMonitorOff = 0;
     bool reconnects = false;
@@ -300,6 +331,11 @@ private:
                     gone.hangUp = true;
                     return gone;
                 }
+                if (rootIsNone > 0) {
+                    --rootIsNone;
+                    return rootIsNoneWith == 200 ? Answered(200, R"({"Name": "A camera", "Model": "IPC-1"})")
+                                                 : error(rootIsNoneWith, QStringLiteral("Sign in"));
+                }
             } else if (!refusesSessions) {
                 requests.append(QStringLiteral("GET /redfish/v1"));
             }
@@ -351,13 +387,35 @@ private:
         if (asked.method != "GET") {
             return error(405, QStringLiteral("Not allowed"));
         }
+        if (const auto task = tasks.find(at); task != tasks.end() && !task->isEmpty()) {
+            return task->size() > 1 ? task->takeFirst() : task->constFirst();
+        }
         if (at == QStringLiteral("/redfish/v1/Systems")) {
             const QString place = systemLink.isEmpty() ? system() : systemLink;
-            return {200, written(QJsonObject{
-                             {QStringLiteral("Members"), QJsonArray{QJsonObject{{QStringLiteral("@odata.id"), place}}}},
-                             {QStringLiteral("Members@odata.count"), 1}})};
+            QJsonArray members;
+            if (ownListed) {
+                members.append(QJsonObject{{QStringLiteral("@odata.id"), place}});
+            }
+            for (const Other& other : std::as_const(others)) {
+                const QJsonObject one{{QStringLiteral("@odata.id"), QStringLiteral("/redfish/v1/Systems/") + other.id}};
+                if (othersFirst) {
+                    members.prepend(one);
+                } else {
+                    members.append(one);
+                }
+            }
+            return {200, written(QJsonObject{{QStringLiteral("Members"), members},
+                                             {QStringLiteral("Members@odata.count"), members.size()}})};
         }
-        if (at == system()) {
+        for (const Other& other : std::as_const(others)) {
+            if (at == QStringLiteral("/redfish/v1/Systems/") + other.id) {
+                if (other.status != 0) {
+                    return error(other.status, QStringLiteral("Service Unavailable"));
+                }
+                return {200, written(otherComputer(other))};
+            }
+        }
+        if (at == system() && ownListed) {
             if (systemUnwell) {
                 return error(503, QStringLiteral("Service Unavailable"));
             }
@@ -368,6 +426,7 @@ private:
             tookItsOverride();
             Answered computerSaid(200, written(computer()));
             computerSaid.afterMs = systemTakesMs;
+            computerSaid.byteEveryMs = systemByteEveryMs;
             if (!putsNoMark) {
                 computerSaid.more.append("ETag: " + shownMark().toLatin1());
             }
@@ -399,7 +458,9 @@ private:
                 --managerFails;
                 return error(503, QStringLiteral("Service Unavailable"));
             }
-            return {200, written(controller())};
+            Answered managerSaid(200, written(controller()));
+            managerSaid.byteEveryMs = managerByteEveryMs;
+            return managerSaid;
         }
         return error(404, QStringLiteral("No such resource"), QStringLiteral("Base.1.5.0.ResourceMissingAtURI"));
     }
@@ -537,10 +598,13 @@ private:
             said.insert(QStringLiteral("@odata.etag"), shownMark());
         }
         if (!bootTargets.isNull()) {
-            said.insert(QStringLiteral("Boot"),
-                        QJsonObject{{QStringLiteral("BootSourceOverrideEnabled"), bootEnabled},
-                                    {QStringLiteral("BootSourceOverrideTarget"), bootTarget},
-                                    {QStringLiteral("BootSourceOverrideTarget@Redfish.AllowableValues"), bootTargets}});
+            QJsonObject boot{{QStringLiteral("BootSourceOverrideEnabled"), bootEnabled},
+                             {QStringLiteral("BootSourceOverrideTarget"), bootTarget},
+                             {QStringLiteral("BootSourceOverrideTarget@Redfish.AllowableValues"), bootTargets}};
+            if (!bootEnabledKinds.isNull()) {
+                boot.insert(QStringLiteral("BootSourceOverrideEnabled@Redfish.AllowableValues"), bootEnabledKinds);
+            }
+            said.insert(QStringLiteral("Boot"), boot);
         }
         if (bootSaidAs) {
             said.insert(QStringLiteral("Boot"), *bootSaidAs); // (undefined takes it out)
@@ -548,17 +612,50 @@ private:
         return said;
     }
 
-    // A server that starts with its setup override set takes it, a while later.
+    // Another computer it lists (Other): as this one's, under its own place, number and power, with its own reset.
+    QJsonObject otherComputer(const Other& other) const
+    {
+        const QString place = QStringLiteral("/redfish/v1/Systems/") + other.id;
+        QJsonArray kinds;
+        for (const QString& kind : std::as_const(offered)) {
+            kinds.append(kind);
+        }
+        QJsonObject said{
+            {QStringLiteral("Id"), other.id},
+            {QStringLiteral("Model"), model},
+            {QStringLiteral("Manufacturer"), manufacturer},
+            {QStringLiteral("PowerState"), other.power},
+            {QStringLiteral("Status"), QJsonObject{{QStringLiteral("Health"), QStringLiteral("OK")},
+                                                   {QStringLiteral("State"), QStringLiteral("Enabled")}}},
+            {QStringLiteral("Links"), QJsonObject{{QStringLiteral("Chassis"), QJsonArray{at(chassis())}},
+                                                  {QStringLiteral("ManagedBy"), QJsonArray{at(manager())}}}},
+            {QStringLiteral("Actions"),
+             QJsonObject{
+                 {QStringLiteral("#ComputerSystem.Reset"),
+                  QJsonObject{{QStringLiteral("target"), place + QStringLiteral("/Actions/ComputerSystem.Reset")},
+                              {QStringLiteral("ResetType@Redfish.AllowableValues"), kinds}}}}},
+        };
+        if (!other.uuid.isNull()) {
+            said.insert(QStringLiteral("UUID"), other.uuid);
+        }
+        return said;
+    }
+
+    // A server that starts with its setup override set takes it, a while later: one for the next boot only is over
+    // then, one for every boot ("Continuous") stays.
     void startsWithItsOverride()
     {
-        if (startsIntoSetup && bootEnabled == QStringLiteral("Once") && bootTarget == QStringLiteral("BiosSetup")) {
+        if (startsIntoSetup && (bootEnabled == QStringLiteral("Once") || bootEnabled == QStringLiteral("Continuous")) &&
+            bootTarget == QStringLiteral("BiosSetup")) {
             m_setupAt = m_clock.elapsed() + setupTakesMs;
         }
     }
     void tookItsOverride()
     {
         if (m_setupAt >= 0 && m_clock.elapsed() >= m_setupAt) {
-            bootEnabled = QStringLiteral("Disabled");
+            if (bootEnabled == QStringLiteral("Once")) {
+                bootEnabled = QStringLiteral("Disabled");
+            }
             inSetup = true;
             m_setupAt = -1;
         }
@@ -573,6 +670,17 @@ private:
     std::optional<Answered> doneAt(const Asked& asked, const QString& place)
     {
         const QJsonObject said = QJsonDocument::fromJson(asked.body).object();
+        for (Other& other : others) {
+            if (asked.method == "POST" && place == QStringLiteral("/redfish/v1/Systems/") + other.id +
+                                                       QStringLiteral("/Actions/ComputerSystem.Reset")) {
+                const QString kind = said.value(QStringLiteral("ResetType")).toString();
+                actions.append(QStringLiteral("system %1 %2").arg(other.id, kind));
+                other.power = kind == QStringLiteral("ForceOff") || kind == QStringLiteral("GracefulShutdown")
+                                  ? QStringLiteral("Off")
+                                  : QStringLiteral("On");
+                return Answered{204, {}};
+            }
+        }
         if (asked.method == "POST" && place == system() + QStringLiteral("/Actions/ComputerSystem.Reset")) {
             const QString kind = said.value(QStringLiteral("ResetType")).toString();
             if (resetStatus != 0) {
@@ -657,8 +765,16 @@ private:
                     queued.afterMs = bootTakesMs;
                     return queued;
                 }
+                if (clearing && clearNotKept) {
+                    Answered unmade{clearAnswer, {}};
+                    unmade.afterMs = bootTakesMs;
+                    return unmade;
+                }
                 if (boot.contains(QStringLiteral("BootSourceOverrideEnabled"))) {
                     bootEnabled = boot.value(QStringLiteral("BootSourceOverrideEnabled")).toString();
+                    if (bootEnabled == QStringLiteral("Once") && !keepsOnceAs.isEmpty()) {
+                        bootEnabled = keepsOnceAs;
+                    }
                 }
                 if (boot.contains(QStringLiteral("BootSourceOverrideTarget"))) {
                     bootTarget = boot.value(QStringLiteral("BootSourceOverrideTarget")).toString();
@@ -769,7 +885,11 @@ private:
         }
         if (at == QStringLiteral("/api/kvm/token") && asked.method == "GET") {
             if (!session) {
-                return signInFirst;
+                // The unsigned probe: "sign in first", as AMI's door answers, and as an OpenBMC's does too (which is
+                // why its 401 is no proof of an AMI console). Delayed by tokenTakesMs, so a test can land a look first.
+                Answered no = signInFirst;
+                no.afterMs = tokenTakesMs;
+                return no;
             }
             const QByteArray made = fresh().remove(u'-').toLatin1();
             consolePasses.insert(made);
@@ -963,6 +1083,14 @@ private:
         }
         if (m_layout == Layout::OpenBmc) {
             said.insert(QStringLiteral("Model"), QStringLiteral("OpenBmc"));
+            // Its console, where bmcweb was built with its KVM (served by an RfbConsoleByHand at /kvm/0).
+            if (announcesKvm) {
+                said.insert(
+                    QStringLiteral("GraphicalConsole"),
+                    QJsonObject{{QStringLiteral("ServiceEnabled"), true},
+                                {QStringLiteral("MaxConcurrentSessions"), 4},
+                                {QStringLiteral("ConnectTypesSupported"), QJsonArray{QStringLiteral("KVMIP")}}});
+            }
             // Its firmware's version, and the image it runs, are said where bmcweb knows which of its images runs.
             if (managerSays != QStringLiteral("both")) {
                 said.remove(QStringLiteral("FirmwareVersion"));

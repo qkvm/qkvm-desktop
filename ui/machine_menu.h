@@ -26,8 +26,9 @@ struct MenuOf {
     QList<core::WakeTarget> wake;
     // The machine is shown large already: the way there is left out.
     bool enlarged = false;
-    // Whoever sits here may have the machine's virtual media: an admin of its qKVM, signed in in person. (Never on
-    // this PC's own wall.) Its row is there where the server says the machine has some (`media` in `can`).
+    // Whoever sits here may have the machine's virtual media: an admin of its qKVM, signed in in person; or anybody at
+    // this PC's own wall. Its row is there where the server says the machine has some (`media` in `can`), or, on this
+    // PC's own wall, where the KVM's driver says so (Status::offersMedia).
     bool media = false;
 };
 
@@ -42,6 +43,10 @@ struct Ask {
     QString warning;      // what is to be known before saying yes
     QString detail;       // what would be typed, to be looked at once more before it is
     QString yes;          // what its yes says, where that is not its title ("Restart into setup")
+    QString no;           // what its no says, where that is not "Cancel" ("No")
+    // ...and what that no sends, where it sends something (a card's No: "not_its_server"); only that button sends it,
+    // not Esc, the cross or a click beside the box.
+    std::optional<core::Action> noAction;
     // Done to several machines at once, it takes a tick as well as a yes, as everything does that
     // can lose somebody's work: a power button, a text.
     bool tick = false;

@@ -273,8 +273,9 @@ std::optional<base::Error> inTheWay(const QList<OwnKvm>& there, const OwnKvm& kv
     }
     // Under another address: a KVM makes its certificate itself, so the one it is known by is its
     // own, by whichever address it is reached. (The wall's own rule and sentence, which it keeps
-    // by itself where it is told to know a KVM by a certificate.)
-    if (const std::optional<OwnKvm> twin = LocalWall::twinOf(there, kvm)) {
+    // by itself where it is told to know a KVM by a certificate; and a VNC server's twin kept beside another is still
+    // the twin of one that comes: review cx6-2, L1.)
+    if (const std::optional<OwnKvm> twin = LocalWall::twinOfOneComing(there, kvm)) {
         return LocalWall::sameDevice(*twin, !LocalWall::sameCertificate(*twin, kvm));
     }
     return std::nullopt;
@@ -380,6 +381,14 @@ base::Error whyNotSignedInTo(KvmProbe::Kind kind)
         break;
     }
     return unreachable();
+}
+
+base::Error whyNotSignedInTo(const KvmProbe::Found& found)
+{
+    if (found.kind == KvmProbe::Kind::SomethingElse && found.sentOnTo) {
+        return httpsOnly(*found.sentOnTo);
+    }
+    return whyNotSignedInTo(found.kind);
 }
 
 base::Error ofAnotherFamily(KvmProbe::Kind found, const QString& family, AskedAt at)
@@ -489,6 +498,12 @@ DriverPaces KvmAdding::Pace::drivers() const
     if (redfish) {
         paces.redfish = *redfish;
     }
+    if (vnc) {
+        paces.vnc = *vnc;
+        if (!paces.vnc.pacing) {
+            paces.vnc.pacing = driver.pacing;
+        }
+    }
     // (Where a JetKVM's other way is, the wall has as the boxes have it.)
     paces.jetkvm.otherWay = otherWay;
     return paces;
@@ -535,6 +550,41 @@ void KvmAdding::add(Typed typed, std::function<void(base::Result<Added>)> done)
     const base::Result<QString> group = kvm::groupFrom(typed.group);
     if (!group) {
         finish(group.error());
+        return;
+    }
+    // A VNC server, named so by its address's scheme (the web's is_vnc): asked nothing a KVM is asked (the web asks a
+    // VNC server nothing else); a vncs:// one's certificate read first with nothing sent, then one sign-in by its own
+    // driver.
+    if (vnc::namesOne(typed.address)) {
+        const base::Result<QString> at = vnc::addressFrom(typed.address);
+        if (!at) {
+            finish(at.error());
+            return;
+        }
+        m_kvm = OwnKvm{};
+        m_kvm.kind = u"vnc"_s;
+        m_kvm.name = name.value();
+        m_kvm.address = at.value();
+        m_kvm.user = user.value();
+        m_kvm.group = group.value();
+        m_address = QUrl(at.value());
+        m_password = SecretText::takenFrom(typed.password);
+        // (Whether to keep it beside a display behind the same certificate: certificateShown, 6.5.)
+        m_keepBoth = typed.keepBoth;
+        if (const std::optional<base::Error> refusal = kvm::inTheWay(m_wall.kvms(), m_kvm)) {
+            finish(*refusal);
+            return;
+        }
+        if (!vnc::placeOf(m_kvm.address).tls) {
+            signIn();
+            return;
+        }
+        vnc::askCertificate(m_kvm.address, m_pace.drivers().vnc.screen.openingMs, this,
+                            [this, turn = m_turn](const base::Result<vnc::Certificate>& shown) {
+                                if (turn == m_turn) {
+                                    certificateShown(shown);
+                                }
+                            });
         return;
     }
     const base::Result<QUrl> address = kvm::addressFrom(typed.address);
@@ -610,7 +660,7 @@ void KvmAdding::probed(const KvmProbe::Found& found)
     // itself is signed in to (a kvmd in its own shape, a JetKVM in its).
     const QString family = kvm::familyOf(found.kind);
     if (family.isEmpty()) {
-        finish(kvm::whyNotSignedInTo(found.kind));
+        finish(kvm::whyNotSignedInTo(found));
         return;
     }
     // (Of the family it said it is of: the one it is kept as, and signed in to as.)
@@ -624,13 +674,45 @@ void KvmAdding::probed(const KvmProbe::Found& found)
         finish(*refusal);
         return;
     }
+    signIn();
+}
+
+void KvmAdding::certificateShown(const base::Result<vnc::Certificate>& shown)
+{
+    if (!shown) {
+        finish(shown.error());
+        return;
+    }
+    // What a vncs:// server is known by from now on, as a KVM over HTTPS: the certificate it has just shown, unless
+    // Windows trusts that one for its name as it is (and then by Windows' word each time).
+    m_kvm.knownByCertificate = !shown.value().trustedByWindows;
+    m_kvm.certificate = m_kvm.knownByCertificate ? shown.value().sha256 : QByteArray();
+    m_shown = shown.value().sha256;
+    // Where it says by that certificate that it is a KVM of the wall (another display behind one TLS proxy), and the
+    // person said to keep both: kept beside it, as a twin by its number is (the web's keep_both; 6.5).
+    if (m_keepBoth) {
+        if (const std::optional<OwnKvm> twin = LocalWall::twinOfOneComing(m_wall.kvms(), m_kvm);
+            twin && !LocalWall::sameCertificate(*twin, m_kvm)) {
+            m_kvm.keptBesideItsTwin = true;
+        }
+    }
+    if (const std::optional<base::Error> refusal = kvm::inTheWay(m_wall.kvms(), m_kvm, m_shown)) {
+        finish(*refusal);
+        return;
+    }
+    signIn();
+}
+
+void KvmAdding::signIn()
+{
     // One sign-in, by a driver of its family of its own: on lines of its own, none of them the
     // probe's, and each looked at for the certificate before a byte goes out on it. A JetKVM over plain HTTP has its
     // HTTPS looked at on that sign-in, as the wall's own driver has: where that shows the certificate a KVM of the wall
     // is known by, whatever it answers, that one may be what answers the plain way too, and nothing goes to it (from
     // the third reading of the twins, L4).
     // (Nothing is known of which JetKVM it is, nor of which server a controller serves: what answers is taken, J5.)
-    const OneSignIn::Where where{m_address, m_kvm.user, m_kvm.knownByCertificate, m_kvm.certificate, QString()};
+    const OneSignIn::Where where{m_address, m_kvm.user,   m_kvm.knownByCertificate, m_kvm.certificate, QString(), {},
+                                 0,         ServerPlace{}};
     const DriverPaces paces = m_pace.drivers();
     // (A text of it for the driver's making, which takes a copy of its own: written over here once it has.)
     QString typed = m_password.view().toString();
@@ -666,11 +748,14 @@ void KvmAdding::identified(const base::Result<OneSignIn::Said>& who)
     m_kvm.number = who.value().number.value_or(QString());
     // A server's: the mark it is known by from now on, as its driver asked it (the server that answered, taken).
     m_kvm.machine = who.value().machine;
+    // ...and where its controller keeps that server's computer, as its driver found it (outside review of 0.2.0's
+    // Redfish fixes, M1).
+    m_kvm.serverPlace = who.value().serverPlace;
     // Where it says by its number that it is a KVM of the wall, and the person said to keep both: kept beside it (the
     // web's keep_both). A certificate's twin is not answered so (inTheWay goes by that first, whatever is kept); nor
     // is a server's (a server has one card on this PC's wall: the owner's word, M7 Q2).
     if (m_keepBoth && m_kvm.kind != "redfish"_L1) {
-        if (const std::optional<OwnKvm> twin = LocalWall::twinOf(m_wall.kvms(), m_kvm);
+        if (const std::optional<OwnKvm> twin = LocalWall::twinOfOneComing(m_wall.kvms(), m_kvm);
             twin && !LocalWall::sameCertificate(*twin, m_kvm)) {
             m_kvm.keptBesideItsTwin = true;
         }
@@ -685,7 +770,7 @@ void KvmAdding::identified(const base::Result<OneSignIn::Said>& who)
     added.name = m_kvm.name;
     added.model = who.value().model;
     added.version = who.value().version;
-    added.overPlainHttp = m_address.scheme() == "http"_L1;
+    added.overPlainHttp = m_address.scheme() == "http"_L1 || m_address.scheme() == "vnc"_L1;
     added.certificate = m_kvm.knownByCertificate ? m_kvm.certificate : QByteArray();
     // The wall says aloud that it has changed while it adds, and whoever hears that may end this
     // there and then. So the driver is its own before that, the password is out of here, and

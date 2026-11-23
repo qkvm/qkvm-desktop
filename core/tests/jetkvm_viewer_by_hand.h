@@ -2,6 +2,7 @@
 
 #include "jetkvm_by_hand.h"
 #include "jetkvm_peer_by_hand.h"
+#include "jetkvm_storage_by_hand.h"
 #include <QByteArray>
 #include <QHash>
 #include <QJsonArray>
@@ -10,6 +11,7 @@
 #include <QList>
 #include <QMetaObject>
 #include <QPoint>
+#include <QRegularExpression>
 #include <QSet>
 #include <QTimer>
 #include <algorithm>
@@ -23,11 +25,35 @@
 #include <vector>
 
 namespace qkvm::core::testing {
+// A method's name a test sets, and the library's thread reads as a call comes: under a lock of its own, whenever it is
+// set (a connection may be up then).
+class MethodSwitch {
+public:
+    MethodSwitch& operator=(std::string method)
+    {
+        const std::lock_guard<std::mutex> held(m_lock);
+        m_method = std::move(method);
+        return *this;
+    }
+    void clear() { *this = std::string(); }
+    // Whether it is set to this method.
+    bool is(const QString& method) const
+    {
+        const std::lock_guard<std::mutex> held(m_lock);
+        return !m_method.empty() && method.toStdString() == m_method;
+    }
+
+private:
+    mutable std::mutex m_lock;
+    std::string m_method;
+};
+
 // A JetKVM's one viewer, by hand (M6 2f), on its JetKvmByHand: each offer its signalling line hears is answered by a
 // peer of its own, and the viewer before is handed over first: told otherSessionConnected on its rpc, and closed a
 // second later (as a real one does; fake_jetkvm.py hand_over). At rpc's open it says
 // otaState, localVersion, videoInputState and usbState; it answers the five status questions (ATX both lights off
-// while its extension is off) and anything else -32601 (fake_jetkvm.py:360-424, 664-670). Its switches are read on
+// while its extension is off), its storage's calls where it is given one (`storage`), and anything else -32601
+// (fake_jetkvm.py:360-424, 664-670). Its switches are read on
 // the library's threads; what it is asked to do is done on the interface thread.
 //
 // Its keyboard and its two mice (fake_jetkvm.py's, from the JetKVM's source at 0.5.9), across every connection, as
@@ -60,19 +86,40 @@ public:
     std::atomic<bool> answersCalls{true};
     std::atomic<bool> answersTwoTheOtherWayRound{false}; // the first of two calls is answered after the second
     int everyMs = 16;                                    // a picture so often (0: none)
-    int firstPictureAfterMs = 0; // its first picture only so long after the offer (a rested JetKVM)
-    int handOverCloseMs = 1000;  // the viewer before is closed so long after it was told
-    std::string extension;       // what getActiveExtension says ("atx-power" or none); set before
+    int firstPictureAfterMs = 0;          // its first picture only so long after the offer (a rested JetKVM)
+    int handOverCloseMs = 1000;           // the viewer before is closed so long after it was told
+    std::string extension;                // what getActiveExtension says ("atx-power" or none); set before
+    std::atomic<bool> machineOn{false};   // what getATXState says of its machine's power; set at any time
+    std::atomic<bool> diskLightOn{false}; // ... and of its disk light (`hdd`)
     // What getKeyboardLayout says (set before); where it is not said, it has no such question (-32601, an older one).
     std::string keyboardLayout = "en-US";
     std::atomic<bool> saysItsLayout{true};
     std::atomic<int> layoutsAsked{0};
-    // A method never answered, and one at whose call another viewer takes it first (and it is never answered); what
-    // getWakeOnLanDevices says (a JSON list). Set before.
-    std::string silentOn;
-    std::string handOverOn;
+    // A method never answered, and one at whose call another viewer takes it first (and it is never answered), each set
+    // at any time; what getWakeOnLanDevices says (a JSON list), set before.
+    MethodSwitch silentOn;
+    MethodSwitch handOverOn;
     std::string wakeTargets = "[]";
     std::atomic<int> videoStateAfterMs{0}; // getVideoState answered so long after it was asked (as it was then)
+    // Its own image storage and virtual drive (jetkvm_storage_by_hand.h), whose calls it answers; none: an older one,
+    // which answers each "Method not found". And a call of those answered so long after it was done (set at any time:
+    // under a lock, as the library's thread reads it).
+    std::atomic<JetKvmStorageByHand*> storage{nullptr};
+    void slowOn(std::string method, int byMs)
+    {
+        const std::lock_guard<std::mutex> held(m_slowLock);
+        m_slowOn = std::move(method);
+        m_slowByMs = byMs;
+    }
+    // How late a call of this method of its storage is answered (0: at once).
+    int slowFor(const QString& method)
+    {
+        const std::lock_guard<std::mutex> held(m_slowLock);
+        return !m_slowOn.empty() && method.toStdString() == m_slowOn ? m_slowByMs : 0;
+    }
+    // It sends a message of any size on its channels, as one that does not hold to the largest the offer says it takes
+    // (`a=max-message-size`) would: what is larger then arrives larger. Set before the offer.
+    bool sendsAnySize = false;
     // Where set, what a call is answered with in place of its own answer (any number of texts).
     std::function<QList<QByteArray>(const QByteArray& call)> answersInstead;
     std::atomic<bool> hidrpc{true};          // it answers the hidrpc handshake (false: an older firmware)
@@ -329,7 +376,13 @@ private:
                 }
             });
         }
-        QByteArray answered = peer->answer(sdp);
+        QByteArray offered = sdp;
+        if (sendsAnySize) {
+            // (The largest message the offer takes, as a sender that does not hold to it sees it: a megabyte.)
+            static const QRegularExpression most(QStringLiteral("a=max-message-size:\\d+"));
+            offered = QString::fromLatin1(sdp).replace(most, QStringLiteral("a=max-message-size:1048576")).toLatin1();
+        }
+        QByteArray answered = peer->answer(offered);
         if (answered.isEmpty()) {
             return {};
         }
@@ -640,11 +693,11 @@ private:
             const std::lock_guard<std::mutex> lock(m_hidLock);
             m_rpcCalls.append({method, call.value(QStringLiteral("params")).toObject()});
         }
-        if (method.toStdString() == handOverOn) {
+        if (handOverOn.is(method)) {
             QMetaObject::invokeMethod(&m_context, [this] { handOver(); }, Qt::QueuedConnection);
             return;
         }
-        if (!answersCalls || method.toStdString() == silentOn) {
+        if (!answersCalls || silentOn.is(method)) {
             return;
         }
         if (answersInstead) {
@@ -655,6 +708,33 @@ private:
         }
         QJsonObject reply{{QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
                           {QStringLiteral("id"), call.value(QStringLiteral("id"))}};
+        JetKvmStorageByHand* const images = storage.load();
+        if (const std::optional<QJsonObject> said =
+                images != nullptr ? images->call(method, call.value(QStringLiteral("params")).toObject())
+                                  : std::nullopt) {
+            for (auto member = said->constBegin(); member != said->constEnd(); ++member) {
+                reply.insert(member.key(), member.value());
+            }
+            const QByteArray text = QJsonDocument(reply).toJson(QJsonDocument::Compact);
+            const int slow = slowFor(method);
+            if (slow <= 0) {
+                on.sendText("rpc", text);
+                return;
+            }
+            QMetaObject::invokeMethod(
+                &m_context,
+                [this, number, text, after = slow] {
+                    QTimer::singleShot(after, &m_context, [this, number, text] {
+                        for (const Held& held : m_peers) {
+                            if (held.number == number) {
+                                held.peer->sendText("rpc", text);
+                            }
+                        }
+                    });
+                },
+                Qt::QueuedConnection);
+            return;
+        }
         if (method == QStringLiteral("getVideoState")) {
             QJsonObject state{{QStringLiteral("ready"), signal.load()},
                               {QStringLiteral("streaming"), 1},
@@ -683,8 +763,8 @@ private:
             reply.insert(QStringLiteral("result"),
                          QJsonDocument::fromJson(QByteArray::fromStdString(wakeTargets)).array());
         } else if (method == QStringLiteral("getATXState")) {
-            reply.insert(QStringLiteral("result"),
-                         QJsonObject{{QStringLiteral("power"), false}, {QStringLiteral("hdd"), false}});
+            reply.insert(QStringLiteral("result"), QJsonObject{{QStringLiteral("power"), machineOn.load()},
+                                                               {QStringLiteral("hdd"), diskLightOn.load()}});
         } else {
             reply.insert(QStringLiteral("error"),
                          QJsonObject{{QStringLiteral("code"), -32601},
@@ -729,6 +809,9 @@ private:
     int m_made = 0;
     std::mutex m_holding;
     QByteArray m_held;
+    std::mutex m_slowLock;
+    std::string m_slowOn;
+    int m_slowByMs = 0;
     // Its keyboard and mice (above), across its connections, and what came on hidrpc.
     static constexpr qint64 releaseAfterUs = 100'000;
     std::mutex m_hidLock;

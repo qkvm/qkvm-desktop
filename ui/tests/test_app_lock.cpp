@@ -10,13 +10,17 @@
 #include <windows.h>
 
 #include "app_lock.h"
+#include "made_up_kvm.h"
 #include "memory_secrets.h"
 #include "own_actions_view.h"
 #include "own_wall.h"
 #include "server_session.h"
+#include "vnc_by_hand.h"
+#include <qkvm/core/kvm_adding.h>
 #include <qkvm/core/pacing_file.h>
 #include <qkvm/core/settings.h>
 #include <qkvm/core/sign_in_pacing.h>
+#include <qkvm/core/vnc_device.h>
 
 using namespace Qt::StringLiterals;
 using qkvm::core::testing::MemorySecrets;
@@ -634,6 +638,92 @@ private slots:
         QVERIFY(firstActions.allowed());
         QVERIFY(secondActions.allowed());
         QVERIFY(!files.isMade());
+    }
+    void aTypingHandedToAVncServerStopsAtLockAndAtAWallScreen()
+    {
+        // The outside review of the wave 2 desktop, 6.18: Lock stopped new actions and the rest of a run, but a text
+        // already handed to a VNC server's driver, and its Enter, were typed to the end. It stops where it stands.
+        for (const bool aWallScreen : {false, true}) {
+            QTemporaryDir directory;
+            qkvm::core::Settings settings(directory.filePath(u"settings.json"_s));
+            MemorySecrets store;
+            AppLock lock(store, fast, [] { return 1000; });
+            setUp(lock);
+            qkvm::core::KvmAdding::Pace pace;
+            pace.driver.pacing = std::make_shared<qkvm::core::SignInPacing>();
+            qkvm::core::VncDevice::Pace slowly;
+            slowly.screen.keysAtOnce = 2;
+            slowly.screen.piecePauseMs = 50;
+            pace.vnc = slowly;
+            qkvm::ui::OwnWall own(settings, store, pace);
+            own.useAppLock(lock);
+            qkvm::core::testing::VncByHand server;
+            qkvm::core::OwnKvm kvm;
+            kvm.kind = u"vnc"_s;
+            kvm.address = server.url();
+            const qkvm::base::Result<QString> id = own.wall().add(kvm, u"secret"_s);
+            QVERIFY(id.ok());
+            std::optional<qkvm::base::Result<qkvm::core::Done>> said;
+            own.wall().act(id.value(), qkvm::core::Action::type(QString(60, u'x'), true),
+                           [&said](qkvm::base::Result<qkvm::core::Done> how) { said = std::move(how); });
+            QTRY_VERIFY_WITH_TIMEOUT(server.keys.size() >= 4, 10000);
+            if (aWallScreen) {
+                lock.becameWallScreen();
+            } else {
+                lock.lock();
+            }
+            QVERIFY(lock.restricted());
+            QTRY_VERIFY(said.has_value());
+            QVERIFY(!said->ok());
+            QCOMPARE(said->error().code, std::string("stopped"));
+            QTest::qWait(300);
+            QVERIFY(server.keys.size() < std::size_t{120});
+            QVERIFY(std::ranges::none_of(server.keys, [](const auto& key) { return key.first == 0xFF0D; }));
+        }
+    }
+    void aTextThatWaitsForAKvmdsSignInDoesNotGoAtLockNorAtAWallScreen()
+    {
+        // Review cx6-2, L3: a kvmd's driver with no session when a text is asked for waits for its sign-in, which may
+        // take seconds. Lock or a wall screen meanwhile did not stop it: once the sign-in came, the whole text and its
+        // Enter went to the KVM after the lock. Now nothing of it goes, then or later, and whoever asked is told.
+        for (const bool aWallScreen : {false, true}) {
+            QTemporaryDir directory;
+            qkvm::core::Settings settings(directory.filePath(u"settings.json"_s));
+            MemorySecrets store;
+            AppLock lock(store, fast, [] { return 1000; });
+            setUp(lock);
+            qkvm::core::testing::MadeUpKvm kvm;
+            kvm.signInAfterMs = 1500;
+            bool signingIn = false;
+            kvm.whenSignedInTo = [&signingIn] { signingIn = true; };
+            qkvm::core::KvmAdding::Pace pace;
+            pace.driver.pacing = std::make_shared<qkvm::core::SignInPacing>();
+            qkvm::ui::OwnWall own(settings, store, pace);
+            own.useAppLock(lock);
+            qkvm::core::OwnKvm known;
+            known.address = kvm.stand->address();
+            const qkvm::base::Result<QString> id = own.wall().add(known, u"secret"_s);
+            QVERIFY(id.ok());
+            std::optional<qkvm::base::Result<qkvm::core::Done>> said;
+            own.wall().act(id.value(), qkvm::core::Action::type(u"never after the lock"_s, true),
+                           [&said](qkvm::base::Result<qkvm::core::Done> how) { said = std::move(how); });
+            QTRY_VERIFY_WITH_TIMEOUT(signingIn, 10000);
+            kvm.whenSignedInTo = {};
+            QVERIFY(!said.has_value());
+            if (aWallScreen) {
+                lock.becameWallScreen();
+            } else {
+                lock.lock();
+            }
+            QVERIFY(lock.restricted());
+            QTRY_VERIFY_WITH_TIMEOUT(said.has_value(), 500);
+            QVERIFY(!said->ok());
+            QCOMPARE(said->error().code, std::string("stopped"));
+            // The sign-in is answered 1.5 s after it came, and what waited for it would go at once then.
+            QTest::qWait(3000);
+            QCOMPARE(kvm.asked("/api/hid/print"), 0);
+            QVERIFY(std::ranges::none_of(kvm.did, [](const QByteArray& one) { return one.startsWith("type"); }));
+        }
     }
     void setupAndAutomaticStart()
     {

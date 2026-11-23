@@ -16,6 +16,13 @@ README's *Building* in place. They write the sources, the build and its logs und
 
 - [dependencies.json](dependencies.json) records the exact source pins, the official archive
   hashes and the build choices. The checkout keeps upstream's dependency links and notices.
+- `build-cpp-dependencies.ps1` builds nothing unless its sources (`.deps/webrtc-trial`, or the
+  folder `-Sources` names) are the pinned ones, tree for tree by their digests
+  (`tools/build_common.ps1`, `$WebRtcPins`: line ends taken as LF, git's own files left out),
+  and it writes `webrtc-record.json` beside its install folder: the pins, the trees it checked,
+  its own SHA-256, the commit it ran at and every library it made. `tools/package.ps1` and the
+  release audit's webrtc gate hold a package's `datachannel.dll` to that record. The fetch unpacks
+  Mbed TLS anew from its checked archive every time.
 - Mbed TLS's default configuration does not enable the DTLS-SRTP extension libdatachannel's
   media needs: the scripts define `MBEDTLS_SSL_DTLS_SRTP` alike for the TLS build and the
   transport. C++ exceptions stay on (`/EHsc`).

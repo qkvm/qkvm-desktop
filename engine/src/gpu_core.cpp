@@ -150,7 +150,7 @@ base::Result<std::unique_ptr<Gpu>> Gpu::create(const Options& options)
 GpuCore::GpuCore(const Options& options)
     : m_options(options),
       m_pool(options.decodeThreads > 0 ? static_cast<unsigned>(options.decodeThreads) : decodeThreads()),
-      m_decoding(static_cast<int>(options.decoding))
+      m_stills(m_pool, options.stillsAtOnce), m_decoding(static_cast<int>(options.decoding))
 {
     quietFfmpeg();
 }
@@ -411,6 +411,13 @@ void GpuCore::loseDevice()
 std::uint64_t GpuCore::timesRecovered() const
 {
     return m_recovered.load(std::memory_order_relaxed);
+}
+
+Gpu::Stills GpuCore::stillsSeen()
+{
+    const StillsGate::Seen seen = m_stills.seen();
+    return {seen.mostAtOnce, seen.longestWaitMs, seen.waited,     seen.replacedWaiting,
+            seen.handedIn,   seen.decoded,       seen.holdingNow, seen.inLineNow};
 }
 
 std::vector<std::string> GpuCore::objections()

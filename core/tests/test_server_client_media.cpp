@@ -22,6 +22,8 @@ class TestServerClientMedia : public QObject {
 
 private:
     static constexpr const char* aQkvm = R"({"status": "ok", "version": "0.3.0", "api": ["v1"]})";
+    // A server 0.3.2's mark of the machine a list was made of (server.py, media_listed).
+    static constexpr const char* aMark = "5d41402abc4b2a76b9719d911017c592";
 
     template <typename Answer>
     static base::Result<Answer> answerTo(const std::function<void(std::function<void(base::Result<Answer>)>)>& ask)
@@ -93,6 +95,7 @@ private slots:
         mount.writable = true;
         mount.boot = u"none"_s;
         mount.restart = true;
+        mount.listed = QString::fromLatin1(aMark);
         const base::Result<core::MediaDone> done =
             answerTo<core::MediaDone>([&](const auto& told) { wall.client.mountMedia(u"kvm"_s, mount, told); });
         QVERIFY2(done.ok(), done.ok() ? "" : done.error().message.c_str());
@@ -102,24 +105,28 @@ private slots:
         QCOMPARE(asked.method, QByteArray("POST"));
         QCOMPARE(asked.path, QByteArray("/api/v1/devices/kvm/media"));
         QCOMPARE(asked.headers.value("x-qkvm"), QByteArray("1"));
+        // (0.3.2) With the mark of the list it was picked from.
         QCOMPARE(QJsonDocument::fromJson(asked.body).object(), QJsonObject({{u"image"_s, u"debian-13.iso"_s},
                                                                             {u"machine"_s, u"Build server"_s},
+                                                                            {u"listed"_s, QString::fromLatin1(aMark)},
                                                                             {u"drive"_s, u"flash"_s},
                                                                             {u"writable"_s, true},
                                                                             {u"boot"_s, u"none"_s},
                                                                             {u"restart"_s, true}}));
     }
 
-    void anUnmountAndADeletionNameTheImageAndTheMachine()
+    void anUnmountAndADeletionNameTheImageTheMachineAndTheList()
     {
         Wall wall;
         wall.media = [](const Asked&) { return Answered{200, R"({"ok": true, "note": "Nothing was mounted."})"}; };
-        const base::Result<core::MediaDone> out = answerTo<core::MediaDone>(
-            [&](const auto& told) { wall.client.unmountMedia(u"kvm"_s, u"debian-13.iso"_s, u"Build server"_s, told); });
+        const QString mark = QString::fromLatin1(aMark);
+        const base::Result<core::MediaDone> out = answerTo<core::MediaDone>([&](const auto& told) {
+            wall.client.unmountMedia(u"kvm"_s, u"debian-13.iso"_s, u"Build server"_s, mark, told);
+        });
         QVERIFY(out.ok());
         QCOMPARE(out.value().note, u"Nothing was mounted."_s);
         const base::Result<core::MediaDone> gone = answerTo<core::MediaDone>(
-            [&](const auto& told) { wall.client.deleteMedia(u"kvm"_s, u"old.iso"_s, u"Build server"_s, told); });
+            [&](const auto& told) { wall.client.deleteMedia(u"kvm"_s, u"old.iso"_s, u"Build server"_s, mark, told); });
         QVERIFY(gone.ok());
         QCOMPARE(wall.server.asked.size(), 2);
         QCOMPARE(wall.server.asked[0].path, QByteArray("/api/v1/devices/kvm/media/unmount"));
@@ -127,10 +134,64 @@ private slots:
         for (const Asked& asked : std::as_const(wall.server.asked)) {
             QCOMPARE(asked.method, QByteArray("POST"));
         }
-        QCOMPARE(QJsonDocument::fromJson(wall.server.asked[0].body).object(),
-                 QJsonObject({{u"image"_s, u"debian-13.iso"_s}, {u"machine"_s, u"Build server"_s}}));
+        QCOMPARE(
+            QJsonDocument::fromJson(wall.server.asked[0].body).object(),
+            QJsonObject({{u"image"_s, u"debian-13.iso"_s}, {u"machine"_s, u"Build server"_s}, {u"listed"_s, mark}}));
         QCOMPARE(QJsonDocument::fromJson(wall.server.asked[1].body).object(),
+                 QJsonObject({{u"image"_s, u"old.iso"_s}, {u"machine"_s, u"Build server"_s}, {u"listed"_s, mark}}));
+    }
+
+    void aListOfAServerBefore032NamesNoMarkAndNoneIsSent()
+    {
+        // A server 0.3.0 or 0.3.1 lists no `listed`, and reads none: what goes to it is as it was.
+        Wall wall;
+        wall.media = [](const Asked& asked) {
+            return asked.method == "GET" ? Answered{200, aList()}
+                                         : Answered{200, R"({"ok": true, "note": null, "mounted": null})"};
+        };
+        const base::Result<core::MediaList> list =
+            answerTo<core::MediaList>([&](const auto& done) { wall.client.askMedia(u"kvm"_s, done); });
+        QVERIFY(list.ok());
+        QVERIFY(list.value().listed.isEmpty());
+        core::MediaMount mount;
+        mount.image = u"debian-13.iso"_s;
+        mount.machine = u"Build server"_s;
+        mount.listed = list.value().listed;
+        QVERIFY(
+            answerTo<core::MediaDone>([&](const auto& told) { wall.client.mountMedia(u"kvm"_s, mount, told); }).ok());
+        QVERIFY(answerTo<core::MediaDone>([&](const auto& told) {
+                    wall.client.unmountMedia(u"kvm"_s, u"debian-13.iso"_s, u"Build server"_s, list.value().listed,
+                                             told);
+                }).ok());
+        QVERIFY(answerTo<core::MediaDone>([&](const auto& told) {
+                    wall.client.deleteMedia(u"kvm"_s, u"old.iso"_s, u"Build server"_s, list.value().listed, told);
+                }).ok());
+        QCOMPARE(wall.server.asked.size(), 4);
+        QCOMPARE(QJsonDocument::fromJson(wall.server.asked[1].body).object(),
+                 QJsonObject({{u"image"_s, u"debian-13.iso"_s},
+                              {u"machine"_s, u"Build server"_s},
+                              {u"drive"_s, u"cd"_s},
+                              {u"writable"_s, false},
+                              {u"boot"_s, u"none"_s},
+                              {u"restart"_s, false}}));
+        QCOMPARE(QJsonDocument::fromJson(wall.server.asked[2].body).object(),
+                 QJsonObject({{u"image"_s, u"debian-13.iso"_s}, {u"machine"_s, u"Build server"_s}}));
+        QCOMPARE(QJsonDocument::fromJson(wall.server.asked[3].body).object(),
                  QJsonObject({{u"image"_s, u"old.iso"_s}, {u"machine"_s, u"Build server"_s}}));
+    }
+
+    void aListOfAServer032NamesTheMachineItWasMadeOf()
+    {
+        Wall wall;
+        // (Written by QJsonDocument: moc misreads a raw text that ends in a quote, and loses the slots after it.)
+        QJsonObject list032 = QJsonDocument::fromJson(aList()).object();
+        list032[u"listed"_s] = QString::fromLatin1(aMark);
+        const QByteArray said = QJsonDocument(list032).toJson(QJsonDocument::Compact);
+        wall.media = [said](const Asked&) { return Answered{200, said}; };
+        const base::Result<core::MediaList> list =
+            answerTo<core::MediaList>([&](const auto& done) { wall.client.askMedia(u"kvm"_s, done); });
+        QVERIFY2(list.ok(), list.ok() ? "" : list.error().message.c_str());
+        QCOMPARE(list.value().listed, QString::fromLatin1(aMark));
     }
 
     void whatTheServerRefusesIsSaidInItsWords_data()
@@ -141,6 +202,10 @@ private slots:
         const QByteArray changed =
             R"({"code": "changed", "message": "The confirmation named Build server, and this machine is called Web now. Nothing was mounted: look at it again."})";
         QTest::newRow("another machine by then") << 409 << changed << "changed"_ba;
+        // (0.3.2) The tile's machine is not the one the list was made of any more: nothing was done.
+        const QByteArray moved =
+            R"({"code": "moved", "message": "Build server is not the machine its images were listed for any more: its address, or what qKVM knows of the machine there, was changed since. Nothing was mounted: list its images again."})";
+        QTest::newRow("the tile at another machine since its list") << 409 << moved << "moved"_ba;
         QTest::newRow("a token")
             << 403 << R"({"code": "not_allowed", "message": "Virtual media is for a person, not for a token"})"_ba
             << "not_allowed"_ba;

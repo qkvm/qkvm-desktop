@@ -66,6 +66,7 @@ Said saidOf(DeviceLine::End why)
     case DeviceLine::End::Silent:
         return {"timeout", "Device did not respond in time"};
     case DeviceLine::End::SignedOut:
+    case DeviceLine::End::Refused: // (the web's _line: signed in anew on a 401 and a 403 alike)
         return {"auth_failed", "The device did not accept the session for keyboard and mouse"};
     case DeviceLine::End::NotLetIn:
         return {"bad_response", "The device did not open a line for keyboard and mouse"};

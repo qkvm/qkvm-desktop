@@ -258,6 +258,7 @@ void EditKvmView::began(const QString& what)
     m_waitsForAnother = false;
     m_problem.clear();
     m_mayKeepBoth = false;
+    m_useInstead.clear();
     m_savedAs.clear();
     m_ontoHttps = false;
     emit changed();
@@ -272,7 +273,7 @@ void EditKvmView::signInWaits()
     emit signInWaitsForAnEarlierOne();
 }
 
-void EditKvmView::refused(const QString& why, bool mayKeepBoth)
+void EditKvmView::refused(const QString& why, bool mayKeepBoth, const QString& useInstead)
 {
     if (!m_busy) {
         return;
@@ -282,6 +283,7 @@ void EditKvmView::refused(const QString& why, bool mayKeepBoth)
     // (Of a KVM that went meanwhile there is nothing to say but that it went: `gone`.)
     m_problem = m_gone ? QString() : why;
     m_mayKeepBoth = mayKeepBoth && !m_problem.isEmpty();
+    m_useInstead = m_problem.isEmpty() ? QString() : useInstead;
     // A yes to what is shown at a new address is for one saving. Refused, the box is back at its
     // lines, where it is said why; the next saving reads what is shown there anew.
     if (m_differs) {
@@ -297,6 +299,7 @@ void EditKvmView::refusedOver(const Shown& now, const QString& why)
     }
     m_busy = false;
     m_problem = why;
+    m_useInstead.clear();
     m_shown = now;
     forgetTheKvm();
     emit changed();
@@ -342,7 +345,8 @@ void EditKvmView::savedAndStays(const Shown& now, bool ontoHttps)
     emit filledAnew();
 }
 
-void EditKvmView::reviewed(const QByteArray& remembered, const QByteArray& presented, const QString& isCalled)
+void EditKvmView::reviewed(const QByteArray& remembered, const QByteArray& presented, const QString& isCalled,
+                           bool saysSo)
 {
     if (!m_busy) {
         return;
@@ -356,6 +360,7 @@ void EditKvmView::reviewed(const QByteArray& remembered, const QByteArray& prese
     m_newAddress.clear();
     m_onWindowsWord = false;
     m_presentedIsCalled = isCalled;
+    m_presentedSaysSo = !isCalled.isEmpty() && saysSo;
     m_yesWasToAnother = another;
     showTheTwo(remembered, presented);
     emit changed();
@@ -408,6 +413,7 @@ void EditKvmView::showAtTheNewAddress(const QString& at, bool onWindowsWord, boo
     m_onWindowsWord = onWindowsWord;
     m_plainHttpThere = plainHttp;
     m_presentedIsCalled.clear();
+    m_presentedSaysSo = false;
 }
 
 void EditKvmView::gaveUp()
@@ -459,6 +465,7 @@ void EditKvmView::forgetTheReview()
     m_onWindowsWord = false;
     m_plainHttpThere = false;
     m_presentedIsCalled.clear();
+    m_presentedSaysSo = false;
     m_remembered.clear();
     m_presented.clear();
     m_rememberedSha256.clear();

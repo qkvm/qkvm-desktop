@@ -1,11 +1,13 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Tries the setup for real: ONLY inside a throwaway Windows 10 (22H2) or 11 virtual machine, as a standard user.
+Tries the setup for real: ONLY inside a throwaway Windows 10 (22H2) or 11 virtual machine, or on a Windows on Arm PC
+bought for such tests (-PhysicalArmPc), as a standard user.
 
 .DESCRIPTION
     powershell -ExecutionPolicy Bypass -File test_setup_vm.ps1 -Setup <new setup.exe> -OlderSetup <older setup.exe>
-        -Out <results folder> -Disposable
+        -Out <results folder> -Disposable [-ListedSetup <the new setup, made with the test list>]
+        [-OtherKindZip <the ZIP of an earlier published version of the other kind>] [-PhysicalArmPc]
 
 NEVER on a PC anyone works on: it installs, upgrades, kills, updates and uninstalls qKVM Desktop for the user who
 runs it, writes their registry and Start menu, and starts and ends the program. It refuses to begin unless it is
@@ -13,12 +15,34 @@ told -Disposable, finds the file qkvm-disposable-vm.txt in the user's own folder
 Windows says them and never as the environment does (made
 by whoever set the machine up for this), runs as a standard user (no administrator, not elevated), and finds no
 qKVM Desktop installed yet. Windows PowerShell 5.1 is enough; nothing is fetched, nothing is sent anywhere.
+And only in a machine whose firmware names a hypervisor; or, told -PhysicalArmPc, on a physical PC whose Windows is on
+Arm (a virtual machine runs Windows on Arm only on an Arm host), whose guard file holds a second line that names its
+firmware's maker and model and this one PC's SMBIOS UUID as Windows keeps them (Win32_ComputerSystemProduct):
+"a physical Windows on Arm PC made for this test: <maker>, <model>, <UUID>" (on a virtual machine the guard file
+holds the name alone, and -PhysicalArmPc is refused there). The guard file is made once, by whoever makes the PC one
+for this test, as on a virtual machine; nothing that runs the test writes it. An account that is an
+administrator of the PC but runs this unelevated (UAC's filtered token, as Windows starts programs for an
+administrator) counts as a standard user, as Windows treats it; the preflight's JSON says which it is.
 
--Setup is the setup to try (qKVM-Desktop-<version>-windows-x64-setup.exe, as tools/build_setup.ps1 makes it);
+It runs on x64 Windows and on Windows 11 on Arm, and holds what is installed to the PC's own kind: x64 or arm64, by
+Windows' own word of its machine (IsWow64Process2), whatever kind this PowerShell runs as. Every program and library of
+the installed package is an image of that kind (its PE header, as the setup reads an earlier install's, ImageKind),
+and so are its package-manifest.json's architecture and the kind the Settings > Apps entry notes ("qKVM Desktop
+Architecture": every setup of 0.2.0 and later notes it, none before); qKVM Setup's update check at the program's name
+while the earlier version is set aside is one of that kind; and the program, started (steps 02, 06, 07, 13, 54), runs
+as that kind (step 55 starts the x64 version it put back, which runs as x64). On Windows on Arm both setups must be
+ones that install there: the published 0.1.0 to 0.1.2's refuse Windows on Arm (x64os), and so does a setup of x64's
+package alone. A release round there takes the release's own setup as -Setup and, as -OlderSetup, a throwaway older
+build of the same commit: its version lowered in desktop/CMakeLists.txt (0.1.99, say), both packages built and one
+setup made of them by tools/build_setup.ps1, never handed out. Steps 54 and 55 take 0.1.2's published x64 ZIP as
+-OtherKindZip.
+
+-Setup is the setup to try (qKVM-Desktop-<version>-windows-setup.exe, as tools/build_setup.ps1 makes it);
 -OlderSetup one of an earlier version, which is installed first so that the upgrade is a real one. Each step writes
 one JSON file into -Out (NN-<step>.json: passed, what was seen, each failure), and the setups' logs beside them;
 summary.json at the end. Steps:
-  00 preflight             Windows, x64, a standard user, nothing installed; both setups' versions (older first)
+  00 preflight             Windows, x64 or Arm64 (the PC's kind), a standard user, nothing installed; both setups'
+                           versions (older first); on Windows on Arm, Windows 11 and an older setup that installs there
   01 first-install         the older setup, silent: no administrator asked for (no consent prompt seen), exit 0,
                            the user's own entry in Settings > Apps (HKCU) and none for the PC (HKLM), exactly the
                            package's files in %LOCALAPPDATA%\Programs\qKVM Desktop with the marker and the
@@ -26,21 +50,27 @@ summary.json at the end. Steps:
   02 program-starts        the program starts (its single-instance mutex appears), stays up, and is closed
   03 killed-upgrade        the new setup is killed once it has written Qt6Core.dll: the folder is compared, file by
                            file, with the earlier version's (what is still the earlier one's, what is the new one's
-                           or gone or new: what Inno Setup's rollback restores of a killed setup), and the earlier
-                           program is found set aside for the copy (in every mode since 0.1.2, review L3), not there to
-                           start until the next setup puts it back
+                           or gone or new), and the earlier program is found set aside for the copy (in every mode
+                           since 0.1.2, review L3), with qKVM Setup's update check in its place (0.2.0, M3) until the
+                           next setup puts it back; and (0.2.0)
+                           the marker of an unfinished update is there, and every file of the earlier version is there
+                           byte for byte, as itself or set aside beside it (name.old-update)
   04 upgrade               the new setup over the earlier version: exit 0, its version, exactly its files, the earlier
-                           program put back first (03 left it aside) and set aside for this copy; a file
-                           and a folder this puts in plugins and qml beforehand are removed after the copy, and a
-                           file it puts beside them (outside the two folders) is left
+                           version put back first (03 left it aside), before this copy set it aside again, its log
+                           naming it and its kind (this PC's, read from its program's PE header); a file
+                           and a folder this puts in plugins and qml beforehand, and a file beside them, which no
+                           version of ours installed, are all left (0.2.0 never walks a folder, M4); and the copy is
+                           said to be on the disk before the earlier version goes (L13)
   05 downgrade-refused     the older setup over the new version, silent: it ends with a code that is not 0, and
                            nothing is changed
   06 program-starts        the upgraded program starts
   07 update-mode           the contract's update: the program runs, the setup is started with exactly
                            /SILENT /SUPPRESSMSGBOXES /NOCANCEL /NORESTART /CURRENTUSER /UPDATE=1 /DIR=".." /LOG="..",
                            the program ends within 10 s; the setup waits, installs, exits 0 and starts the
-                           program again from its folder with the one argument --after-update; nothing takes the
-                           program's mutex while the setup still holds its own (Local\qKVM-Desktop-Setup)
+                           program again from its folder with the one argument --after-update, only once its copy
+                           was whole and marked finished (nothing of an unfinished update left behind), and it runs
+                           as the PC's kind; nothing
+                           takes the program's mutex while the setup still holds its own (Local\qKVM-Desktop-Setup)
   08 update-still-running  the same with the program left running: exit 105 within about 60 s, nothing changed,
                            the program still running, and the setup's log ends with the contract's result line
                            (qKVM-RESULT: 105 ...)
@@ -55,20 +85,33 @@ summary.json at the end. Steps:
                            without --after-update while a setup's mutex is held, ends at once without taking its
                            own (the mutex held by this test, as a setup holds it: a reinstall ends a few
                            milliseconds after its files are in, too soon to start the program within it; starts
-                           during a real copy are steps 07 and 14)
+                           during a real copy are steps 07 and 14), within a minute, as a setup waits for such a
+                           start: this first start of the new files waits for Windows' scanner to scan each of them
+                           first (2026-11-21: 2 to 8 s for a whole copy on a test VM; some 60 ms once scanned); and
+                           a second start under the same mutex, the files scanned by then, ends within 2 s, so that a
+                           program that came to spend long before its look at the setup's mutex is seen here and not
+                           hidden by the setup's minute (review armp-1 L5); both times are kept
   13 program-starts        the reinstalled program starts
   14 starts-during-copy    the new setup again, with the program started without an argument every half second while
-                           the setup copies its files: every start finds no program (set aside for the copy), the
-                           install completes, no start takes the program's mutex while
+                           the setup copies its files: every start finds the update check in the program's place
+                           (the program set aside for the copy), which ends at once with 0, the install completes, no start takes the program's mutex while
                            the setup holds its own, none is left running without it (one that comes as the setup
                            ends may find it gone and run as the program does), and then the new version starts
   15 update-across-qt      the older version installed again, then the contract's update to the new one, whose Qt
-                           libraries differ, with the program started every half second during the copy: its file is
-                           set aside for the copy (so every start finds no program), the update completes, the aside
-                           copy is gone, and the new version starts
-  16 update-fails-during-copy  the older version again, then the contract's update with a file of the folder held open
-                           once the copy has begun: the update fails, and the earlier program is back in its place and
-                           starts; the new setup then installs as usual
+                           libraries differ (where the two setups ship the same Qt, the step says so, notSeen, and
+                           judges the rest), with the program started every half second during the copy: its file is
+                           set aside for the copy, the update check in its place, the update completes, the aside
+                           copy is gone, and the new version starts; and one start of the new program held suspended
+                           from the moment its file is in until 15 s after the copy's end, as Windows' scanner holds
+                           the first start of a copy just written (2026-11-21: the copy's flush, about 5 s of tries, failed
+                           on such a start, and the update was lost): the setup waits for it to end (its log says so),
+                           then judges the copy, and the update completes
+  16 update-fails-during-copy  the older version again, then the contract's update with a file of the copy's taken and
+                           held open (with no sharing) once the copy has begun, at the name of the last file it writes
+                           before the program, and let go of as it rolls back: the update fails, and the earlier
+                           version is back whole (every file byte for byte, nothing set aside left, no marker), the
+                           setup starts it again itself (L5: the update had ended it), and it starts; the new setup then
+                           installs as usual
   17 killed-then-uninstall  the new setup killed once its copy has reached licenses (what it leaves, in any folder, is
                            seen), then the uninstaller: exit 0, and the program's folder gone with nothing left in it;
                            the data left as it was
@@ -80,8 +123,10 @@ title of its window, ui/win/quit_requests.h); each starts from the new version i
                            setup installs (exit 0, its files) and starts it again; the setting is put back after
   19 busy-held             first a note beside the settings of a server's BIOS setup boot override whose doubt is
                            long over (a server at a loopback port where nothing answers, on no card, as B12 found
-                           on 0.1.0's own profile): it holds nothing, the silent setup closes the program and
-                           upgrades it, and the note is byte for byte what it was. Then the program holding
+                           on 0.1.0's own profile): the program lets go of that record at its start, as SPEC says
+                           of SetupOverrides::prune (its settings there, their list read whole), it holds nothing,
+                           the silent setup closes the program and upgrades it, and changes nothing of the note.
+                           Then the program holding
                            something that its end would cut (WallWindows::whatHoldsAnUpdate: a note for the same
                            server whose doubt goes on, a change that may still come): the new setup, silent, changes nothing
                            (exit 7, its files and entry as they were), the program still runs, and the result line
@@ -129,14 +174,194 @@ title of its window, ui/win/quit_requests.h); each starts from the new version i
                            while a silent install told /FORCECLOSE=1 waits its 10 s: the request still stands, the
                            program ends the orderly way, never by force, and the setup installs and starts it again
                            (review N1)
+Steps 29 to 31 and 34 (0.2.0): the earlier version set aside for the copy (each file renamed to its name and
+.old-update, beside the marker qkvm-desktop.update-unfinished), put back where the copy does not complete, and what an
+update that did not finish left put right by the next setup first. Each starts from the older version installed again
+(34 from the new one) and ends with the new one installed.
+  29 copy-fails-keeps-earlier  a silent upgrade whose copy fails at its very end: the program's own file, the last the
+                           copy writes, taken and held open by this test (with no sharing) once the copy has begun, past
+                           the setup's look at the files in use, and let go of as it rolls back. The setup ends not 0;
+                           its log says the earlier version is whole again; every file of the earlier version is there
+                           byte for byte (its manifest's SHA-256), nothing set aside is left and no marker; the earlier
+                           program starts. Then the new setup installs as usual
+  30 power-cut-recovered   (M3) the new setup ended by force in the middle of its copy (once it has written
+                           Qt6Core.dll), as a power cut ends it: the marker and the earlier version set aside are left,
+                           and the update check in the program's place; a start of it (what the Start menu's entry
+                           starts) says in a box titled qKVM "An update of qKVM did not finish. Choose OK, then run the
+                           qKVM setup again: it puts the earlier version back, or finishes the update.", takes no mutex,
+                           shows no wall, changes nothing, and OK ends it with 1. The next setup puts the earlier version
+                           back first, installs, and the new version starts. Then a real cut after a whole copy: the
+                           marker held from the start of the copy so that it cannot be made that of a finishing update,
+                           the setup ended as it tries again; the new program in its place beside the marker says the
+                           same in its own box, ends with 1 and changes nothing; the setup run again puts back first,
+                           installs, and the program starts
+  31 rename-refused        a file of the earlier version that Windows will not rename (this test, as the same user, denies
+                           itself deleting it and deleting in its folder): Preparing to Install refuses (exit 7) with the
+                           result line "qKVM-RESULT: 7 nothing was changed: a file of qKVM Desktop could not be set aside
+                           for the copy (qt.conf)", every file of the earlier version is there byte for byte, nothing set
+                           aside is left and no marker, the earlier program starts; the entries taken away, the new setup
+                           installs
+  32 uninstall-sees-profile-lock  (0.2.0) the lock of settings.json.running held by this test, as a copy of this
+                           account in another Windows session holds it (or one another account's copy in this session
+                           keeps from the mutex's name), the program not running here: the uninstaller refuses as it
+                           begins, its log says why, and nothing is removed
+  33 start-while-profile-held  (0.2.0) the same lock held: a start of the program shows a box titled qKVM that says it
+                           runs for this account in another session, no wall beside it, and writes nothing of the
+                           settings; OK ends it with exit code 0. The lock let go of, the next start takes it
+  34 stale-marker          (0.2.0) the marker of an unfinished update left beside the new version, whose record names
+                           nothing still set aside, and files of the ending that no record names (a person's, and one of
+                           the package's own name): the program starts as usual, shows no box, takes the marker away and
+                           leaves them as they are; then a silent setup ends 0, sets aside under the next ending
+                           (.2.old-update, its log says) and leaves them byte for byte (H1)
+  35 earlier-files-by-test-list  (0.2.0, M4) ONLY WITH -ListedSetup, a hand-built setup that is never handed out (below);
+                           without it the step is not run, and the summary says so. The older version installed again,
+                           with four files the test list gives it put in as it would have, and two of a person's: after
+                           the silent upgrade by -ListedSetup the log says the older version was installed in this
+                           folder, the four are gone, the folder they alone filled is gone, the folder that holds a
+                           person's file stays with it, and the person's files stay; then -Setup installs over it again,
+                           so that every other step runs on the setup that ships alone
+  36 stranger-beside-upgrade (0.2.0, H1) the older version installed again, and files of the ending beside it that no
+                           record names (a person's notes.txt.old-update, Qt6Core.dll.old-update and
+                           licenses\AGPL-3.0.txt.old-update): a silent upgrade whose copy fails at the program's own file
+                           (held as in 29) puts the earlier version back byte for byte with those files as they were, and
+                           the earlier program starts; the silent upgrade then ends 0, sets aside under .2.old-update, and
+                           leaves them byte for byte
+  37 skip-is-not-whole     (0.2.0, M1) interactive, by UI Automation: the older version again; the upgrade, and once its
+                           copy has begun, the last file before the program held by this test so that the copy cannot
+                           write it; Inno Setup's box offers Skip this file, which is chosen once the file is let go of.
+                           The copy goes on, then the setup finds that file not as the package has it: its box says
+                           "qKVM Desktop <version> was not installed: the copy was not whole (...)", it ends with 7, every
+                           file of the earlier version is back byte for byte (its uninstaller aside), nothing set aside
+                           or marked, Settings > Apps names the earlier version again, and the earlier program starts.
+                           (And step 04's log, L13: the copy said to be on the disk before the earlier version goes.)
+  38 set-aside-not-removable  (0.2.0, M2, L1) the older version again; every file set aside made read-only by this test
+                           during the copy: the upgrade ends 0 and nothing set aside or marked is left. Then again, with
+                           Qt6Core.dll.old-update held by this test (no sharing of its deletion) through the upgrade: it
+                           ends 0, that file alone stays, the finishing marker's record names it, and the program starts
+                           with no box. The next setup with it still held ends 0 and carries it ("left .old-update
+                           Qt6Core.dll" in its finishing marker); let go of, the setup after removes it, and nothing set
+                           aside and no marker is left
+  39 dir-into-foreign-folder (0.2.0, M4; review i020-2, M1) nothing installed; a silent first install by /DIR into
+                           another program's folder is refused (exit 7, the result line "qKVM-RESULT: 7 nothing was
+                           changed: the folder ... holds what is not an install of qKVM Desktop (...): ..."), with nothing
+                           in Settings > Apps and that folder byte for byte with nothing added: once with names of its own
+                           (in plugins, qml and beside them), once with names the package shares (vcruntime140.dll,
+                           msvcp140.dll, Qt6Core.dll, plugins\platforms\qwindows.dll); then a first install by /DIR into
+                           an empty folder ends 0, its log finds no earlier version of ours there, and its uninstall
+                           leaves nothing once the uninstaller has removed itself (it does so after its first process
+                           has ended); then the new version is installed in its own folder again
+  40 cut-during-finishing  (0.2.0, M3) the older version again; three files set aside held by this test during the copy
+                           so that their removal stalls, and the setup ended once its log says the first of them could
+                           not be removed yet: the finishing marker is left with what was set aside, beside the new version,
+                           which starts with no box; the next setup removes the rest first, installs, and nothing set
+                           aside or marked is left (up to three tries, for the cut to come within those moments)
+  41 put-back-then-refused (0.2.0, L4) the older version again, the upgrade cut in the middle of its copy, and Settings >
+                           Apps' entry made to name 9.9.9: the setup then puts the earlier version back first and
+                           refuses as older, its log saying it put the earlier version back and changed nothing else
+                           (never "Nothing was changed."); the folder is the earlier version byte for byte; the entry put
+                           back as it was, the setup installs
+Steps 42 and after (0.2.0, the outside review of 0.2.0's setup, area 1):
+  42 record-in-foreign-folder (1.1) nothing installed; another program's folder with Qt6Core.dll, its own
+                           Qt6Core.dll.old-update and a file of its own, beside a marker of an unfinished update whose
+                           record (one the setup reads) names Qt6Core.dll: a silent setup by /DIR into it does not begin,
+                           its result line says the folder holds what is not an install of qKVM Desktop, the folder is
+                           byte for byte as it was, nothing in Settings > Apps; then the new version in its own folder
+  43 uninstall-left-aside  (1.8) the older version, the upgrade with Qt6Core.dll.old-update held as in 38; the uninstall with
+                           it still held ends 0 and leaves that file and the finishing marker alone (once the
+                           uninstaller has removed itself, after its first process has ended); let go of, the new
+                           setup into the program's own folder ends 0, says it removed what the uninstall had left, and
+                           nothing set aside or marked is left
+  44 folder-others-may-change (1.2) nothing installed; a silent setup by /DIR into an empty folder the users of this PC may
+                           change (given by this test, its owner), into a folder not made yet below one they may change,
+                           into a folder not made yet below one whose files alone they may change ("files only", and
+                           Write on "this folder and files": outside review 2, 1.2, every file installed below it would
+                           be theirs to change), and
+                           into a junction: each refused with 7 and its result line, nothing in Settings > Apps,
+                           nothing added, the folder not made, its rights as they were; then the new version again
+  45 account-gate          (1.3) this test holds the account's gate (Global\qKVM-Desktop-Setup-Account-<SID>) as a setup in
+                           another session would: a silent setup does not begin within seconds, with its result line, the
+                           uninstaller does not either, nothing changed; let go of, the setup ends 0
+  46 uninstall-before-first-start (1.3) the lock file taken away as before a first start: the uninstall is seen holding the
+                           lock, ends 0, removes the lock it made, the data as it was; then the new version again
+  47 stale-marker-while-gate-held (1.4) a stale marker beside the new version and the account's gate held: the program
+                           starts with no box and leaves the marker; the gate let go of, the next start takes it away
+  48 unseen-aside-stays-named (1.5) the older version; an upgrade whose copy fails at the program's file (as 29), with a
+                           file set aside made one this account may not look at: never said whole, the marker and its
+                           record stay, the update check at the program's name; looked at again, the next setup puts back
+                           first and installs
+  49 flush-refused-keeps-earlier (1.6) the older version; a silent upgrade with its new Qt6Core.dll held so that its flush
+                           is refused: exit 7, "could not all be written to the disk", nothing set aside removed, the
+                           earlier version byte for byte and named, and it starts
+  50 first-install-skip-starts-nothing (1.7) nothing installed; a first install by hand whose copy skips a file: its box
+                           says it was not installed, the last page offers no Start qKVM Desktop, Finish starts nothing,
+                           exit 7; then the new version silent
+  51 start-held-past-the-minute (0.2.0) the older version; the contract's update with one start of the new program held
+                           suspended from the moment its file is in until the setup has ended, past the minute the
+                           setup waits for such starts: the setup ends with 7, its log says that qKVM Desktop, started
+                           during the copy, still ran from its folder after a minute, nothing set aside is removed, and
+                           the held start is never ended by the setup (this test ends it then); the next setup puts
+                           right what was left and installs the new version whole
+  52 interactive-start-held (review armp-1 L9) the new version installed; the new setup by hand (Next, Install), with
+                           one start of the new program held suspended from the moment its file is in until 10 s
+                           later: while it waits for that start the setup shows "Waiting for qKVM Desktop, started
+                           during the install, to end" (whether its window answers meanwhile is recorded, not
+                           judged: Inno Setup's page does not take messages while the script sleeps, a known limit);
+                           let go of, the start ends by itself, the install completes, its log says it waited, Finish
+                           starts nothing
+  53 put-right-in-shared-folder (outside review 2, 1.3) the older version, its folder then given by this test (its owner)
+                           to the users of this PC to change, and in it a marker of an unfinished update whose record
+                           (one the setup reads) names Qt6Core.dll as what the copy made: a silent setup does not follow
+                           it (its log says nothing is put right there), refuses the folder with 7 and its result line
+                           naming the users of this PC and saying that what the update left stays as it is, and what to
+                           do, and the folder is byte for byte as it was, the marker with it;
+                           the same with the earlier program as a setup of 0.1.2 set it aside
+                           (qkvm-desktop.exe.old-update, no marker), which is left; the folder's rights as this test left
+                           them; then, those rights and files taken away, the new version installs
+Steps 54 and 55 (0.2.0; the outside review of 0.2.0, 1.4): an earlier install of the other kind in the program's folder,
+which only Windows on Arm holds: an x64 install (0.1.x's, or a later version's), there only where it was carried over
+from an x64 PC. No setup of ours makes one there: 0.1.0 to 0.1.2's refuse Windows on Arm (x64os), and 0.2.0's installs
+the ARM64 program there. Carried over with its Settings > Apps entry (by a tool that moves installed programs to a new
+PC), the setup knows the version and kind installed in the folder, and removes what only that install had after a
+whole copy, by that version's own list; copied by hand, without the entry, it installs over it and removes nothing of
+it, which leaves the other kind's extra files (SPEC). The suite tries the first, the one the setup can put right: it
+is planted, from -OtherKindZip (the ZIP of a published x64 version, 0.1.2's, whose list of files the setup carries):
+the older version installed again, every file of its package taken away and the ZIP's package put in their place, file
+by file as its manifest has them (plain names below the program's folder alone), beside the setup's own marker and
+uninstaller, and the Settings > Apps entry made that version's (no kind noted where it is a version before 0.2.0, as
+their setups noted none). Not run on x64 Windows (an install of the other kind could not start there, and no setup
+makes one), nor without -OtherKindZip.
+  54 other-kind-upgraded   the contract's update with the planted x64 program running (under Windows' emulation, its
+                           process seen as x64): it ends, the setup installs exactly the new version's ARM64 package, its
+                           log says that version (x64) was installed in this folder and names as removed each file only
+                           the x64 package had (by that version's own list), none of them is left, the entry notes arm64,
+                           and the setup starts the program again, which runs as ARM64
+  55 other-kind-cut-put-back  the planted x64 install, and the setup ended by force once it has written Qt6Core.dll: every
+                           file of the x64 install there or set aside as it was, the marker, qKVM Setup's ARM64 update
+                           check at the program's name and the x64 program set aside beside it; the next setup puts the x64
+                           version back first, then installs the ARM64 one and removes what only the x64 install had. Then
+                           planted again, and a copy that fails at the program's own file (held as in 29): the x64 version
+                           back byte for byte, nothing set aside or marked, its program starts and runs as x64; the new
+                           setup then installs the ARM64 one as usual
+Every step but 35 runs on -Setup, the setup as it ships, and the suite passes whole on the release build without
+-ListedSetup (review i020-2, M2). Step 35 runs only on -ListedSetup: the same package as -Setup, made into a second setup
+by hand by tools/build_setup.ps1 with -PublishedFiles naming a copy of packaging/published-files.json in which the older
+setup's version's build of the PC's kind (x64's, or on Windows on Arm arm64's) also lists licenses/qkvm-vm-gone.txt,
+qkvm-vm-gone/a.txt, qkvm-vm-gone/deep/b.txt and
+qkvm-vm-kept/c.txt (names no package of ours has; nothing else of it differs from the release's). The versions of ours
+published so far all installed the same names, so the setup that ships has nothing of theirs to remove, and step 35
+could not bite on it. -ListedSetup is a test's own setup, never handed out: its SHA-256 is not the release's, and the
+step's JSON names it.
 Steps 22 to 24 press the setup's own buttons through UI Automation, as a person would: run the test in the signed-in
 session with its desktop there (not in a remote desktop that was closed), and touch nothing while they run. Each step's
 JSON keeps what the setup's windows showed before each press, and what they showed last where a press never came.
-For step 15 the two setups' Qt libraries must differ: make the newer setup from a copy of its package in which one byte
-is appended to Qt6Core.dll (an overlay that Windows' loader leaves alone), with that file's new size and SHA-256 written
-into package-manifest.json, by tools/build_setup.ps1. A setup ended from outside (killed) runs no code of its own: a
-program set aside for its copy stays aside as qkvm-desktop.exe.old-update until the next setup, which puts it back
-first (step 16 makes the update fail inside the setup instead, as a full disk or a file in use does).
+Step 15 sees an update across a change of Qt only where the two setups' Qt libraries differ. Two releases of the same Qt
+(0.1.2 and 0.2.0 ship the same Qt6Core.dll) cannot show it: there the step judges the rest, passes on it, and names what
+it did not see in its JSON and the summary (notSeen), which the release's record repeats. To see it, make the newer setup
+from a copy of its package of the PC's kind in which one byte is appended to Qt6Core.dll (an overlay that Windows' loader leaves alone),
+with that file's new size and SHA-256 written into package-manifest.json, by tools/build_setup.ps1. A setup ended from outside (killed) runs no code of its own: the
+earlier version set aside for its copy stays aside (each file as name.old-update, beside the marker
+qkvm-desktop.update-unfinished) until the next setup, which puts it back first (steps 16 and 29 make the copy fail
+inside the setup instead, as a full disk or a file in use does).
 The data is told apart by a file this puts in each data folder at the start (qkvm-setup-vm-test.txt) and by the
 names of the program's own entries in Windows Credential Manager (cmdkey /list, those named QKVM Desktop: ...),
 which no setup and no uninstaller may change. The program adds its own when it starts (its sign-in pacing key at
@@ -150,7 +375,14 @@ param(
     [Parameter(Mandatory = $true)] [string] $Setup,
     [Parameter(Mandatory = $true)] [string] $OlderSetup,
     [Parameter(Mandatory = $true)] [string] $Out,
-    [switch] $Disposable
+    [switch] $Disposable,
+    # (The new setup made by hand with the test list, for step 35 alone; '' leaves step 35 not run.)
+    [string] $ListedSetup = '',
+    # (For steps 54 and 55, on Windows on Arm: the ZIP of an earlier published version's x64 package, planted as an
+    # install carried over from an x64 PC; '' leaves them not run.)
+    [string] $OtherKindZip = '',
+    # (A physical PC on Windows on Arm bought for such tests: the head says what its guard file holds besides its name.)
+    [switch] $PhysicalArmPc
 )
 
 Set-StrictMode -Version 2.0
@@ -179,6 +411,15 @@ public static class QkvmVmWhere {
         if (SHGetKnownFolderPath(new Guid(id), 0, IntPtr.Zero, out path) != 0) return "";
         try { return Marshal.PtrToStringUni(path); } finally { Marshal.FreeCoTaskMem(path); }
     }
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+    // The machine Windows itself runs on (IMAGE_FILE_MACHINE_AMD64 0x8664, IMAGE_FILE_MACHINE_ARM64 0xAA64, ...), whatever
+    // kind this process is of (a PowerShell under Windows on Arm's emulation is told the PC's own); 0 where Windows does
+    // not say.
+    public static int NativeMachine() {
+        ushort process, native;
+        return IsWow64Process2(GetCurrentProcess(), out process, out native) ? native : 0;
+    }
 }
 '@
 $Machine = [QkvmVmWhere]::Machine()
@@ -189,7 +430,10 @@ $UserFolder = [QkvmVmWhere]::Folder('5E6C858F-0E22-4760-9AFE-EA3317B67173')
 if (-not $Disposable) { throw 'This installs and uninstalls qKVM Desktop for real. Run it only in a throwaway virtual machine, with -Disposable.' }
 if (-not $Machine -or -not $UserFolder) { throw 'Windows did not say which machine this is, or where this user''s folder is.' }
 $guard = Join-Path $UserFolder 'qkvm-disposable-vm.txt'
-if (-not (Test-Path -LiteralPath $guard) -or (Get-Content -LiteralPath $guard -Raw).Trim() -ne $Machine) {
+# (Its lines: this machine's name; and on a physical Windows on Arm PC, the words of its firmware below.)
+$guardLines = @()
+if (Test-Path -LiteralPath $guard) { $guardLines = @(([string] (Get-Content -LiteralPath $guard -Raw)).Trim() -split '\r?\n' | ForEach-Object { $_.Trim() }) }
+if (-not $guardLines.Count -or $guardLines[0] -ne $Machine) {
     throw "There is no $guard holding this machine's name ($Machine): this is not a machine made for this test."
 }
 function Get-Hypervisor([string] $Maker, [string] $Product, [string] $Vendor) {
@@ -209,8 +453,32 @@ function Get-FirmwareWord([string] $Name) {
 # (And a machine whose firmware says it is a virtual one, as a standard user can read it: a guard file alone can be put
 # on any machine, review T5.)
 $Hypervisor = Get-Hypervisor (Get-FirmwareWord 'SystemManufacturer') (Get-FirmwareWord 'SystemProductName') (Get-FirmwareWord 'BIOSVendor')
-if (-not $Hypervisor) {
-    throw "This machine's firmware names no hypervisor (QEMU, VMware, Hyper-V or VirtualBox: it says $(Get-FirmwareWord 'SystemManufacturer'), $(Get-FirmwareWord 'SystemProductName')): this test runs in a virtual machine alone."
+# The kind of Windows this PC is, by Windows' own word of its machine: what the setup installs here, and what every check
+# below holds the installed program to (the head of this test).
+$NativeMachine = [QkvmVmWhere]::NativeMachine()
+$PcKind = switch ($NativeMachine) { 0x8664 { 'x64' } 0xAA64 { 'arm64' } default { '' } }
+$OtherPcKind = switch ($PcKind) { 'x64' { 'arm64' } 'arm64' { 'x64' } default { '' } }
+if ($Hypervisor) {
+    if ($PhysicalArmPc) { throw "This is a virtual machine ($Hypervisor): run this without -PhysicalArmPc." }
+    if ($guardLines.Count -ne 1) { throw "$guard holds more than this machine's name: on a virtual machine it holds the name alone." }
+} else {
+    # (A physical PC is taken only told so at each run, only where Windows is on Arm, which a virtual machine runs only on
+    # an Arm host, and only where its guard file names the very firmware Windows says it has, and this one PC's own number,
+    # its SMBIOS UUID, which every user may read, beside its name: a guard file made for a virtual machine, for another PC,
+    # or for another PC of the same model, is never one for this PC. One whose firmware leaves the UUID blank names no PC.)
+    if (-not $PhysicalArmPc) {
+        throw "This machine's firmware names no hypervisor (QEMU, VMware, Hyper-V or VirtualBox: it says $(Get-FirmwareWord 'SystemManufacturer'), $(Get-FirmwareWord 'SystemProductName')): this test runs in a virtual machine alone, or on a Windows on Arm PC made for it (-PhysicalArmPc, as the head of this test says)."
+    }
+    if ($PcKind -ne 'arm64') { throw "-PhysicalArmPc is for a PC whose Windows is on Arm, and this one's machine is $('0x{0:X4}' -f $NativeMachine): this test runs in a virtual machine alone here." }
+    $uuid = ([string] (Get-CimInstance -ClassName Win32_ComputerSystemProduct -ErrorAction SilentlyContinue).UUID).Trim()
+    if ($uuid -notmatch '\A[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\z' -or $uuid -match '\A[0-]+\z' -or $uuid -match '\A[Ff-]+\z') {
+        throw "This PC's firmware gives it no UUID of its own ('$uuid'): a physical PC is taken only by its own."
+    }
+    $physicalWords = "a physical Windows on Arm PC made for this test: $(Get-FirmwareWord 'SystemManufacturer'), $(Get-FirmwareWord 'SystemProductName'), $uuid"
+    if ($guardLines.Count -ne 2 -or $guardLines[1] -cne $physicalWords) {
+        throw "$guard does not say, on the line after this machine's name, '$physicalWords': this is not a PC made for this test."
+    }
+    $Hypervisor = 'none: a physical Windows on Arm PC made for this test'
 }
 # (FOLDERID_LocalAppData, as the program itself finds it; only once the guard has passed.)
 $Local = [QkvmVmWhere]::Folder('F1B32785-6FBA-4FCF-9D55-7B8E7F157091')
@@ -224,6 +492,10 @@ $SetupMutex = 'Local\qKVM-Desktop-Setup'
 $StallSeconds = 300
 $App = Join-Path $Local 'Programs\qKVM Desktop'
 $Program = Join-Path $App 'qkvm-desktop.exe'
+# The setup's marker of an update whose copy has not finished, and the ending of each file it sets aside for its copy
+# (0.2.0; packaging/qkvm-desktop.iss, ui/win/unfinished_update.h).
+$UpdateMarker = Join-Path $App 'qkvm-desktop.update-unfinished'
+$AsideEnding = '.old-update'
 $UserKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppId"
 $MachineKeys = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$AppId",
     "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$AppId")
@@ -235,23 +507,154 @@ $SilentArguments = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART'
 
 $Setup = (Resolve-Path -LiteralPath $Setup).Path
 $OlderSetup = (Resolve-Path -LiteralPath $OlderSetup).Path
+if ($ListedSetup) { $ListedSetup = (Resolve-Path -LiteralPath $ListedSetup).Path }
 if (-not (Test-Path -LiteralPath $Out)) { New-Item -ItemType Directory -Path $Out | Out-Null }
 $Out = (Resolve-Path -LiteralPath $Out).Path
 if (@(Get-ChildItem -LiteralPath $Out -Force).Count) { throw "$Out is not empty: each run writes its results into a new folder." }
 
 $results = New-Object System.Collections.ArrayList
 
-function Get-Sha256([string] $File) { return (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Get-Sha256([string] $File) {
+    <# A file's SHA-256. One that cannot be read at that moment (a setup this test has just ended still closing it, or
+    Windows' scanner looking at a file just written) is read again a quarter of a second apart, for up to 10 s, and then
+    the error stands (step 03 on a test VM found a temporary file of the setup it had just killed held so, 2026-11-21). #>
+    for ($try = 1; ; $try++) {
+        try { return (Get-FileHash -LiteralPath $File -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant() }
+        catch { if ($try -ge 40) { throw }; Start-Sleep -Milliseconds 250 }
+    }
+}
 
-function Write-Step([string] $Number, [string] $Name, [DateTime] $Began, [System.Collections.ArrayList] $Failures, $Seen) {
+function Get-KindOfMachine([int] $Number) {
+    <# A machine's number (IMAGE_FILE_MACHINE_*) as this test names a kind of Windows image: x64, arm64, x86, or the
+    number itself; '' for none. #>
+    switch ($Number) { 0 { return '' } 0x8664 { return 'x64' } 0xAA64 { return 'arm64' } 0x14C { return 'x86' } default { return ('0x{0:X4}' -f $Number) } }
+}
+
+function Get-HeadKind([byte[]] $Head, [int] $Count) {
+    <# Of which kind a Windows image is, by its PE header in the first $Count bytes of $Head: the machine its image is for,
+    as the setup reads an earlier install's (ImageKind); '' where they are not the start of a Windows image. #>
+    if ($Count -lt 64 -or $Head[0] -ne 0x4D -or $Head[1] -ne 0x5A) { return '' }
+    $at = [BitConverter]::ToInt32($Head, 0x3C)
+    if ($at -lt 64 -or $at + 6 -gt $Count) { return '' }
+    if ($Head[$at] -ne 0x50 -or $Head[$at + 1] -ne 0x45 -or $Head[$at + 2] -ne 0 -or $Head[$at + 3] -ne 0) { return '' }
+    return (Get-KindOfMachine ([BitConverter]::ToUInt16($Head, $at + 4)))
+}
+
+function Read-Head([IO.Stream] $Stream, [byte[]] $Head) {
+    <# As much of the stream's start as fills $Head (or all of it, where it is shorter): how many bytes were read. #>
+    $count = 0
+    while ($count -lt $Head.Length) {
+        $got = $Stream.Read($Head, $count, $Head.Length - $count)
+        if ($got -le 0) { break }
+        $count += $got
+    }
+    return $count
+}
+
+function Get-ImageKind([string] $Path) {
+    <# Of which kind of Windows a program or library on the disk is (Get-HeadKind); '' where it is not there, cannot be
+    read, or is no Windows image. #>
+    $head = New-Object byte[] 4096
+    try { $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)) } catch { return '' }
+    try { $count = Read-Head $stream $head } finally { $stream.Dispose() }
+    return (Get-HeadKind $head $count)
+}
+
+# (Of which kind a running process's code is: Windows 11's ProcessMachineTypeInfo, which tells an x64 program under
+# Windows on Arm's emulation from an ARM64 one; where Windows has no such class (Windows 10), IsWow64Process2's, by which
+# a process that is not WOW64's is of the PC's own kind.)
+if (-not ('QkvmVmProcessKind' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class QkvmVmProcessKind {
+    [StructLayout(LayoutKind.Sequential)] struct MachineInformation { public ushort ProcessMachine; public ushort Reserved; public uint Attributes; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int id);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessInformation(IntPtr process, int kind, out MachineInformation information, int size);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+    // The machine (IMAGE_FILE_MACHINE_*) the code of process id runs as; 0 where it cannot be told (gone, or not opened).
+    public static int Of(int id) {
+        IntPtr process = OpenProcess(0x1000, false, id);
+        if (process == IntPtr.Zero) return 0;
+        try {
+            MachineInformation information;
+            if (GetProcessInformation(process, 9, out information, Marshal.SizeOf(typeof(MachineInformation)))) return information.ProcessMachine;
+            ushort machine, native;
+            if (IsWow64Process2(process, out machine, out native)) return machine != 0 ? machine : native;
+            return 0;
+        } finally { CloseHandle(process); }
+    }
+}
+'@
+}
+function Get-ProcessKind([int] $Id) { return (Get-KindOfMachine ([QkvmVmProcessKind]::Of($Id))) }
+
+function Test-RunsAsKind([string] $Wanted, [System.Collections.ArrayList] $Failures, [string] $What = 'the program') {
+    <# Every running copy of the installed program runs as $Wanted (x64 or arm64); what each runs as. (A copy that has
+    ended between Windows' list and the look, as the program started with --after-update ends once it has started
+    itself again, is left out; one still there whose kind cannot be told counts against it.) #>
+    $kinds = @(Get-ProgramProcesses | ForEach-Object {
+            $id = [int] $_.ProcessId
+            $runsAs = Get-ProcessKind $id
+            if ($runsAs -or (Get-Process -Id $id -ErrorAction SilentlyContinue)) { $(if ($runsAs) { $runsAs } else { 'not to be told' }) }
+        })
+    if (-not $kinds.Count) { [void] $Failures.Add("$What is not running, to tell what it runs as") }
+    elseif (@($kinds | Where-Object { $_ -ne $Wanted }).Count) { [void] $Failures.Add("$What runs as $(@($kinds | Sort-Object -Unique) -join ', '), not as $Wanted") }
+    return $kinds
+}
+
+function Get-SetupProcessesLeft {
+    <# Every process of this account that runs from Inno Setup's own temporary folders (setup.tmp, in is-XXXXXXXXXX.tmp
+    under the Temp folder Inno Setup takes, Windows' GetTempPath) or from the program's folder: its number, file and
+    start. (Step 03 names so what is left as it reads the folder after its kill.) #>
+    $temp = [IO.Path]::GetTempPath()
+    return @(Get-CimInstance Win32_Process | Where-Object {
+            $_.ExecutablePath -and (($_.ExecutablePath -like "$($temp)is-*.tmp\*") -or ($_.ExecutablePath -like "$App\*")) } |
+        ForEach-Object { [ordered]@{ id = [int] $_.ProcessId; file = [string] $_.ExecutablePath; began = [string] $_.CreationDate } })
+}
+
+# How long things take, as this suite measures them itself (a setup's run, a wait, a hold), is read from a monotonic
+# clock (Get-Clock: seconds since the suite began), never from the wall clock, which Windows' time service may step: the
+# Windows 10 test VMs start from their snapshot with the clock 8 h fast and are stepped back some minutes later, and step
+# 20 on one of them read a setup's 14 s as -28786 s (2026-11-23). What has the wall clock's times only (a setup's log,
+# a process's start, the notes the program reads) cannot be held so: a step during which the wall clock moved more than
+# 2 s against the monotonic one fails, saying so (Write-Step), never judged as if nothing had happened.
+$Clock = [Diagnostics.Stopwatch]::StartNew()
+$ClockWallBegan = [DateTime]::UtcNow
+$ClockShift = 0.0
+function Get-Clock { return $script:Clock.Elapsed.TotalSeconds }
+function Get-ClockShift { return ([DateTime]::UtcNow - $script:ClockWallBegan).TotalSeconds - $script:Clock.Elapsed.TotalSeconds }
+
+function Write-Step([string] $Number, [string] $Name, [DateTime] $Began, [System.Collections.ArrayList] $Failures, $Seen, [string] $NotSeen = '') {
+    <# -NotSeen: what of the step these two setups could not show, and why; the rest was judged. It is said in the step's
+    JSON, in the summary (notSeen) and in its last line, and fails nothing. #>
+    $shift = Get-ClockShift
+    $moved = $shift - $script:ClockShift
+    $script:ClockShift = $shift
+    if ([Math]::Abs($moved) -gt 2) {
+        [void] $Failures.Add("the wall clock was moved by $([Math]::Round($moved)) s during this step (Windows' time service sets it): the times this step read from setup logs and from Windows cannot be judged; run the suite once the machine's clock is set")
+    }
     $step = [ordered]@{
         step = "$Number-$Name"; passed = ($Failures.Count -eq 0)
         began = $Began.ToUniversalTime().ToString('o'); ended = [DateTime]::UtcNow.ToString('o')
         failures = @($Failures); seen = $Seen
     }
+    if ($NotSeen) { $step.notSeen = $NotSeen }
     $step | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $Out "$Number-$Name.json") -Encoding UTF8
-    [void] $results.Add([ordered]@{ step = $step.step; passed = $step.passed; failures = $Failures.Count })
-    Write-Output ("{0} {1}-{2}{3}" -f $(if ($step.passed) { 'passed:' } else { 'FAILED:' }), $Number, $Name, $(if ($Failures.Count) { ': ' + ($Failures -join '; ') } else { '' }))
+    $entry = [ordered]@{ step = $step.step; passed = $step.passed; failures = $Failures.Count }
+    if ($NotSeen) { $entry.notSeen = $NotSeen }
+    [void] $results.Add($entry)
+    Write-Output ("{0} {1}-{2}{3}{4}" -f $(if ($step.passed) { 'passed:' } else { 'FAILED:' }), $Number, $Name, $(if ($Failures.Count) { ': ' + ($Failures -join '; ') } else { '' }), $(if ($NotSeen) { " (not seen: $NotSeen)" } else { '' }))
+}
+
+function Write-NotRun([string] $Number, [string] $Name, [string] $Why) {
+    <# A step this run does not make, and why: passed is not claimed of it, and it fails nothing. #>
+    $now = [DateTime]::UtcNow.ToString('o')
+    $step = [ordered]@{ step = "$Number-$Name"; passed = $true; notRun = $Why; began = $now; ended = $now; failures = @(); seen = $null }
+    $step | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Out "$Number-$Name.json") -Encoding UTF8
+    [void] $results.Add([ordered]@{ step = $step.step; passed = $true; failures = 0; notRun = $Why })
+    Write-Output "not run: $Number-$Name`: $Why"
 }
 
 function Test-Mutex([string] $Name) {
@@ -262,13 +665,19 @@ function Test-Mutex([string] $Name) {
 function Test-ProgramRunning { return (Test-Mutex $ProgramMutex) }
 function Test-SetupRunning { return (Test-Mutex $SetupMutex) }
 
+# A look that Windows refuses is "not yet", not the end of the suite: a file Windows is still deleting (an uninstaller
+# that removes itself, its delete pending) answers Test-Path with access denied, which this script's Stop made a
+# terminating error (seen once on a Windows 11 test VM in step 43, the uninstall itself having succeeded).
+function Test-Condition([scriptblock] $Condition) {
+    try { return [bool] (& $Condition) } catch { return $false }
+}
 function Wait-Until([scriptblock] $Condition, [int] $Seconds) {
-    $until = [DateTime]::UtcNow.AddSeconds($Seconds)
-    while ([DateTime]::UtcNow -lt $until) {
-        if (& $Condition) { return $true }
+    $until = (Get-Clock) + $Seconds
+    while ((Get-Clock) -lt $until) {
+        if (Test-Condition $Condition) { return $true }
         Start-Sleep -Milliseconds 250
     }
-    return [bool] (& $Condition)
+    return (Test-Condition $Condition)
 }
 
 function Get-ProgramProcesses {
@@ -302,6 +711,7 @@ function Stop-Tree([int] $Id, [DateTime] $Since = [DateTime]::MinValue, [Nullabl
     keeps a process's ParentProcessId after its parent has ended, and the parent's number may since be another's, the
     setup's among them, whose "children" are then older programs of the person's (review T1). And each only while its
     number is still the process it was: one that began before $Since (its parent's start) is another's by now.
+    (Windows keeps those starts by the wall clock: a step during which that clock moved fails in Write-Step.)
     #>
     # (Held open by its handle from here on: while it is held, its number is its own, and it is told and ended by that
     # handle, never by the number again. A child is ended only where the process its number opens began when Windows'
@@ -352,23 +762,24 @@ function Invoke-Setup([string] $File, [string] $Arguments, [int] $Seconds = 300,
     $start.Arguments = $Arguments
     $start.UseShellExecute = $false
     $began = [DateTime]::UtcNow
+    $t0 = Get-Clock
     $process = [Diagnostics.Process]::Start($start)
     $consent = $false
     $ended = $null
     $logged = if ($Arguments -match '/LOG="([^"]+)"') { $Matches[1] } else { '' }
     $length = -1
-    $grew = $began
+    $grew = $t0
     while (-not $process.HasExited) {
         if (Get-Process -Name consent -ErrorAction SilentlyContinue) { $consent = $true }
-        $gone = ([DateTime]::UtcNow - $began).TotalSeconds
+        $gone = (Get-Clock) - $t0
         if ($logged) {
             $now = Get-Item -LiteralPath $logged -ErrorAction SilentlyContinue
             $size = if ($now) { $now.Length } else { -1 }
-            if ($size -ne $length) { $length = $size; $grew = [DateTime]::UtcNow }
+            if ($size -ne $length) { $length = $size; $grew = Get-Clock }
         }
         if ($During -and (& $During $process $gone)) { Stop-Tree $process.Id; $ended = 'killed'; break }
         if ($gone -gt $Seconds) {
-            $stalled = $logged -and ([DateTime]::UtcNow - $grew).TotalSeconds -ge $StallSeconds
+            $stalled = $logged -and ((Get-Clock) - $grew) -ge $StallSeconds
             $waits = -not $stalled -and $gone -lt $Seconds + 3600 -and (($logged -and (Test-Copying $logged)) -or ($Patient -and (& $Patient $process $gone)))
             if (-not $waits) { Stop-Tree $process.Id; $ended = if ($stalled) { 'stalled' } else { 'timeout' }; break }
         }
@@ -376,7 +787,7 @@ function Invoke-Setup([string] $File, [string] $Arguments, [int] $Seconds = 300,
     }
     $process.WaitForExit(10000) | Out-Null
     if (-not $ended) { $ended = $process.ExitCode }
-    return [pscustomobject]@{ Exit = $ended; Seconds = [Math]::Round(([DateTime]::UtcNow - $began).TotalSeconds, 1); Consent = $consent; Began = $began }
+    return [pscustomobject]@{ Exit = $ended; Seconds = [Math]::Round((Get-Clock) - $t0, 1); Consent = $consent; Began = $began }
 }
 
 function Get-Installed {
@@ -391,7 +802,8 @@ function Get-Installed {
     if (Test-Path -LiteralPath $UserKey) {
         $values = Get-ItemProperty -LiteralPath $UserKey
         $entry = [ordered]@{}
-        foreach ($name in 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallLocation', 'UninstallString', 'DisplayIcon') {
+        # (And the kind of Windows the setup notes it installed for, 0.2.0 and later's: the head of this test.)
+        foreach ($name in 'DisplayName', 'DisplayVersion', 'Publisher', 'InstallLocation', 'UninstallString', 'DisplayIcon', 'qKVM Desktop Architecture') {
             $entry[$name] = $(if ($values.PSObject.Properties[$name]) { [string] $values.$name } else { $null })
         }
     }
@@ -406,6 +818,10 @@ function Test-Installed([string] $Version, [System.Collections.ArrayList] $Failu
     else {
         if ($state.Entry.DisplayName -ne 'qKVM Desktop' -or $state.Entry.Publisher -ne 'qKVM') { [void] $Failures.Add("the Settings > Apps entry is $($state.Entry.DisplayName) of $($state.Entry.Publisher)") }
         if ($state.Entry.DisplayVersion -ne $Version) { [void] $Failures.Add("the Settings > Apps entry says version $($state.Entry.DisplayVersion), not $Version") }
+        # (The kind it notes, where its setup notes one: every setup of 0.2.0 and later does, -Setup among them.)
+        $noted = $state.Entry['qKVM Desktop Architecture']
+        if ($noted -and $noted -cne $PcKind) { [void] $Failures.Add("the Settings > Apps entry notes $noted, not this PC's kind ($PcKind)") }
+        if (-not $noted -and $Version -eq $newVersion) { [void] $Failures.Add("the Settings > Apps entry does not note the kind installed ($PcKind)") }
     }
     if ($state.Machine.Count) { [void] $Failures.Add("there is an entry for the whole PC: $($state.Machine -join ', ')") }
     if (-not $state.StartMenu) { [void] $Failures.Add('there is no Start menu entry') }
@@ -414,12 +830,22 @@ function Test-Installed([string] $Version, [System.Collections.ArrayList] $Failu
     if (-not (Test-Path -LiteralPath $manifestFile)) { [void] $Failures.Add('the program''s folder has no package-manifest.json'); return $state }
     $manifest = Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
     if ($manifest.version -ne $Version) { [void] $Failures.Add("the installed package is version $($manifest.version), not $Version") }
+    # (The package of this PC's kind, by its manifest and by each of its programs and libraries: the setup chooses the
+    # PC's own, IsArm64.)
+    $packageKind = if ($manifest.PSObject.Properties['architecture']) { [string] $manifest.architecture } else { '' }
+    if ($packageKind -cne $PcKind) { [void] $Failures.Add("the installed package is for $(if ($packageKind) { $packageKind } else { 'no kind' }), not this PC's kind ($PcKind)") }
     $wanted = @{}
     foreach ($entry in $manifest.files) { $wanted[$entry.path] = $entry.sha256 }
+    $otherImages = New-Object System.Collections.ArrayList
     foreach ($path in $wanted.Keys) {
         if (-not $state.Files.Contains($path)) { [void] $Failures.Add("$path is missing") }
         elseif ($state.Files[$path].sha256 -ne $wanted[$path]) { [void] $Failures.Add("$path is not the package's") }
+        elseif ($path -match '\.(exe|dll)$') {
+            $imageKind = Get-ImageKind (Join-Path $App ($path -replace '/', '\'))
+            if ($imageKind -cne $PcKind) { [void] $otherImages.Add("$path ($(if ($imageKind) { $imageKind } else { 'no Windows image' }))") }
+        }
     }
+    if ($otherImages.Count) { [void] $Failures.Add("programs or libraries of the installed package are not of this PC's kind ($PcKind): $(@($otherImages | Sort-Object) -join ', ')") }
     $own = @('package-manifest.json', 'qkvm-desktop.installed', 'unins000.exe', 'unins000.dat')
     foreach ($path in $state.Files.Keys) {
         if (-not $wanted.ContainsKey($path) -and $own -notcontains $path) { [void] $Failures.Add("$path is in the program's folder, and not in the package") }
@@ -460,7 +886,7 @@ function Test-Copying([string] $Log) {
 function Get-LogSeconds([string] $Name, [string] $From, [string] $To) {
     <# The seconds between the first line of a setup's log that says $From and the first after it that says $To, by the
     times the setup put on them itself; $null where either is not there. What the setup did when, never when a look at
-    its windows saw it (review V1). #>
+    its windows saw it (review V1). (Wall clock times: a step during which that clock moved fails in Write-Step.) #>
     $at = $null
     foreach ($line in @((Read-Log $Name) -split "`r?`n")) {
         if ($line -notmatch '^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}) ') { continue }
@@ -501,6 +927,112 @@ function Get-ResultLines([string] $Name) {
     return @((Read-Log $Name) -split "`r?`n" | Where-Object { $_.Contains('qKVM-RESULT: ') } | ForEach-Object { $_.Substring($_.IndexOf('qKVM-RESULT: ')).TrimEnd() })
 }
 function Read-Log([string] $Name) { $file = Get-Log $Name; if (Test-Path -LiteralPath $file) { return Get-Content -LiteralPath $file -Raw } else { return '' } }
+# What a setup's log says where it started the program with the one argument --after-update: an update's own start, and
+# a silent install's that closed it, once its copy is judged (StartTheCopy, 0.2.0: never an entry of [Run], which Inno
+# Setup would run before the copy is flushed and marked finished); what it had closed and then changed nothing for
+# (StartAgain); and the last page's "Start qKVM Desktop", Inno Setup's own postinstall entry.
+$StartedLine = '(?m)^[^\r\n]*(Started qKVM Desktop from its folder with --after-update, its copy judged|Started qKVM Desktop again, which this setup had closed)|Filename: [^\r\n]*\\qkvm-desktop\.exe[ \t]*\r?\n[^\r\n]*Parameters: --after-update[ \t]*\r?\n'
+
+function Get-NotKept($Earlier, $Now) {
+    <# The files of the earlier version (Get-Installed's, before a copy) that are neither there as they were nor set aside
+    beside it as they were (name.old-update, 0.2.0): what a setup ended halfway would have lost of it. #>
+    $lost = New-Object System.Collections.ArrayList
+    foreach ($path in $Earlier.Files.Keys) {
+        $was = $Earlier.Files[$path].sha256
+        $asIs = $Now.Files.Contains($path) -and $Now.Files[$path].sha256 -eq $was
+        $aside = $Now.Files.Contains("$path$AsideEnding") -and $Now.Files["$path$AsideEnding"].sha256 -eq $was
+        if (-not $asIs -and -not $aside) { [void] $lost.Add($path) }
+    }
+    return @($lost)
+}
+
+function Test-Earlier($Earlier, [System.Collections.ArrayList] $Failures) {
+    <# The program's folder exactly as the earlier version had it ($Earlier, Get-Installed's): every file byte for byte,
+    and nothing more (nothing set aside, no marker of an update, nothing a copy made), its Settings > Apps entry as it
+    was (0.2.0's staged install, put back where the copy did not complete). #>
+    $now = Get-Installed
+    foreach ($path in $Earlier.Files.Keys) {
+        if (-not $now.Files.Contains($path)) { [void] $Failures.Add("$path of the earlier version is gone") }
+        elseif ($now.Files[$path].sha256 -ne $Earlier.Files[$path].sha256) { [void] $Failures.Add("$path is not the earlier version's") }
+    }
+    foreach ($path in $now.Files.Keys) {
+        if (-not $Earlier.Files.Contains($path)) { [void] $Failures.Add("$path is in the program's folder, and was not before") }
+    }
+    if (($Earlier.Entry | ConvertTo-Json) -ne ($now.Entry | ConvertTo-Json)) { [void] $Failures.Add('the Settings > Apps entry is not as it was') }
+}
+
+function Test-AnyUpdateCheckAt([string] $Path) {
+    <# Whether the file at $Path is an update check of qKVM Setup's, of either kind: a Windows program of at most 4 MiB,
+    where the program is some 13 MB, and not a file of either version's package. Where one must not be (the new program
+    in its place), any kind of it fails. #>
+    $file = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $file -or $file.PSIsContainer -or $file.Length -gt 4MB -or $file.Length -lt 2) { return $false }
+    $head = New-Object byte[] 2
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { [void] $stream.Read($head, 0, 2) } finally { $stream.Dispose() }
+    return ($head[0] -eq 0x4D -and $head[1] -eq 0x5A)
+}
+
+function Test-UpdateCheckAt([string] $Path) {
+    <# Whether the file at $Path is qKVM Setup's update check, which the setup puts at the program's name while the earlier
+    version is set aside (0.2.0, M3), and the one of this PC's kind, which the setup unpacks of the two it carries. #>
+    return ((Test-AnyUpdateCheckAt $Path) -and (Get-ImageKind $Path) -ceq $PcKind)
+}
+
+function Get-AtProgramName {
+    <# What is at the program's name, as a failure says it: its kind of Windows image and its size; 'nothing' where none. #>
+    $file = Get-Item -LiteralPath $Program -Force -ErrorAction SilentlyContinue
+    if (-not $file) { return 'nothing' }
+    $imageKind = Get-ImageKind $Program
+    return "$(if ($imageKind) { "a program of $imageKind" } else { 'no Windows image' }), $($file.Length) bytes"
+}
+
+function Test-PutBackFirst([string] $Said) {
+    <# Whether a setup's log says it put back the earlier version that an update which did not finish had set aside,
+    before it set it aside again for its own copy (0.2.0). #>
+    $back = [regex]::Match($Said, 'Put the earlier version back, which an update that did not finish had set aside \(\d+ files\)\.')
+    $aside = [regex]::Match($Said, 'Set the earlier version aside for the copy \(\d+ files\)\.')
+    return ($back.Success -and $aside.Success -and $back.Index -lt $aside.Index)
+}
+
+function Read-OtherKindPackage([string] $Zip) {
+    <# The package in the ZIP of a published version (tools/package.ps1's: one folder, its package-manifest.json and its
+    files): its folder's name, version, kind by its manifest and by its program's PE header, and its files as the
+    manifest has them; what is wrong with it ('' where nothing). Read in place, nothing unpacked. #>
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $read = [ordered]@{ zip = Split-Path -Leaf $Zip; sha256 = Get-Sha256 $Zip; top = ''; version = ''; kind = ''; programKind = ''; files = @(); wrong = '' }
+    $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
+    try {
+        $tops = @($archive.Entries | ForEach-Object { ([string] $_.FullName -split '/')[0] } | Sort-Object -Unique)
+        if ($tops.Count -ne 1) { $read.wrong = 'it does not hold one folder'; return [pscustomobject] $read }
+        $read.top = [string] $tops[0]
+        $entry = $archive.GetEntry("$($read.top)/package-manifest.json")
+        if (-not $entry) { $read.wrong = 'it has no package-manifest.json'; return [pscustomobject] $read }
+        $reader = New-Object IO.StreamReader($entry.Open())
+        try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+        $read.version = [string] $manifest.version
+        $read.kind = if ($manifest.PSObject.Properties['architecture']) { [string] $manifest.architecture } else { '' }
+        $read.files = @($manifest.files | ForEach-Object { [pscustomobject] @{ path = [string] $_.path; sha256 = ([string] $_.sha256).ToLowerInvariant() } })
+        # (Each a plain name below the program's folder, as a package of ours names its files: never rooted, never a
+        # drive, never . or .., so that the plant writes nothing outside that folder.)
+        $odd = @($read.files | Where-Object { $_.path -cnotmatch '\A[A-Za-z0-9_+ -][A-Za-z0-9_.+ -]*(/[A-Za-z0-9_+ -][A-Za-z0-9_.+ -]*)*\z' -or ('/' + $_.path + '/').Contains('/../') })
+        if ($odd.Count) { $read.wrong = "its manifest names what is not a plain name below the program's folder: $($odd[0].path)"; return [pscustomobject] $read }
+        $entry = $archive.GetEntry("$($read.top)/qkvm-desktop.exe")
+        if (-not $entry) { $read.wrong = 'it has no qkvm-desktop.exe'; return [pscustomobject] $read }
+        $head = New-Object byte[] 4096
+        $stream = $entry.Open()
+        try { $count = Read-Head $stream $head } finally { $stream.Dispose() }
+        $read.programKind = Get-HeadKind $head $count
+    } finally { $archive.Dispose() }
+    return [pscustomobject] $read
+}
+
+function Get-EntryValue([string] $Name) {
+    <# One value of this user's Settings > Apps entry of qKVM Desktop; $null where it has none. #>
+    $values = Get-ItemProperty -LiteralPath $UserKey -ErrorAction SilentlyContinue
+    if (-not $values -or -not $values.PSObject.Properties[$Name]) { return $null }
+    return $values.$Name
+}
 
 # --- 00 preflight
 $began = [DateTime]::UtcNow
@@ -509,11 +1041,31 @@ $os = [Environment]::OSVersion.Version
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $admin = (New-Object Security.Principal.WindowsPrincipal $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 $adminGroup = @($identity.Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }).Count -gt 0
+# (An administrator of the PC unelevated has the group for denying alone, which Groups leaves out: said, not refused,
+# as Windows treats such a token as a standard user's. The head of this test.)
+$deniedAdministrators = @($identity.Claims | Where-Object { $_.Type -eq [Security.Claims.ClaimTypes]::DenyOnlySid -and $_.Value -eq 'S-1-5-32-544' }).Count -gt 0
 $newVersion = Get-Version $Setup
 $oldVersion = Get-Version $OlderSetup
 if ($os.Major -ne 10 -or $os.Build -lt 19045) { [void] $failures.Add("Windows $os is older than Windows 10 22H2") }
 if (-not [Environment]::Is64BitOperatingSystem) { [void] $failures.Add('Windows is not 64-bit') }
+if (-not $PcKind) { [void] $failures.Add("Windows runs on a machine of neither kind the setup installs for, x64 or Arm64 ($('0x{0:X4}' -f $NativeMachine))") }
 if ($admin -or $adminGroup) { [void] $failures.Add('this runs as an administrator: run it as a standard user') }
+# (The setup installs on Windows on Arm from Windows 11 alone, x64compatible: Windows 10 on Arm runs no x64 program.)
+if ($PcKind -eq 'arm64' -and $os.Build -lt 22000) { [void] $failures.Add("Windows $os on Arm is older than Windows 11: the setup installs on Windows 11 on Arm alone") }
+# (On Windows on Arm the older setup must install there: the published 0.1.0 to 0.1.2's refuse Windows on Arm, x64os. A
+# throwaway older build of the setup's own commit, 0.1.99 say, carries both kinds: the head of this test.)
+if ($PcKind -eq 'arm64' -and $oldVersion -in '0.1.0', '0.1.1', '0.1.2') {
+    [void] $failures.Add("the older setup ($oldVersion) is a published one that refuses Windows on Arm: give one that carries both kinds, a throwaway older build of the setup's own commit (the head of this test; an x64 install of 0.1.x is planted from -OtherKindZip, steps 54 and 55)")
+}
+# (The other kind's earlier version for steps 54 and 55: a published version's ZIP of the other kind, older than -Setup.)
+$otherPackage = $null
+if ($OtherKindZip) {
+    $OtherKindZip = (Resolve-Path -LiteralPath $OtherKindZip).Path
+    $otherPackage = Read-OtherKindPackage $OtherKindZip
+    if ($otherPackage.wrong) { [void] $failures.Add("-OtherKindZip is not a package's ZIP: $($otherPackage.wrong)") }
+    elseif ($otherPackage.kind -cne $OtherPcKind -or $otherPackage.programKind -cne $OtherPcKind) { [void] $failures.Add("-OtherKindZip is a package for $($otherPackage.kind) (its program $($otherPackage.programKind)), not for the other kind ($OtherPcKind)") }
+    elseif (-not ($otherPackage.version -match '\A\d+\.\d+\.\d+\z' -and [version] $otherPackage.version -lt [version] $newVersion)) { [void] $failures.Add("-OtherKindZip is version $($otherPackage.version), not one before the setup ($newVersion)") }
+}
 if ((Test-Path -LiteralPath $UserKey) -or (Test-Path -LiteralPath $App)) { [void] $failures.Add('qKVM Desktop is installed already: start from a clean machine') }
 if (-not ([version] $oldVersion -lt [version] $newVersion)) { [void] $failures.Add("the older setup ($oldVersion) is not older than the setup ($newVersion)") }
 # (Nothing installed, and so nothing of the program's own may be there either: a profile left, or passwords it saved,
@@ -525,6 +1077,19 @@ if (-not (Test-Path -LiteralPath $UserKey) -and -not (Test-Path -LiteralPath $Ap
         throw "qKVM Desktop is not installed, but this user has its profile ($($profileLeft -join ', ')) or passwords it saved (QKVM Desktop: in Windows Credential Manager): start from a clean machine."
     }
 }
+$seen00 = [ordered]@{
+    windows = "$os"; kind = $PcKind; nativeMachine = ('0x{0:X4}' -f $NativeMachine); powershellRunsAs = (Get-ProcessKind $PID); hypervisor = $Hypervisor
+    user = $identity.Name; administrator = ($admin -or $adminGroup)
+    account = $(if ($deniedAdministrators) { 'an administrator of this PC, unelevated (UAC''s filtered token)' } else { 'a standard user' })
+    otherKindPackage = $(if ($otherPackage) { [ordered]@{ zip = $otherPackage.zip; sha256 = $otherPackage.sha256; version = $otherPackage.version; kind = $otherPackage.kind
+            programKind = $otherPackage.programKind; files = @($otherPackage.files).Count; wrong = $otherPackage.wrong } } else { $null })
+    setup = [ordered]@{ file = Split-Path -Leaf $Setup; version = $newVersion; sha256 = Get-Sha256 $Setup; signature = [string] (Get-AuthenticodeSignature -LiteralPath $Setup).Status }
+    olderSetup = [ordered]@{ file = Split-Path -Leaf $OlderSetup; version = $oldVersion; sha256 = Get-Sha256 $OlderSetup; signature = [string] (Get-AuthenticodeSignature -LiteralPath $OlderSetup).Status } }
+# (Refused before anything is written into the account's data folders: a PC that is refused keeps them as they are.)
+if ($failures.Count) {
+    Write-Step '00' 'preflight' $began $failures $seen00
+    throw 'The machine is not one this test can run on; see 00-preflight.json.'
+}
 foreach ($folder in $DataFolders) {
     if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder | Out-Null }
     # (Its folder's own name, written as UTF-8 without a mark, so that a name with signs outside ASCII stays itself:
@@ -532,11 +1097,7 @@ foreach ($folder in $DataFolders) {
     [IO.File]::WriteAllText((Join-Path $folder $Sentinel), $folder, (New-Object Text.UTF8Encoding $false))
 }
 $script:credentials = Get-ProgramCredentials
-Write-Step '00' 'preflight' $began $failures ([ordered]@{
-    windows = "$os"; user = $identity.Name; administrator = ($admin -or $adminGroup)
-    setup = [ordered]@{ file = Split-Path -Leaf $Setup; version = $newVersion; sha256 = Get-Sha256 $Setup; signature = [string] (Get-AuthenticodeSignature -LiteralPath $Setup).Status }
-    olderSetup = [ordered]@{ file = Split-Path -Leaf $OlderSetup; version = $oldVersion; sha256 = Get-Sha256 $OlderSetup; signature = [string] (Get-AuthenticodeSignature -LiteralPath $OlderSetup).Status } })
-if ($failures.Count) { throw 'The machine is not one this test can run on; see 00-preflight.json.' }
+Write-Step '00' 'preflight' $began $failures $seen00
 
 # --- 01 first install, of the older setup
 $began = [DateTime]::UtcNow
@@ -559,9 +1120,11 @@ function Test-Starts([string] $Number) {
     Start-Sleep -Seconds 5
     if (-not (Test-ProgramRunning)) { [void] $failures.Add('the program did not stay up for 5 s') }
     $version = Get-Version $Program
+    # (Of this PC's kind: on Windows on Arm the ARM64 program, never x64 under emulation.)
+    $runsAs = @(Test-RunsAsKind $PcKind $failures)
     $how = Stop-Program
     Test-Data $failures -ProgramStarted
-    Write-Step $Number 'program-starts' $began $failures ([ordered]@{ version = $version; ended = $how
+    Write-Step $Number 'program-starts' $began $failures ([ordered]@{ version = $version; runsAs = $runsAs; ended = $how
         programCredentials = @($script:credentials -split "`n" | Where-Object { $_ }) })
 }
 Test-Starts '02'
@@ -579,6 +1142,12 @@ $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 120 {
     return ($at -ge 0 -and $said.IndexOf('Dest filename:', $at) -ge 0) -or $gone -gt 60
 }
 if ($run.Exit -ne 'killed') { [void] $failures.Add("the setup was not killed while it installed (it ended with $($run.Exit))") }
+# (What is still running as the kill returns (Kill does not wait for a process to finish ending), from Inno Setup's
+# temporary folders or the program's folder, named in the step's JSON, and waited for to end, up to 10 s: so that a file
+# found held as the folder is read has its holder named. A test-only record.)
+$left03 = @(Get-SetupProcessesLeft)
+if ($left03.Count) { [void] (Wait-Until { @(Get-SetupProcessesLeft).Count -eq 0 } 10) }
+$stillLeft03 = @(Get-SetupProcessesLeft)
 Start-Sleep -Seconds 2
 $after = Get-Installed
 # What a killed setup leaves: file by file against the earlier version's.
@@ -593,21 +1162,30 @@ foreach ($path in $earlier.Files.Keys) {
 }
 foreach ($path in $after.Files.Keys) { if (-not $earlier.Files.Contains($path)) { [void] $added.Add($path) } }
 # (Set aside for the copy in every mode since 0.1.2, review L3: a setup ended from outside runs no code of its own, so
-# the earlier program stays aside, and nothing is there to start, until the next setup puts it back first, step 04.)
-$programLeft = Test-Path -LiteralPath $Program
+# the earlier program stays aside until the next setup puts it back first, step 04. Since 0.2.0 qKVM Setup's update
+# check is in its place, M3: a start there says that an update did not finish.)
+$programLeft = Test-UpdateCheckAt $Program
 $asideLeft = Test-Path -LiteralPath "$Program.old-update"
-if ($programLeft -or -not $asideLeft) { [void] $failures.Add('the earlier program was not set aside for the copy') }
+$atName03 = Get-AtProgramName
+if (-not $programLeft -or -not $asideLeft) { [void] $failures.Add("the earlier program was not set aside for the copy, with the update check of this PC's kind ($PcKind) in its place (at its name: $atName03)") }
+# (And, 0.2.0, the whole earlier version: each of its files there byte for byte, as itself or set aside beside it, with
+# the marker that says an update did not finish.)
+$notKept = @(Get-NotKept $earlier $after)
+if ($notKept.Count) { [void] $failures.Add("files of the earlier version are neither there nor set aside as they were: $($notKept -join ', ')") }
+if (-not (Test-Path -LiteralPath $UpdateMarker)) { [void] $failures.Add('there is no marker of an unfinished update beside what the copy set aside') }
 $how = @()
 $entryVersion = if ($after.Entry) { $after.Entry.DisplayVersion } else { $null }
 Write-Step '03' 'killed-upgrade' $began $failures ([ordered]@{ run = $run; entryVersion = $entryVersion; programVersion = Get-Version $Program
-    programSetAside = ($asideLeft -and -not $programLeft)
+    programSetAside = $asideLeft; updateCheckInItsPlace = $programLeft; atProgramName = $atName03; markerLeft = (Test-Path -LiteralPath $UpdateMarker); notKept = $notKept
     stillTheEarlierVersions = $kept.Count; replaced = @($replaced); gone = @($missing); added = @($added); ended = $how
+    runningAsTheKillReturned = @($left03); stillRunningAfter10s = @($stillLeft03)
     leftInTemp = @(Get-ChildItem -LiteralPath $env:TEMP -Directory -Filter 'is-*.tmp' | ForEach-Object Name) })
 
 # --- 04 the upgrade
 $began = [DateTime]::UtcNow
 $failures = New-Object System.Collections.ArrayList
-# (What an earlier version may have had and this one not, in the two folders Qt loads whole, and a file beside them.)
+# (Files of no version of ours, a person's or another program's: in the two folders Qt loads whole and beside them.
+# 0.2.0 never walks a folder, plugins and qml among them: each stays, M4.)
 $staleFile = Join-Path $App 'plugins\imageformats\qkvm-vm-stale.dll'
 $staleFolder = Join-Path $App 'qml\QkvmVmStale'
 $outside = Join-Path $App 'qkvm-vm-outside.txt'
@@ -618,18 +1196,27 @@ foreach ($file in $staleFile, (Join-Path $staleFolder 'qmldir'), $outside) {
 $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '04-upgrade')`""
 if ($run.Consent) { [void] $failures.Add('Windows asked for an administrator') }
 if ($run.Exit -ne 0) { [void] $failures.Add("the setup ended with $($run.Exit)") }
-if (Test-Path -LiteralPath $staleFile) { [void] $failures.Add('a file in plugins that this version has not is still there') }
-if (Test-Path -LiteralPath $staleFolder) { [void] $failures.Add('a folder in qml that this version has not is still there') }
-if (-not (Test-Path -LiteralPath $outside)) { [void] $failures.Add('a file outside plugins and qml was removed') }
-Remove-Item -LiteralPath $outside -Force -ErrorAction SilentlyContinue
+if (-not (Test-Path -LiteralPath $staleFile)) { [void] $failures.Add('a file in plugins that no version of ours installed was removed') }
+if (-not (Test-Path -LiteralPath (Join-Path $staleFolder 'qmldir'))) { [void] $failures.Add('a folder in qml that no version of ours installed was removed') }
+if (-not (Test-Path -LiteralPath $outside)) { [void] $failures.Add('a file beside the program that no version of ours installed was removed') }
+foreach ($file in $staleFile, $staleFolder, $outside) { Remove-Item -LiteralPath $file -Recurse -Force -ErrorAction SilentlyContinue }
 $state = Test-Installed $newVersion $failures
 if ((Get-Version $Program) -ne $newVersion) { [void] $failures.Add("the program is version $(Get-Version $Program), not $newVersion") }
-# (The earlier program that 03's killed setup left aside, put back first, then set aside for this copy, outside update
-# mode as in it: review L3.)
+# (The earlier version that 03's killed setup left aside, put back first, then set aside for this copy, outside update
+# mode as in it: review L3, and 0.2.0's staged install.)
 $said = Read-Log '04-upgrade'
-if ($said -notmatch 'Put the earlier program back\.' -or $said -notmatch 'Set the earlier program aside for the copy\.') {
-    [void] $failures.Add('the setup did not put the earlier program back first, or did not set it aside for its copy')
+if (-not (Test-PutBackFirst $said)) {
+    [void] $failures.Add('the setup did not put the earlier version back first, or did not set it aside for its copy')
 }
+# (The earlier version found in its own folder, of its kind by its program's PE header, put back first: this PC's.)
+if ($said -notmatch [regex]::Escape("qKVM Desktop $oldVersion ($PcKind) was installed in this folder")) {
+    [void] $failures.Add("the setup's log does not say qKVM Desktop $oldVersion ($PcKind) was installed in this folder")
+}
+# (0.2.0, L13: the copy flushed to the disk before its marker is made that of a finishing update and the earlier
+# version goes.)
+$onDisk = $said.IndexOf('The copy is on the disk.')
+$finished = $said.IndexOf('Finished an update whose copy was whole')
+if ($onDisk -lt 0 -or $finished -lt 0 -or $onDisk -gt $finished) { [void] $failures.Add('the setup did not say the copy was on the disk before it removed the earlier version') }
 Test-Data $failures
 Write-Step '04' 'upgrade' $began $failures ([ordered]@{ run = $run; entry = $state.Entry; files = $state.Files.Count })
 
@@ -673,8 +1260,16 @@ if (-not $again -or -not $copies.Count) { [void] $failures.Add('the setup did no
 # (Started by the setup with the one argument --after-update, as the setup's log says of its [Run] entry: the copy it
 # started may already have started itself again through the shell and ended. The command lines seen are kept.)
 $commandLines = @(Get-CimInstance Win32_Process -Filter "Name = 'qkvm-desktop.exe'" | Where-Object { $_.ProcessId -ne $firstId } | ForEach-Object { [string] $_.CommandLine })
-if ((Read-Log '07-update-mode') -notmatch 'Filename: [^\r\n]*\\qkvm-desktop\.exe[ \t]*\r?\n[^\r\n]*Parameters: --after-update[ \t]*\r?\n') {
-    [void] $failures.Add('the setup''s log does not say it started the program with the one argument --after-update')
+# (Started only once the copy was marked finished and what it set aside was gone: before that, the program would hold its
+# own image against the flush, the copy would never count and the update would be left unfinished, as the rehearsal on
+# Windows on Arm found it on 2026-11-19. Nothing of an unfinished update is left: Test-Installed below holds the folder
+# to exactly the package's files, the marker and the uninstaller.)
+if ((Read-Log '07-update-mode') -notmatch '(?s)Finished an update whose copy was whole[^\r\n]*\r?\n.*Started qKVM Desktop from its folder with --after-update, its copy judged') {
+    [void] $failures.Add('the setup''s log does not say it started the program with the one argument --after-update, once its copy was whole and finished')
+}
+if ((Read-Log '07-update-mode') -match 'does not count|could not be flushed') { [void] $failures.Add('the update''s copy did not count') }
+foreach ($left in @(Get-ChildItem -LiteralPath $App -Recurse -Force -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*.old-update' -or $_.Name -eq 'qkvm-desktop.update-unfinished' })) {
+    [void] $failures.Add("the update left $($left.Name) behind")
 }
 $state = Test-Installed $newVersion $failures
 $log = Read-Log '07-update-mode'
@@ -682,10 +1277,11 @@ if ($log -notmatch 'had ended after \d+ ms') { [void] $failures.Add('the setup''
 if (@(Get-ResultLines '07-update-mode').Count) { [void] $failures.Add('the log of a setup that installed has a result line of the contract') }
 if (-not $script:setupSeen) { [void] $failures.Add('the setup''s own mutex was not seen while it ran') }
 if ($script:tookEarly) { [void] $failures.Add('the program took its mutex while the setup still held its own') }
+$runsAs07 = @(Test-RunsAsKind $PcKind $failures 'the program the update started again')
 $how = Stop-Program
 Test-Data $failures
 Write-Step '07' 'update-mode' $began $failures ([ordered]@{ run = $run; programEndedAfterSeconds = $script:endedAt
-    startedAgain = @($copies | ForEach-Object { $_.ExecutablePath }); commandLines = $commandLines; ended = $how })
+    startedAgain = @($copies | ForEach-Object { $_.ExecutablePath }); commandLines = $commandLines; runsAs = $runsAs07; ended = $how })
 
 # --- 08 the update mode with the program still running: exit code 105, nothing changed
 $began = [DateTime]::UtcNow
@@ -778,26 +1374,54 @@ $held = [Threading.Mutex]::new($true, $SetupMutex, [ref] $created)
 $atWork = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::ManualReset, "$SetupMutex-$PID")
 try {
     if (-not $created) { [void] $failures.Add("a setup's mutex was there already, held by another") }
+    # (Within a minute, as a setup waits for such a start before it judges its copy (WaitForStartsToEnd): this first
+    # start of the files the reinstall just wrote maps each of them, and Windows' scanner scans each first (2026-11-21: 2 to 8 s
+    # for a whole copy on a test VM, more while it scans something else, some 60 ms once scanned); once in its main(),
+    # the program ends at once. How long it took is kept.)
+    $startedAt = Get-Clock
     $startedDuring = Start-Process -FilePath $Program -WorkingDirectory $App -PassThru
     [void] $startedDuring.Handle
-    $until = [DateTime]::UtcNow.AddSeconds(10)
-    while ([DateTime]::UtcNow -lt $until) {
+    $until = $startedAt + 60
+    while ((Get-Clock) -lt $until) {
         if (Test-ProgramRunning) { $tookEarly = $true }
         if ($startedDuring.HasExited) { $endedAtOnce = $true; break }
         Start-Sleep -Milliseconds 100
+    }
+    $endedAfterMs = [int] (((Get-Clock) - $startedAt) * 1000)
+    # (Then the same files started again under the same mutex: scanned by now, the start ends at once in its main(),
+    # within 2 s; a program that came to spend long before its look at the setup's mutex fails here, where the first
+    # start's minute would hide it, and so would every setup's minute; review armp-1 L5.)
+    $againEndedAtOnce = $false
+    $againEndedAfterMs = $null
+    $againDuring = $null
+    if ($endedAtOnce) {
+        $againAt = Get-Clock
+        $againDuring = Start-Process -FilePath $Program -WorkingDirectory $App -PassThru
+        [void] $againDuring.Handle
+        $againUntil = $againAt + 30
+        while ((Get-Clock) -lt $againUntil) {
+            if (Test-ProgramRunning) { $tookEarly = $true }
+            if ($againDuring.HasExited) { $againEndedAtOnce = $true; break }
+            Start-Sleep -Milliseconds 50
+        }
+        $againEndedAfterMs = [int] (((Get-Clock) - $againAt) * 1000)
     }
 } finally {
     if ($created) { $held.ReleaseMutex() }
     $held.Dispose()
     $atWork.Dispose()
 }
-if (-not $endedAtOnce) { [void] $failures.Add('the program started while a setup held its mutex did not end within 10 s') }
+if (-not $endedAtOnce) { [void] $failures.Add('the program started while a setup held its mutex did not end within 60 s') }
 elseif ($startedDuring.ExitCode -ne 0) { [void] $failures.Add("the program started while a setup held its mutex ended with $($startedDuring.ExitCode), not 0") }
+elseif (-not $againEndedAtOnce) { [void] $failures.Add('the program started again while a setup held its mutex, its files scanned by then, did not end within 30 s') }
+elseif ($againEndedAfterMs -gt 2000) { [void] $failures.Add("the program started again while a setup held its mutex, its files scanned by then, ended after $againEndedAfterMs ms, not within 2 s") }
+elseif ($againDuring.ExitCode -ne 0) { [void] $failures.Add("the program started again while a setup held its mutex ended with $($againDuring.ExitCode), not 0") }
 if ($tookEarly) { [void] $failures.Add('the program started while a setup held its mutex took its own') }
 $how = Stop-Program
 Test-Data $failures
 Write-Step '12' 'reinstall' $began $failures ([ordered]@{ run = $run; files = $state.Files.Count
-    startedWhileSetupMutexHeld = [ordered]@{ endedAtOnce = $endedAtOnce; tookItsMutex = $tookEarly }; ended = $how })
+    startedWhileSetupMutexHeld = [ordered]@{ endedAtOnce = $endedAtOnce; endedAfterMs = $endedAfterMs; againEndedAtOnce = $againEndedAtOnce
+        againEndedAfterMs = $againEndedAfterMs; tookItsMutex = $tookEarly }; ended = $how })
 Test-Starts '13'
 
 # --- 14 starts of the program, again and again, while the setup copies its files
@@ -806,20 +1430,24 @@ $failures = New-Object System.Collections.ArrayList
 $log = Get-Log '14-starts-during-copy'
 $script:starts = 0
 $script:startsRefused = 0
-$script:lastStart = [DateTime]::MinValue
+$script:lastStart = -1000.0
 $script:tookEarly = $false
 # (From the first file the setup writes until it says the copy is done: a start without an argument every half
-# second, as a person might double-click it then. Each finds no program: it is set aside for the copy in every mode,
-# review L3, as step 15 sees in update mode.)
+# second, as a person might double-click it then. Each finds the update check in the program's place (the earlier
+# program is set aside for the copy in every mode, review L3, and the update check put there since 0.2.0, M3), which
+# ends at once and says nothing while the setup is at work, as step 15 sees in update mode.)
+$script:startedDuring = New-Object System.Collections.ArrayList
+$script:checkSeen = $false
 $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
     param($process, $gone)
     $said = if (Test-Path -LiteralPath $log) { (Read-Shared $log) } else { '' }
     # (None once the setup has named the program's own file, the last it writes: a start then may reach the program's
     # check of the setup's mutex only after the setup has ended, and run as the program does.)
     if ($said.Contains('Dest filename:') -and $said -notmatch '(?m)Dest filename: .*\\qkvm-desktop\.exe\s*$' -and
-        ([DateTime]::UtcNow - $script:lastStart).TotalMilliseconds -ge 500) {
-        $script:lastStart = [DateTime]::UtcNow
-        try { Start-Process -FilePath $Program -WorkingDirectory $App | Out-Null; $script:starts++ } catch { $script:startsRefused++ }
+        ((Get-Clock) - $script:lastStart) -ge 0.5) {
+        $script:lastStart = Get-Clock
+        if (Test-UpdateCheckAt $Program) { $script:checkSeen = $true }
+        try { $one = Start-Process -FilePath $Program -WorkingDirectory $App -PassThru; [void] $one.Handle; [void] $script:startedDuring.Add($one); $script:starts++ } catch { $script:startsRefused++ }
     }
     if ((Test-SetupRunning) -and (Test-ProgramRunning)) { $script:tookEarly = $true }
     return $false
@@ -827,7 +1455,11 @@ $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
 if ($run.Consent) { [void] $failures.Add('Windows asked for an administrator') }
 if ($run.Exit -ne 0) { [void] $failures.Add("the setup ended with $($run.Exit) with the program started during its copy") }
 if ($script:starts + $script:startsRefused -eq 0) { [void] $failures.Add('the program was not once started while the setup copied its files') }
-if ($script:starts -gt 0) { [void] $failures.Add("$($script:starts) start(s) during the copy found a program: the earlier one was not set aside") }
+if (-not $script:checkSeen) { [void] $failures.Add('the update check was not in the program''s place during the copy: the earlier program was not set aside') }
+# (Each start during the copy that found the update check ended at once, with 0, saying nothing.)
+$notEnded = @($script:startedDuring | Where-Object { -not $_.WaitForExit(10000) })
+$notZero = @($script:startedDuring | Where-Object { $_.HasExited -and $_.ExitCode -ne 0 })
+if ($notEnded.Count -or $notZero.Count) { [void] $failures.Add("starts during the copy did not end at once with 0 ($($notEnded.Count) still running, $($notZero.Count) ended otherwise)") }
 if ($script:tookEarly) { [void] $failures.Add('a start during the copy took the program''s mutex while the setup held its own') }
 # (Every start while the setup holds its mutex ends at once. One that comes as the setup ends may find its mutex gone
 # and run as the program does, holding its own: seen on Windows 10, 2026-11-12. That one is left, a single process
@@ -858,6 +1490,62 @@ function Reset-ToOlder([string] $Number, [System.Collections.ArrayList] $Failure
     return Get-Installed
 }
 
+# (A start of the program held as Windows' scanner holds the first start of a copy just written: made suspended, so that
+# its process holds the program's file mapped, as one does while the scanner looks at each new library it maps, and let
+# go of when told; step 15. Its handles are closed as it is let go of: a handle kept would keep its number.)
+if (-not ('QkvmVmHeldStart' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class QkvmVmHeldStart {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct StartupInfo {
+        public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessW(string application, StringBuilder line, IntPtr processAttributes, IntPtr threadAttributes,
+        bool inherit, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation information);
+    [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process, uint code);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    static ProcessInformation held;
+    // The program at path started suspended (CREATE_SUSPENDED), with no argument; its process's number, or 0.
+    public static int Start(string path, string directory) {
+        if (held.hProcess != IntPtr.Zero) return 0;
+        StartupInfo startup = new StartupInfo();
+        startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+        ProcessInformation information;
+        if (!CreateProcessW(path, new StringBuilder("\"" + path + "\""), IntPtr.Zero, IntPtr.Zero, false, 0x4, IntPtr.Zero, directory, ref startup, out information)) return 0;
+        held = information;
+        return information.dwProcessId;
+    }
+    // Whether the start held is there still, not ended (by anyone).
+    public static bool Running() {
+        return held.hProcess != IntPtr.Zero && WaitForSingleObject(held.hProcess, 0) == 0x102;
+    }
+    // This test's own start ended, as such a start ends by itself in the end, and its handles closed.
+    public static void End() {
+        if (held.hProcess != IntPtr.Zero) TerminateProcess(held.hProcess, 1);
+        if (held.hThread != IntPtr.Zero) CloseHandle(held.hThread);
+        if (held.hProcess != IntPtr.Zero) CloseHandle(held.hProcess);
+        held = new ProcessInformation();
+    }
+    // Let go of: it runs on (and ends by itself where a setup is at work), and its handles are closed.
+    public static void Release() {
+        if (held.hThread != IntPtr.Zero) { ResumeThread(held.hThread); CloseHandle(held.hThread); }
+        if (held.hProcess != IntPtr.Zero) CloseHandle(held.hProcess);
+        held = new ProcessInformation();
+    }
+}
+'@
+}
+
 # --- 15 the contract's update across a change of the Qt libraries, with starts of the program during its copy
 $began = [DateTime]::UtcNow
 $failures = New-Object System.Collections.ArrayList
@@ -870,49 +1558,78 @@ $aside = "$Program.old-update"
 $script:ended15 = $null
 $script:starts15 = 0
 $script:refused15 = 0
-$script:last15 = [DateTime]::MinValue
+$script:last15 = -1000.0
 $script:absent15 = $false
 $script:aside15 = $false
 $script:took15 = $false
+$script:held15 = 0
+$script:copied15 = $null
+$script:let15 = $false
+try {
 $run = Invoke-Setup $Setup (& $contract $log) 300 {
     param($process, $gone)
     if (-not $script:ended15 -and $gone -gt 3) { Stop-Process -Id $firstId -Force -ErrorAction SilentlyContinue; $script:ended15 = $gone; return $false }
     $said = if (Test-Path -LiteralPath $log) { (Read-Shared $log) } else { '' }
+    # (The held start: made as soon as the new program's file is in, let go of 15 s after the copy's end, longer than
+    # the flush's tries; the setup must wait for it to end before it judges the copy.)
+    if (-not $script:held15) {
+        $at = $said.IndexOf("Dest filename: $Program")
+        if ($at -ge 0 -and $said.IndexOf('Successfully installed the file.', $at) -ge 0) { $script:held15 = [QkvmVmHeldStart]::Start($Program, $App) }
+    } elseif (-not $script:let15) {
+        if ($null -eq $script:copied15 -and $said.Contains('Installation process succeeded')) { $script:copied15 = Get-Clock }
+        if ($null -ne $script:copied15 -and ((Get-Clock) - $script:copied15) -ge 15) { [QkvmVmHeldStart]::Release(); $script:let15 = $true }
+    }
     if ($said.Contains('Dest filename:') -and -not $said.Contains('Installation process succeeded')) {
-        if (-not (Test-Path -LiteralPath $Program)) { $script:absent15 = $true }
+        if (Test-UpdateCheckAt $Program) { $script:absent15 = $true }
         if (Test-Path -LiteralPath $aside) { $script:aside15 = $true }
-        if (([DateTime]::UtcNow - $script:last15).TotalMilliseconds -ge 500) {
-            $script:last15 = [DateTime]::UtcNow
+        if (((Get-Clock) - $script:last15) -ge 0.5) {
+            $script:last15 = Get-Clock
             try { Start-Process -FilePath $Program -WorkingDirectory $App | Out-Null; $script:starts15++ } catch { $script:refused15++ }
         }
     }
     if ($script:ended15 -and (Test-SetupRunning) -and (Test-ProgramRunning)) { $script:took15 = $true }
     return $false
 }
+} finally {
+    [QkvmVmHeldStart]::Release()
+}
 if ($run.Exit -ne 0) { [void] $failures.Add("the update ended with $($run.Exit)") }
+if (-not $script:held15) { [void] $failures.Add('no start of the new program could be held as its file came in') }
+elseif (-not $script:let15) { [void] $failures.Add('the setup did not wait for the held start of the new program: it ended within 15 s of its copy') }
+if ((Read-Log '15-update-across-qt') -notmatch 'Waited \d+ ms for the starts of qKVM Desktop made during the copy to end') {
+    [void] $failures.Add('the setup''s log does not say it waited for the starts made during the copy before it judged the copy')
+}
 $after = Get-Installed
 $newQt = if ($after.Files.Contains('Qt6Core.dll')) { $after.Files['Qt6Core.dll'].sha256 } else { '' }
-if (-not $olderQt -or $newQt -eq $olderQt) { [void] $failures.Add('the two setups'' Qt6Core.dll are the same: make the newer one''s differ (see the head of this test)') }
-if (-not $script:aside15 -or -not $script:absent15) { [void] $failures.Add('the program''s file was not set aside for the copy') }
+# (Where the two setups ship the same Qt, as 0.1.2 and 0.2.0 do, the update is not one across a change of Qt: the rest
+# of the step is judged, and what was not seen is said. The head of this test says how to make the newer one's differ.)
+$notSeen15 = ''
+if (-not $olderQt -or -not $newQt) { [void] $failures.Add('Qt6Core.dll is not in the older install or the new one') }
+elseif ($newQt -eq $olderQt) { $notSeen15 = 'an update across a change of Qt: the two setups ship the same Qt6Core.dll (the head of this test says how to make the newer one''s differ)' }
+if (-not $script:aside15 -or -not $script:absent15) { [void] $failures.Add('the program''s file was not set aside for the copy, with the update check in its place') }
 if (Test-Path -LiteralPath $aside) { [void] $failures.Add('the set-aside copy of the program is still there after the update') }
 if ($script:took15) { [void] $failures.Add('a start during the copy took the program''s mutex while the setup held its own') }
 if (-not (Wait-Until { Test-ProgramRunning } 30)) { [void] $failures.Add('the setup did not start the program again after the update') }
-if ((Read-Log '15-update-across-qt') -notmatch 'Filename: [^\r\n]*\\qkvm-desktop\.exe[ \t]*\r?\n[^\r\n]*Parameters: --after-update[ \t]*\r?\n') {
+if ((Read-Log '15-update-across-qt') -notmatch $StartedLine) {
     [void] $failures.Add('the setup''s log does not say it started the program with the one argument --after-update')
 }
 $how = Stop-Program
 $state = Test-Installed $newVersion $failures
 Test-Data $failures
-Write-Step '15' 'update-across-qt' $began $failures ([ordered]@{ run = $run; qtChanged = ($olderQt -and $newQt -ne $olderQt)
-    startsDuringCopy = $script:starts15; startsFindingNoProgram = $script:refused15; ended = $how; files = $state.Files.Count })
+Write-Step '15' 'update-across-qt' $began $failures ([ordered]@{ run = $run; qtChanged = [bool] ($olderQt -and $newQt -and $newQt -ne $olderQt)
+    startsDuringCopy = $script:starts15; startsFindingNoProgram = $script:refused15; heldStart = $script:held15; heldLetGoAfterTheCopy = $script:let15
+    ended = $how; files = $state.Files.Count }) $notSeen15
 
 # --- 16 the contract's update failing during its copy: the earlier program back in its place
 $began = [DateTime]::UtcNow
 $failures = New-Object System.Collections.ArrayList
 $older = Reset-ToOlder '16' $failures
 $olderProgram = if ($older.Files.Contains('qkvm-desktop.exe')) { $older.Files['qkvm-desktop.exe'].sha256 } else { '' }
-# (The file the setup puts in last before the program, held once the copy has begun: the setup's own check before
-# the copy finds it free, and its copy then fails on it, as on a file in use or a full disk.)
+# (The name of the file the setup puts in last before the program, taken once the copy has begun: the setup's own
+# check before the copy found the folder free, and its copy then fails on it, as on a file in use or a full disk. Since
+# 0.2.0 the earlier file of that name is set aside by then, so the name is taken by a file of this test's own, held with
+# no sharing, as a scanner of the PC may hold a file the copy has just made; and let go of as the setup rolls back, so
+# that the earlier version can be put back whole.)
 $manifest = Get-Content -LiteralPath (Join-Path $App 'package-manifest.json') -Raw | ConvertFrom-Json
 $names = [string[]] @($manifest.files | ForEach-Object { [string] $_.path } | Where-Object { $_ -ne 'qkvm-desktop.exe' })
 [Array]::Sort($names, [StringComparer]::Ordinal)
@@ -922,31 +1639,40 @@ $firstId = $started.Process.Id
 $log = Get-Log '16-update-fails-during-copy'
 $script:ended16 = $null
 $script:held16 = $null
+$script:heldAt16 = $false
 try {
     $run = Invoke-Setup $Setup (& $contract $log) 300 {
         param($process, $gone)
         if (-not $script:ended16 -and $gone -gt 3) { Stop-Process -Id $firstId -Force -ErrorAction SilentlyContinue; $script:ended16 = $gone; return $false }
-        if (-not $script:held16 -and (Test-Path -LiteralPath $log) -and (Read-Shared $log).Contains('Dest filename:')) {
-            try { $script:held16 = [IO.File]::Open((Join-Path $App ($heldName -replace '/', '\')), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None) } catch { }
+        $said = Read-Shared $log
+        if (-not $script:heldAt16 -and $said.Contains('Dest filename:')) {
+            try { $script:held16 = [IO.File]::Open((Join-Path $App ($heldName -replace '/', '\')), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:heldAt16 = $true } catch { }
         }
+        if ($script:held16 -and $said.Contains('Rolling back changes.')) { $script:held16.Dispose(); $script:held16 = $null }
         return $false
     }
 } finally {
     if ($script:held16) { $script:held16.Dispose() }
 }
-if (-not $script:held16) { [void] $failures.Add("$heldName could not be held during the copy") }
+if (-not $script:heldAt16) { [void] $failures.Add("$heldName could not be held during the copy") }
 if ($run.Exit -eq 0) { [void] $failures.Add('the update did not fail with a file of the folder held during its copy') }
 $programNow = if (Test-Path -LiteralPath $Program) { (Get-FileHash -LiteralPath $Program -Algorithm SHA256).Hash.ToLowerInvariant() } else { '' }
 if (-not $programNow) { [void] $failures.Add('after the failed update there is no program') }
 elseif ($programNow -ne $olderProgram) { [void] $failures.Add('after the failed update the program is not the earlier one') }
 if (Test-Path -LiteralPath "$Program.old-update") { [void] $failures.Add('the set-aside copy of the program is still there after the failed update') }
+# (0.2.0: the whole earlier version, byte for byte, and nothing set aside or marked left; and, the update having
+# ended the program, the setup starts the earlier one again itself, L5.)
+$startedAgain16 = (Read-Log '16-update-fails-during-copy') -match 'Started qKVM Desktop again' -and (Wait-Until { Test-ProgramRunning } 30)
+if (-not $startedAgain16) { [void] $failures.Add('the update whose copy did not complete did not start the earlier program again') }
+$how = Stop-Program
+Test-Earlier $older $failures
 $restarted = Start-Program
 if (-not $restarted.Up) { [void] $failures.Add('after the failed update, the earlier program does not start') }
-$how = Stop-Program
+$how += @(Stop-Program)
 $finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '16-finish')`""
 if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
 Test-Data $failures
-Write-Step '16' 'update-fails-during-copy' $began $failures ([ordered]@{ run = $run; held = $heldName; programIsTheEarlier = ($programNow -eq $olderProgram)
+Write-Step '16' 'update-fails-during-copy' $began $failures ([ordered]@{ run = $run; held = $heldName; programIsTheEarlier = ($programNow -eq $olderProgram); startedAgain = $startedAgain16
     ended = $how; finish = $finish })
 
 # --- 17 a setup ended halfway, then the uninstaller: the program's folder gone, nothing left in it
@@ -1065,6 +1791,46 @@ public static class QkvmVm {
         pressing.IsBackground = true;
         pressing.Start();
     }
+    // Every look of UI Automation's, bounded as the Win32 looks are (each within a second, SMTO_ABORTIFHUNG): made on a
+    // thread of its own, given at most `ms`, and what it found then is all there is (nothing where it found nothing in
+    // time); a thread that does not come back is left to end by itself, in the background, and the script goes on. A
+    // look at a window whose thread waits without pumping a message, or one of qKVM held still by the test, can wait
+    // for ever: the first VM run hung on Windows 10 there (outside review of 0.1.2's VM test, i020).
+    public const int AutomationMs = 5000;
+    static T Bounded<T>(Func<T> look, T none, int ms) {
+        T found = none;
+        Thread looking = new Thread(delegate () {
+            try { T seen = look(); lock (typeof(QkvmVm)) { found = seen; } } catch (Exception) { }
+        });
+        looking.IsBackground = true;
+        looking.Start();
+        if (!looking.Join(ms)) return none;
+        lock (typeof(QkvmVm)) { return found; }
+    }
+    // The first enabled button UI Automation names in a top-level window whose name, without its & sign, begins with
+    // `name` (a task dialog's, which are no windows of their own); null where there is none, or the look took longer
+    // than `ms`. Its name and whether it is enabled are read on the look's thread too.
+    public static AutomationElement ButtonByAutomation(IntPtr top, string name, int ms) {
+        return Bounded<AutomationElement>(delegate () {
+            Condition isButton = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
+            foreach (AutomationElement element in AutomationElement.FromHandle(top).FindAll(TreeScope.Descendants, isButton)) {
+                string said = element.Current.Name ?? "";
+                if (said.Replace("&", "").StartsWith(name, StringComparison.OrdinalIgnoreCase) && element.Current.IsEnabled) return element;
+            }
+            return null;
+        }, null, ms);
+    }
+    // Every name UI Automation gives inside a top-level window, in its order (a task dialog's words); none where the
+    // look took longer than `ms`.
+    public static string[] NamesByAutomation(IntPtr top, int ms) {
+        return Bounded<string[]>(delegate () {
+            System.Collections.Generic.List<string> names = new System.Collections.Generic.List<string>();
+            foreach (AutomationElement element in AutomationElement.FromHandle(top).FindAll(TreeScope.Descendants, Condition.TrueCondition)) {
+                names.Add(element.Current.Name ?? "");
+            }
+            return names.ToArray();
+        }, new string[0], ms);
+    }
     // (Windows' own look at a setup's windows, which never waits on one: V1b. UI Automation named the buttons of Inno
     // Setup's wizard no buttons where it reached them by their window's handle, and a look at the loader's window,
     // whose thread waits for the wizard without pumping a message, can wait for ever.)
@@ -1174,22 +1940,37 @@ function Test-Unchanged($Before, [System.Collections.ArrayList] $Failures) {
     }
 }
 
+function Test-SameStart([DateTime] $Began, $Listed) {
+    <# Whether a process opened by its number began when Windows' list said the process of that number began: the
+    same start exactly, at the list's own precision (Windows keeps a start to 100 ns, CIM says it to the microsecond,
+    cut, not rounded), as Stop-Tree has it (reviews R7, F6). Where the list says no start, it is not the same. #>
+    if ($null -eq $Listed) { return $false }
+    $opened = $Began.ToUniversalTime().Ticks
+    return ($opened - ($opened % 10)) -eq ([DateTime] $Listed).ToUniversalTime().Ticks
+}
+
 function Get-SetupProcesses([int] $SetupId) {
     <# The setup's process and those it started, and they in turn, by Windows' list (at most 16): a process is taken
     for a child only where it began at or after its parent, as Stop-Tree takes one (Windows keeps a parent's number
-    after it has ended, and it may since be another's). Inno Setup runs its wizard in a second process, setup.tmp in
-    a folder is-*.tmp, that the setup's own file starts (V1b). #>
+    after it has ended, and it may since be another's); and, opened again by its number, only where it is still the
+    process the list named: one that ended between the list and the opening, its number taken by another program, is
+    never taken for the setup's, so that no press is aimed at another program's windows (outside review of 0.1.2's
+    VM test, i020). Inno Setup runs its wizard in a second process, setup.tmp in a folder is-*.tmp, that the setup's
+    own file starts (V1b). #>
     $ids = New-Object System.Collections.ArrayList
     $next = New-Object System.Collections.Queue
-    $next.Enqueue($SetupId)
+    # (The setup's own process is the one this script started and holds; its children are each held to the list.)
+    $next.Enqueue(@($SetupId, $null))
     while ($next.Count -and $ids.Count -lt 16) {
-        $id = [int] $next.Dequeue()
+        $queued = $next.Dequeue()
+        $id = [int] $queued[0]
         $began = $null
         try { $began = [Diagnostics.Process]::GetProcessById($id).StartTime } catch { }
         if ($null -eq $began) { continue }
+        if ($id -ne $SetupId -and -not (Test-SameStart $began $queued[1])) { continue }
         [void] $ids.Add($id)
         foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $id")) {
-            if ($null -ne $child.CreationDate -and $child.CreationDate -ge $began -and -not $ids.Contains([int] $child.ProcessId)) { $next.Enqueue([int] $child.ProcessId) }
+            if ($null -ne $child.CreationDate -and $child.CreationDate -ge $began -and -not $ids.Contains([int] $child.ProcessId)) { $next.Enqueue(@([int] $child.ProcessId, $child.CreationDate)) }
         }
     }
     return @($ids)
@@ -1224,15 +2005,10 @@ function Find-SetupButton([int] $SetupId, [string] $Name, $Within = $null) {
             }
         }
     }
-    $isButton = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+    # (Each look of UI Automation's on a thread of its own, at most [QkvmVm]::AutomationMs: i020.)
     foreach ($top in $tops) {
-        try {
-            foreach ($element in [System.Windows.Automation.AutomationElement]::FromHandle($top).FindAll([System.Windows.Automation.TreeScope]::Descendants, $isButton)) {
-                if (([string] $element.Current.Name).Replace('&', '').StartsWith($Name, [StringComparison]::OrdinalIgnoreCase) -and $element.Current.IsEnabled) {
-                    return [pscustomobject]@{ Window = $top; Button = [IntPtr]::Zero; Element = $element }
-                }
-            }
-        } catch { }
+        $element = [QkvmVm]::ButtonByAutomation($top, $Name, [QkvmVm]::AutomationMs)
+        if ($null -ne $element) { return [pscustomobject]@{ Window = $top; Button = [IntPtr]::Zero; Element = $element } }
     }
     return $null
 }
@@ -1264,9 +2040,7 @@ function Get-SetupText([int] $SetupId) {
             [void] $said.Add([QkvmVm]::TextOf($inside))
             foreach ($item in [QkvmVm]::ItemsOf($inside)) { [void] $said.Add($item) }
         }
-        try {
-            foreach ($one in [System.Windows.Automation.AutomationElement]::FromHandle($top).FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) { [void] $said.Add([string] $one.Current.Name) }
-        } catch { }
+        foreach ($one in [QkvmVm]::NamesByAutomation($top, [QkvmVm]::AutomationMs)) { [void] $said.Add([string] $one) }
     }
     return ($said -join "`n")
 }
@@ -1316,7 +2090,7 @@ function Invoke-SetupByHand([string] $Log, [object[]] $Presses, [int] $Seconds =
 
 function Test-StartedAgain([string] $LogName, [System.Collections.ArrayList] $Failures, [bool] $Expected) {
     <# Whether the setup started the program at its end (its log, and the program's mutex), as $Expected says. #>
-    $said = (Read-Log $LogName) -match 'Filename: [^\r\n]*\\qkvm-desktop\.exe[ \t]*\r?\n[^\r\n]*Parameters: --after-update[ \t]*\r?\n'
+    $said = (Read-Log $LogName) -match $StartedLine
     $running = Wait-Until { Test-ProgramRunning } $(if ($Expected) { 30 } else { 5 })
     if ($Expected -and (-not $said -or -not $running)) { [void] $Failures.Add('the setup did not start the program again') }
     if (-not $Expected -and ($said -or $running)) { [void] $Failures.Add('the setup started the program, which was not running before it') }
@@ -1366,14 +2140,26 @@ function Get-NoteTime([DateTime] $At) { $At.ToString('yyyy-MM-ddTHH:mm:ss.fffZ',
 # (First, as B12 found it on 0.1.0's own profile: a server's BIOS setup boot override noted beside the settings, for a
 # server at a loopback port where nothing answers and on no card, its doubt over long ago: a day ago, by this machine's
 # own clock, so that a machine whose clock is behind takes it as over too. It holds nothing: the silent setup closes the
-# program and upgrades it, and the note is byte for byte what it was.)
+# program and upgrades it. And, as SPEC says of SetupOverrides::prune, the program lets go of that record at its start:
+# a record of a server on no card of the wall any more, its doubt over and not marked queued, goes at the next start,
+# where the settings' list was read whole (the settings are there, from the program's starts before in this run); the
+# setup changes nothing of the note. Until 2026-11-21 this step wanted the note byte for byte after it all, which no start of a
+# version with the prune leaves so. A note the prune keeps, of a server on a card of the wall whose doubt is over, holding
+# no update, is asked by ui/tests/test_wall_windows.cpp's anOverrideWhoseDoubtIsOverHoldsNoUpdate through the program's
+# own wall and Setup's request: here it would need a server card and its password made by hand in this machine's
+# profile, which this suite does not make (review armp-1 L4, left for after 0.2.0).)
 $dayAgo = [DateTime]::UtcNow.AddDays(-1)
 $left = '{"version":1,"servers":[{"address":"https://127.0.0.1:9/","machine":"","since":"' + (Get-NoteTime $dayAgo) + '","doubtUntil":"' + (Get-NoteTime $dayAgo.AddMinutes(2)) + '"}]}'
 [IO.File]::WriteAllText($OverridesFile, $left, (New-Object Text.UTF8Encoding $false))
-$leftBytes = [IO.File]::ReadAllBytes($OverridesFile)
+if (-not (Test-Path -LiteralPath $SettingsFile)) { [void] $failures.Add('the program''s settings are not there: their list says nothing then of a server on no card') }
+$named19 = { (Test-Path -LiteralPath $OverridesFile) -and ([IO.File]::ReadAllText($OverridesFile)).Contains('"https://127.0.0.1:9/"') }
 $started = Start-Program
 $overId = $started.Process.Id
 if (-not $started.Up) { [void] $failures.Add('the program did not start') }
+if (-not (Wait-Until { -not (& $named19) } 10)) {
+    [void] $failures.Add('the program did not let go at its start of the record of a server on no card whose doubt was over (SetupOverrides::prune)')
+}
+$prunedBytes = if (Test-Path -LiteralPath $OverridesFile) { [IO.File]::ReadAllBytes($OverridesFile) } else { [byte[]] @() }
 Start-Sleep -Seconds 5
 $over = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '19-doubt-over')`"" 180
 if ($over.Exit -ne 0) { [void] $failures.Add("with a note whose doubt is over, the setup ended with $($over.Exit), not 0") }
@@ -1382,7 +2168,7 @@ if ((Read-Log '19-doubt-over') -match 'stays open|ended by force') { [void] $fai
 Test-StartedAgain '19-doubt-over' $failures $true
 [void] (Stop-Program)
 $nowBytes = if (Test-Path -LiteralPath $OverridesFile) { [IO.File]::ReadAllBytes($OverridesFile) } else { [byte[]] @() }
-if ([Convert]::ToBase64String($nowBytes) -cne [Convert]::ToBase64String($leftBytes)) { [void] $failures.Add('the note whose doubt was over is not what it was') }
+if ([Convert]::ToBase64String($nowBytes) -cne [Convert]::ToBase64String($prunedBytes)) { [void] $failures.Add('the setup, or the program it started again, changed the note the program had let go of that record in') }
 # (Then a change that may still come: a note whose doubt goes on for eight minutes more, as a start into BIOS setup
 # leaves it, for the same server, within the longest doubt a press notes (SetupOverrides::longestDoubtMs, ten minutes:
 # one that reaches further was noted by a clock that ran ahead, and holds nothing); held until its doubt is over.)
@@ -1773,7 +2559,1634 @@ Test-StartedAgain '28-busy-while-waiting' $failures $true
 $how = Stop-Program
 Test-Data $failures -ProgramStarted
 Write-Step '28' 'busy-while-waiting' $began $failures ([ordered]@{ run = $run; resumedAfterSeconds = $script:resumedAt28; ended = $how })
-$summary = [ordered]@{ machine = $Machine; windows = "$os"; setup = $newVersion; olderSetup = $oldVersion
+
+# --- 29 to 31 (0.2.0): the earlier version set aside for the copy, put back where the copy does not complete, and what
+# an update that did not finish left put right by the next setup first. Each from the older version installed again.
+function Get-ProgramBoxText([int] $Id) {
+    <# What a process's boxes say (each shown top-level window titled "qKVM" alone, and the texts in it); '' where it
+    shows none. #>
+    $said = New-Object System.Collections.ArrayList
+    foreach ($top in [QkvmVm]::WindowsOf([uint32] $Id)) {
+        if (-not [QkvmVm]::Answers($top) -or [QkvmVm]::TextOf($top) -cne 'qKVM') { continue }
+        foreach ($inside in [QkvmVm]::ShownInside($top)) { [void] $said.Add([QkvmVm]::TextOf($inside)) }
+    }
+    return ($said -join "`n")
+}
+function Test-ShowsAWall([int] $Id) {
+    <# Whether a process shows a window of a wall (titled "<name> - qKVM"). #>
+    foreach ($top in [QkvmVm]::WindowsOf([uint32] $Id)) { if ([QkvmVm]::TextOf($top) -like '* - qKVM') { return $true } }
+    return $false
+}
+function Push-BoxOk([int] $Id) {
+    <# The OK of a process's box pressed; whether it had one. #>
+    foreach ($top in [QkvmVm]::WindowsOf([uint32] $Id)) {
+        foreach ($button in [QkvmVm]::ButtonsOf($top)) { if ([QkvmVm]::TextOf($button).Replace('&', '') -eq 'OK') { [QkvmVm]::Click($button); return $true } }
+    }
+    return $false
+}
+# (What the program says where an update did not finish, ui/win/unfinished_update.cpp; and what the setup writes into
+# its marker, packaging/qkvm-desktop.iss.)
+$UnfinishedWords = 'An update of qKVM did not finish. Choose OK, then run the qKVM setup again: it puts the earlier version back, or finishes the update.'
+function Get-RecordText([string] $Ending, [string[]] $Asides) {
+    <# The record of what a set-aside renamed, as the setup writes it into its marker (packaging/qkvm-desktop.iss,
+    SetPackageAside; ui/win/unfinished_update.h reads it): its words, its kind, its ending, a line for each file, its end. #>
+    $lines = @("qKVM Desktop $newVersion is being installed here; the version before it is set aside beside this file.", 'qKVM Desktop set-aside record 1', "ending $Ending")
+    $lines += @($Asides | ForEach-Object { "aside $_" })
+    $lines += 'end of the record'
+    return (($lines -join "`r`n") + "`r`n")
+}
+$MarkerText = Get-RecordText $AsideEnding @('qkvm-desktop.exe', 'Qt6Core.dll')
+
+# 29: a silent upgrade whose copy fails at its very end: the program's own file, the last the copy writes, taken by this
+# test with no sharing once the copy has begun (the earlier one set aside by then), and let go of as the setup rolls
+# back. The earlier version is back whole, and starts.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '29' $failures
+[void] (Test-Installed $oldVersion $failures)
+$log = Get-Log '29-copy-fails-keeps-earlier'
+$script:held29 = $null
+$script:heldAt29 = $false
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        if (-not $script:heldAt29 -and $said.Contains('Dest filename:')) {
+            try { $script:held29 = [IO.File]::Open($Program, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:heldAt29 = $true } catch { }
+        }
+        if ($script:held29 -and $said.Contains('Rolling back changes.')) { $script:held29.Dispose(); $script:held29 = $null }
+        return $false
+    }
+} finally {
+    if ($script:held29) { $script:held29.Dispose() }
+}
+if (-not $script:heldAt29) { [void] $failures.Add('the program''s own file could not be taken during the copy') }
+if ($run.Exit -eq 0) { [void] $failures.Add('the upgrade did not fail with the program''s own file held during its copy') }
+if ((Read-Log '29-copy-fails-keeps-earlier') -notmatch 'The copy did not complete: the earlier version is whole again\.') {
+    [void] $failures.Add('the setup''s log does not say the earlier version is whole again')
+}
+Test-Earlier $older $failures
+$restarted = Start-Program
+if (-not $restarted.Up) { [void] $failures.Add('after the failed upgrade, the earlier program does not start') }
+$version = Get-Version $Program
+if ($version -ne $oldVersion) { [void] $failures.Add("after the failed upgrade the program is version $version, not $oldVersion") }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '29-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '29' 'copy-fails-keeps-earlier' $began $failures ([ordered]@{ run = $run; held = 'qkvm-desktop.exe'; version = $version; ended = $how; finish = $finish })
+
+# 30 (M3): the setup ended by force in the middle of its copy, as a power cut ends it: the update check is in the
+# program's place, and a start of qKVM there says that an update did not finish; then the next setup puts the earlier
+# version back first and installs. Then a cut later, the copy whole: the unfinished marker held by this test (no
+# sharing of its deletion) so that the setup cannot make it that of a finishing update, and the setup ended by force
+# while it tries again (its log says each try): the new version whole beside the marker and what was set aside, and a
+# start of the program itself says the same, in its own box. The setup run again puts back first, and installs.
+function Get-BoxOf([string] $File, [int] $Seconds = 30) {
+    <# A start of $File: what its box said, whether it took the program's mutex, whether it showed a wall, and how it
+    ended once OK was pressed. #>
+    $process = Start-Process -FilePath $File -WorkingDirectory $App -PassThru
+    $took = $false
+    $said = ''
+    $until = (Get-Clock) + $Seconds
+    while ((Get-Clock) -lt $until -and -not $process.HasExited) {
+        if (Test-ProgramRunning) { $took = $true }
+        $said = Get-ProgramBoxText $process.Id
+        if ($said) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    $wall = Test-ShowsAWall $process.Id
+    $ok = Push-BoxOk $process.Id
+    $exit = $null
+    if ($process.WaitForExit(15000)) { $exit = $process.ExitCode } else { Stop-ById $process.Id }
+    return [pscustomobject]@{ Said = $said; Took = ($took -or (Test-ProgramRunning)); Wall = $wall; Ok = $ok; Exit = $exit }
+}
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '30' $failures
+[void] (Test-Installed $oldVersion $failures)
+$log = Get-Log '30-power-cut-recovered'
+$run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 120 {
+    param($process, $gone)
+    $said = Read-Shared $log
+    $at = $said.IndexOf('\Qt6Core.dll')
+    return ($at -ge 0 -and $said.IndexOf('Dest filename:', $at) -ge 0) -or $gone -gt 60
+}
+if ($run.Exit -ne 'killed') { [void] $failures.Add("the setup was not ended in the middle of its copy (it ended with $($run.Exit))") }
+Start-Sleep -Seconds 2
+$cut = Get-Installed
+$notKept = @(Get-NotKept $older $cut)
+if ($notKept.Count) { [void] $failures.Add("files of the earlier version are neither there nor set aside as they were: $($notKept -join ', ')") }
+$markerLeft = Test-Path -LiteralPath $UpdateMarker
+if (-not $markerLeft) { [void] $failures.Add('there is no marker of an unfinished update beside what the copy set aside') }
+$checkThere = Test-UpdateCheckAt $Program
+if (-not $checkThere) { [void] $failures.Add("the update check of this PC's kind ($PcKind) is not in the program's place after a cut during the copy (at its name: $(Get-AtProgramName))") }
+# (What a person meets: the Start menu's entry starts the file at the program's name.)
+$checkBox = Get-BoxOf $Program
+if (-not $checkBox.Said) { [void] $failures.Add('a start after the cut showed no box') }
+elseif (-not $checkBox.Said.Contains($UnfinishedWords)) { [void] $failures.Add("the box after the cut does not say what to do: $($checkBox.Said)") }
+if ($checkBox.Wall -or $checkBox.Took) { [void] $failures.Add('a start after the cut showed a wall or took the program''s mutex') }
+if (-not $checkBox.Ok -or $checkBox.Exit -ne 1) { [void] $failures.Add("the box after the cut had no OK, or OK did not end it with 1 ($($checkBox.Exit))") }
+$afterBox = Get-Installed
+if (($cut.Files | ConvertTo-Json -Depth 4) -ne ($afterBox.Files | ConvertTo-Json -Depth 4)) { [void] $failures.Add('a start after the cut changed the program''s folder') }
+$next = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '30-next-setup')`""
+if ($next.Exit -ne 0) { [void] $failures.Add("the next setup ended with $($next.Exit)") }
+if (-not (Test-PutBackFirst (Read-Log '30-next-setup'))) { [void] $failures.Add('the next setup did not put the earlier version back first, before it set it aside again') }
+[void] (Test-Installed $newVersion $failures)
+$started = Start-Program
+if (-not $started.Up) { [void] $failures.Add('after the next setup, the new version does not start') }
+Start-Sleep -Seconds 5
+$how = @(Stop-Program)
+# (A cut after the whole copy, before it is marked finished: the marker held from the start of the copy, so that the
+# setup cannot rename it, and the setup ended while it tries again.)
+[void] (Reset-ToOlder '30b' $failures)
+$log = Get-Log '30-cut-before-finished'
+$script:hold30 = $null
+try {
+    $late = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        if (-not $script:hold30 -and $said.Contains('Dest filename:')) {
+            try { $script:hold30 = [IO.File]::Open($UpdateMarker, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) } catch { }
+        }
+        return $said.Contains('its marker could not be made that of a finishing update yet, and is tried again')
+    }
+} finally {
+    if ($script:hold30) { $script:hold30.Dispose() }
+}
+if ($late.Exit -ne 'killed') { [void] $failures.Add("the setup was not ended as it tried to mark its whole copy finished (it ended with $($late.Exit))") }
+Start-Sleep -Seconds 2
+$whole = Get-Installed
+if (-not (Test-Path -LiteralPath $UpdateMarker)) { [void] $failures.Add('the marker of an unfinished update is not there after the cut before the copy was marked finished') }
+if ((Get-Version $Program) -ne $newVersion -or (Test-AnyUpdateCheckAt $Program)) { [void] $failures.Add('the new program is not in its place after a cut once the copy was whole') }
+$ownBox = Get-BoxOf $Program
+if (-not $ownBox.Said) { [void] $failures.Add('the program showed no box beside a whole copy not marked finished') }
+elseif (-not $ownBox.Said.Contains($UnfinishedWords)) { [void] $failures.Add("the program's box does not say what to do: $($ownBox.Said)") }
+if ($ownBox.Wall -or $ownBox.Took) { [void] $failures.Add('the program showed a wall or took its mutex beside a copy not marked finished') }
+if (-not $ownBox.Ok -or $ownBox.Exit -ne 1) { [void] $failures.Add("the program's box had no OK, or OK did not end it with 1 ($($ownBox.Exit))") }
+$afterOwnBox = Get-Installed
+if (($whole.Files | ConvertTo-Json -Depth 4) -ne ($afterOwnBox.Files | ConvertTo-Json -Depth 4)) { [void] $failures.Add('the program changed its folder beside a copy not marked finished') }
+$again = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '30-setup-again')`""
+if ($again.Exit -ne 0) { [void] $failures.Add("the setup run again ended with $($again.Exit)") }
+if (-not (Test-PutBackFirst (Read-Log '30-setup-again'))) { [void] $failures.Add('the setup run again did not put back what was set aside first') }
+[void] (Test-Installed $newVersion $failures)
+$started = Start-Program
+if (-not $started.Up) { [void] $failures.Add('after the setup run again, the program does not start') }
+$how += @(Stop-Program)
+Test-Data $failures -ProgramStarted
+Write-Step '30' 'power-cut-recovered' $began $failures ([ordered]@{ run = $run; notKept = $notKept; markerLeft = $markerLeft; updateCheckInPlace = $checkThere
+    checkBox = $checkBox; next = $next; late = $late; ownBox = $ownBox; again = $again; ended = $how })
+
+# 31: a file of the earlier version that Windows will not rename (this test, as the same user, denies itself deleting
+# qt.conf and deleting in the program's folder: a rename needs either): Preparing to Install refuses, and puts back what
+# it had set aside before it.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '31' $failures
+[void] (Test-Installed $oldVersion $failures)
+$denied = Join-Path $App 'qt.conf'
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+$fileRule = New-Object System.Security.AccessControl.FileSystemAccessRule($me, [System.Security.AccessControl.FileSystemRights]::Delete, [System.Security.AccessControl.AccessControlType]::Deny)
+$folderRule = New-Object System.Security.AccessControl.FileSystemAccessRule($me, [System.Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles,
+    [System.Security.AccessControl.InheritanceFlags]::None, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Deny)
+$fileInfo = New-Object IO.FileInfo($denied)
+$folderInfo = New-Object IO.DirectoryInfo($App)
+$fileDenied = $false
+$folderDenied = $false
+$renamed = $false
+$run = $null
+try {
+    if (-not $fileInfo.Exists) { [void] $failures.Add('the earlier version has no qt.conf') }
+    else {
+        $acl = $fileInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $acl.AddAccessRule($fileRule)
+        $fileInfo.SetAccessControl($acl)
+        $fileDenied = $true
+        $acl = $folderInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+        $acl.AddAccessRule($folderRule)
+        $folderInfo.SetAccessControl($acl)
+        $folderDenied = $true
+        # (Proven to hold first: this user's own rename of it is refused.)
+        try { [IO.File]::Move($denied, "$denied.probe"); $renamed = $true; [IO.File]::Move("$denied.probe", $denied) } catch { }
+        if ($renamed) { [void] $failures.Add('qt.conf could still be renamed: the step proves nothing') }
+        $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '31-rename-refused')`"" 180
+    }
+} finally {
+    if ($folderDenied) { $acl = $folderInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); [void] $acl.RemoveAccessRuleSpecific($folderRule); $folderInfo.SetAccessControl($acl) }
+    if ($fileDenied) { $acl = $fileInfo.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access); [void] $acl.RemoveAccessRuleSpecific($fileRule); $fileInfo.SetAccessControl($acl) }
+}
+if ($null -eq $run -or $run.Exit -ne 7) { [void] $failures.Add("the setup did not refuse with 7 (it ended with $(if ($run) { $run.Exit } else { 'nothing' }))") }
+$resultLines = @(Get-ResultLines '31-rename-refused')
+if ($resultLines.Count -ne 1 -or $resultLines[0] -cne 'qKVM-RESULT: 7 nothing was changed: a file of qKVM Desktop could not be set aside for the copy (qt.conf)') {
+    [void] $failures.Add("the setup's log does not have the one result line of 7 for a file that could not be set aside ($($resultLines -join ' | '))")
+}
+Test-Earlier $older $failures
+$restarted = Start-Program
+if (-not $restarted.Up) { [void] $failures.Add('after the refused upgrade, the earlier program does not start') }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '31-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '31' 'rename-refused' $began $failures ([ordered]@{ run = $run; resultLines = $resultLines; ended = $how; finish = $finish })
+
+# --- 32 and 33 (0.2.0): one copy of an account writes its profile, in whatever Windows session it runs. The lock of the
+# file beside the settings (settings.json.running, which every start of 0.2.0 makes and locks) held here by this test,
+# as a copy of this account in another session holds it (a Windows client lets an account have one session at a time,
+# so the other session is played by the lock alone).
+$LockFile = "$SettingsFile.running"
+# 32: the uninstaller refuses as it begins, and removes nothing (it sees a copy the mutex does not show).
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$state = Test-Installed $newVersion $failures
+if (-not (Test-Path -LiteralPath $LockFile)) { [void] $failures.Add('the program made no lock file beside its settings at its starts') }
+$settingsBefore = if (Test-Path -LiteralPath $SettingsFile) { Get-Sha256 $SettingsFile } else { '' }
+$before = Get-Installed
+$holder = $null
+$run = $null
+$boxText = ''
+$boxExit = $null
+$boxShowedAWall = $false
+try {
+    $holder = [IO.File]::Open($LockFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $holder.Lock(0, 1)
+    if (Test-ProgramRunning) { [void] $failures.Add('the program runs in this session: the step needs it ended') }
+    $run = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '32-uninstall-profile-held')`"" 120
+    if ($run.Exit -eq 0) { [void] $failures.Add('the uninstaller ended with 0 while the profile''s lock was held') }
+    if ((Read-Log '32-uninstall-profile-held') -notmatch 'qKVM Desktop is running for this Windows account \(here, or in another Windows session of it\): it is not uninstalled\.') {
+        [void] $failures.Add('the uninstaller''s log does not say it refused for the profile''s lock')
+    }
+    $after = Get-Installed
+    if (($before.Files | ConvertTo-Json -Depth 4) -ne ($after.Files | ConvertTo-Json -Depth 4) -or -not $after.Entry -or -not $after.StartMenu) {
+        [void] $failures.Add('the uninstaller removed something while the profile''s lock was held')
+    }
+    Write-Step '32' 'uninstall-sees-profile-lock' $began $failures ([ordered]@{ run = $run; lockFile = $LockFile })
+
+    # 33: a start of the program while the lock is held elsewhere and no setup is at work says so in a box, shows no
+    # wall and writes nothing; OK ends it. Then, the lock let go of, the next start takes it.
+    $began = [DateTime]::UtcNow
+    $failures = New-Object System.Collections.ArrayList
+    $process = Start-Process -FilePath $Program -WorkingDirectory $App -PassThru
+    if (-not (Wait-Until { (Get-ProgramBoxText $process.Id) -ne '' } 30)) { [void] $failures.Add('the program showed no box while its profile was held elsewhere') }
+    $boxText = Get-ProgramBoxText $process.Id
+    if ($boxText -notmatch 'qKVM is already running for this Windows account, in another Windows session') { [void] $failures.Add("the box does not say a copy runs in another session: $boxText") }
+    foreach ($top in [QkvmVm]::WindowsOf([uint32] $process.Id)) { if ([QkvmVm]::TextOf($top) -like '* - qKVM') { $boxShowedAWall = $true } }
+    if ($boxShowedAWall) { [void] $failures.Add('a wall was shown beside the box') }
+    $ok = $null
+    foreach ($top in [QkvmVm]::WindowsOf([uint32] $process.Id)) {
+        foreach ($button in [QkvmVm]::ButtonsOf($top)) { if ([QkvmVm]::TextOf($button).Replace('&', '') -eq 'OK') { $ok = $button } }
+    }
+    if ($ok) { [QkvmVm]::Click($ok) } else { [void] $failures.Add('the box has no OK') }
+    if ($process.WaitForExit(15000)) { $boxExit = $process.ExitCode } else { Stop-ById $process.Id; [void] $failures.Add('the program did not end after its box') }
+    if ($null -ne $boxExit -and $boxExit -ne 0) { [void] $failures.Add("the program ended with $boxExit") }
+    $settingsAfter = if (Test-Path -LiteralPath $SettingsFile) { Get-Sha256 $SettingsFile } else { '' }
+    if ($settingsAfter -ne $settingsBefore) { [void] $failures.Add('the settings were written by a start that did not take the profile''s lock') }
+} finally {
+    if ($holder) { $holder.Dispose() }
+}
+$started = Start-Program
+if (-not $started.Up) { [void] $failures.Add('once the lock was let go of, the program did not start') }
+Start-Sleep -Seconds 5
+$taken = $false
+try { $probe = [IO.File]::Open($LockFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite); try { $probe.Lock(0, 1); $probe.Unlock(0, 1) } catch { $taken = $true } finally { $probe.Dispose() } } catch { $taken = $true }
+if (-not $taken) { [void] $failures.Add('the program that started holds no lock of its profile') }
+$how = Stop-Program
+Test-Data $failures -ProgramStarted
+Write-Step '33' 'start-while-profile-held' $began $failures ([ordered]@{ box = $boxText; exit = $boxExit; ended = $how })
+
+# --- 34 (0.2.0): the marker of an unfinished update whose record names nothing still set aside (what a cut leaves once
+# the earlier version is whole again), and files of a set-aside ending that no record names (a person's, and one of the
+# package's own name): the program starts as usual, takes the marker away, and leaves the others as they are; then a
+# setup, which never takes them for its own (H1): it upgrades over them, sets aside under the next ending, and leaves
+# them byte for byte. A marker left behind never keeps the program from starting, and a file of that ending never
+# keeps a setup from finishing.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Test-Installed $newVersion $failures)
+$strangers = @("notes.txt$AsideEnding", "Qt6Core.dll$AsideEnding")
+foreach ($stranger in $strangers) { [IO.File]::WriteAllText((Join-Path $App $stranger), "put here by test_setup_vm.ps1: $stranger") }
+$strangerSums = @{}
+foreach ($stranger in $strangers) { $strangerSums[$stranger] = Get-Sha256 (Join-Path $App $stranger) }
+# (As a put-back that went through leaves it where its marker could not be taken away: the set-aside had taken the
+# third ending, and nothing of it is there now.)
+[IO.File]::WriteAllText($UpdateMarker, (Get-RecordText ".3$AsideEnding" @('qkvm-desktop.exe', 'Qt6Core.dll')))
+$started = Start-Program
+if (-not $started.Up) { [void] $failures.Add('the program did not start beside a marker whose record names nothing still set aside') }
+Start-Sleep -Seconds 5
+$boxText = Get-ProgramBoxText $started.Process.Id
+if ($boxText) { [void] $failures.Add("the program showed a box: $boxText") }
+$markerLeft = Test-Path -LiteralPath $UpdateMarker
+if ($markerLeft) { [void] $failures.Add('the marker whose record names nothing still set aside is still there') }
+$how = Stop-Program
+foreach ($stranger in $strangers) {
+    $file = Join-Path $App $stranger
+    if (-not (Test-Path -LiteralPath $file) -or (Get-Sha256 $file) -ne $strangerSums[$stranger]) { [void] $failures.Add("$stranger, which no record names, was touched by the program") }
+}
+$run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '34-stale-marker-then-setup')`""
+if ($run.Exit -ne 0) { [void] $failures.Add("the setup ended with $($run.Exit) beside files of a set-aside ending that no record names") }
+$said = Read-Log '34-stale-marker-then-setup'
+if ($said -notmatch [regex]::Escape("What was set aside ends in .2$AsideEnding, as its record says.")) { [void] $failures.Add('the setup did not set aside under the next ending, past a file of the first that is not its own') }
+foreach ($stranger in $strangers) {
+    $file = Join-Path $App $stranger
+    if (-not (Test-Path -LiteralPath $file) -or (Get-Sha256 $file) -ne $strangerSums[$stranger]) { [void] $failures.Add("$stranger, which no record names, was touched by the setup") }
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+}
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '34' 'stale-marker' $began $failures ([ordered]@{ box = $boxText; markerLeft = $markerLeft; strangers = $strangers; run = $run; ended = $how })
+
+# --- 35 (0.2.0, M4), ONLY WITH -ListedSetup (review i020-2, M2): what the earlier version installed in this very folder
+# and this one has not, removed after the upgrade by its exact name, from that version's own list in the setup (made at
+# build time from the list of what each published version installed). The published versions share their names (0.1.0
+# to 0.2.0 do), so the setup that ships removes nothing here, and this step runs on a second setup of the same package,
+# made by hand with -PublishedFiles naming a copy of packaging/published-files.json in which the older setup's version
+# lists these as well (as the head of this test says): licenses/qkvm-vm-gone.txt, qkvm-vm-gone/a.txt,
+# qkvm-vm-gone/deep/b.txt and qkvm-vm-kept/c.txt. This test puts them in as that version would have, and a person's
+# qkvm-vm-kept/person.txt and licenses/qkvm-vm-person.txt beside them. After the upgrade: the four are gone, the folder
+# qkvm-vm-gone with them (it is emptied), qkvm-vm-kept stays with the person's file in it, and the person's licence
+# stays. Then the setup that ships installs over it again, so that the steps after it run on that setup alone.
+if (-not $ListedSetup) {
+    Write-NotRun '35' 'earlier-files-by-test-list' 'it needs -ListedSetup, the new setup made by hand with the test list (the head of this test says how); the setup that ships has no earlier version''s names to remove'
+} else {
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+if ((Get-Version $ListedSetup) -ne $newVersion) { [void] $failures.Add("-ListedSetup is version $(Get-Version $ListedSetup), not $newVersion") }
+[void] (Reset-ToOlder '35' $failures)
+[void] (Test-Installed $oldVersion $failures)
+$listed35 = @('licenses\qkvm-vm-gone.txt', 'qkvm-vm-gone\a.txt', 'qkvm-vm-gone\deep\b.txt', 'qkvm-vm-kept\c.txt')
+$persons = @('qkvm-vm-kept\person.txt', 'licenses\qkvm-vm-person.txt')
+foreach ($file in @($listed35) + @($persons)) {
+    $at = Join-Path $App $file
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $at) | Out-Null
+    Set-Content -LiteralPath $at -Value "put here by test_setup_vm.ps1: $file" -Encoding ASCII
+}
+$run = Invoke-Setup $ListedSetup "$SilentArguments /LOG=`"$(Get-Log '35-earlier-files-by-test-list')`""
+if ($run.Exit -ne 0) { [void] $failures.Add("the setup ended with $($run.Exit)") }
+$said = Read-Log '35-earlier-files-by-test-list'
+# (With the kind of Windows that install was for, as the one setup for both kinds says it (1a93912a): this PC's.)
+if ($said -notmatch [regex]::Escape("qKVM Desktop $oldVersion ($PcKind) was installed in this folder")) { [void] $failures.Add("the setup did not find the earlier version ($PcKind) installed in its own folder") }
+$gone = @($listed35 | Where-Object { -not (Test-Path -LiteralPath (Join-Path $App $_)) })
+if ($gone.Count -ne $listed35.Count) {
+    [void] $failures.Add("what the older version's list names and this one has not is still there ($(@($listed35 | Where-Object { $gone -notcontains $_ }) -join ', ')): -ListedSetup is not made with the list this step names (the head of this test)")
+}
+if (Test-Path -LiteralPath (Join-Path $App 'qkvm-vm-gone')) { [void] $failures.Add('the folder qkvm-vm-gone, which removing the older version''s files emptied, is still there') }
+$personsLeft = @($persons | Where-Object { Test-Path -LiteralPath (Join-Path $App $_) })
+if ($personsLeft.Count -ne $persons.Count) { [void] $failures.Add("a person's file beside them was removed ($(@($persons | Where-Object { $personsLeft -notcontains $_ }) -join ', '))") }
+foreach ($file in $persons) { Remove-Item -LiteralPath (Join-Path $App $file) -Force -ErrorAction SilentlyContinue }
+Remove-Item -LiteralPath (Join-Path $App 'qkvm-vm-kept') -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $App 'qkvm-vm-gone') -Recurse -Force -ErrorAction SilentlyContinue
+[void] (Test-Installed $newVersion $failures)
+# (The setup that ships over it again, for the steps after this one.)
+$shipped = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '35-shipped-again')`""
+if ($shipped.Exit -ne 0) { [void] $failures.Add("the setup that ships did not install over it again ($($shipped.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '35' 'earlier-files-by-test-list' $began $failures ([ordered]@{ listedSetup = [ordered]@{ file = Split-Path -Leaf $ListedSetup; sha256 = Get-Sha256 $ListedSetup }; run = $run; listed = $listed35; gone = $gone; personsKept = $personsLeft; shippedAgain = $shipped })
+}
+
+# --- 36 (0.2.0, H1): files of a set-aside ending beside the older version before an upgrade, which no record names (a
+# person's, and one of a name of the package's with the first ending): a silent upgrade whose copy fails at the
+# program's own file (held by this test as in 29) puts the earlier version back whole and leaves them byte for byte;
+# the silent upgrade then goes through, setting aside under the next ending, and leaves them. Nothing of that ending
+# ever wedges a setup.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '36' $failures)
+[void] (Test-Installed $oldVersion $failures)
+$strangers = @("notes.txt$AsideEnding", "Qt6Core.dll$AsideEnding", "licenses\AGPL-3.0.txt$AsideEnding")
+foreach ($stranger in $strangers) { [IO.File]::WriteAllText((Join-Path $App $stranger), "put here by test_setup_vm.ps1: $stranger") }
+$older = Get-Installed
+$log = Get-Log '36-stranger-copy-fails'
+$script:held36 = $null
+$script:heldAt36 = $false
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        if (-not $script:heldAt36 -and $said.Contains('Dest filename:')) {
+            try { $script:held36 = [IO.File]::Open($Program, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:heldAt36 = $true } catch { }
+        }
+        if ($script:held36 -and $said.Contains('Rolling back changes.')) { $script:held36.Dispose(); $script:held36 = $null }
+        return $false
+    }
+} finally {
+    if ($script:held36) { $script:held36.Dispose() }
+}
+if (-not $script:heldAt36) { [void] $failures.Add('the program''s own file could not be taken during the copy') }
+if ($run.Exit -eq 0) { [void] $failures.Add('the upgrade did not fail with the program''s own file held during its copy') }
+if ((Read-Log '36-stranger-copy-fails') -notmatch 'The copy did not complete: the earlier version is whole again\.') {
+    [void] $failures.Add('the setup''s log does not say the earlier version is whole again beside files of that ending it does not own')
+}
+# (The earlier version byte for byte, and the files of that ending among it as they were.)
+Test-Earlier $older $failures
+$restarted = Start-Program
+if (-not $restarted.Up) { [void] $failures.Add('after the failed upgrade, the earlier program does not start') }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '36-stranger-upgrade')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the upgrade over files of that ending it does not own ended with $($finish.Exit)") }
+if ((Read-Log '36-stranger-upgrade') -notmatch [regex]::Escape("What was set aside ends in .2$AsideEnding, as its record says.")) { [void] $failures.Add('the upgrade did not set aside under the next ending') }
+foreach ($stranger in $strangers) {
+    $key = $stranger.Replace('\', '/')
+    $file = Join-Path $App $stranger
+    if (-not (Test-Path -LiteralPath $file) -or (Get-Sha256 $file) -ne $older.Files[$key].sha256) { [void] $failures.Add("$stranger, which no record names, was touched by the upgrade") }
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+}
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '36' 'stranger-beside-upgrade' $began $failures ([ordered]@{ run = $run; strangers = $strangers; ended = $how; finish = $finish })
+
+# --- 37 (0.2.0, M1): a copy that went on without one of its files does not count. Interactive, driven as a person
+# would through UI Automation: the older version installed again; the upgrade, and once its copy has begun (the earlier
+# version set aside), the name of the last file before the program taken by this test with no sharing, so that the copy
+# cannot write it; Inno Setup's box offers Try again, Skip this file and Cancel installation; the name let go of, Skip
+# this file chosen, as a person may. The copy goes on to its end, and the setup finds that file not as the package has
+# it: it puts the earlier version back (every file of the package's byte for byte, nothing set aside, no marker), names
+# its version in Settings > Apps again, says why in a box, and ends with 7. The earlier program starts.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '37' $failures
+[void] (Test-Installed $oldVersion $failures)
+$manifest = Get-Content -LiteralPath (Join-Path $App 'package-manifest.json') -Raw | ConvertFrom-Json
+$names = [string[]] @($manifest.files | ForEach-Object { [string] $_.path } | Where-Object { $_ -ne 'qkvm-desktop.exe' })
+[Array]::Sort($names, [StringComparer]::Ordinal)
+$heldName37 = $names[-1]
+$log = Get-Log '37-skip-is-not-whole'
+$script:stage37 = 0
+$script:held37 = $null
+$script:shown37 = New-Object System.Collections.ArrayList
+try {
+    $run = Invoke-Setup $Setup "/LOG=`"$log`"" 600 {
+        param($process, $gone)
+        if ($gone -lt 3) { return $false }
+        switch ($script:stage37) {
+            0 { $found = Find-SetupButton $process.Id 'Next'; if ($found) { Push-SetupButton $found; $script:stage37 = 1 } }
+            1 { $found = Find-SetupButton $process.Id 'Install'; if ($found) { Push-SetupButton $found; $script:stage37 = 2 } }
+            2 {
+                if ((Read-Shared $log).Contains('Dest filename:')) {
+                    try { $script:held37 = [IO.File]::Open((Join-Path $App ($heldName37 -replace '/', '\')), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:stage37 = 3 } catch { }
+                }
+            }
+            3 {
+                $found = Find-SetupButton $process.Id 'Skip this file'
+                if ($found) {
+                    [void] $script:shown37.Add((Get-SetupText $process.Id))
+                    $script:held37.Dispose()
+                    $script:held37 = $null
+                    Push-SetupButton $found
+                    $script:stage37 = 4
+                }
+            }
+            4 {
+                $found = Find-SetupButton $process.Id 'OK'
+                if ($found) { [void] $script:shown37.Add((Get-SetupText $process.Id)); Push-SetupButton $found; $script:stage37 = 5 }
+            }
+            5 { $found = Find-SetupButton $process.Id 'Finish'; if ($found) { Push-SetupButton $found; $script:stage37 = 6 } }
+        }
+        return $false
+    }
+} finally {
+    if ($script:held37) { $script:held37.Dispose() }
+}
+if ($script:stage37 -lt 6) { [void] $failures.Add("the setup was not seen through by hand (stage $($script:stage37) of 6; it ended with $($run.Exit))") }
+if ($run.Exit -ne 7) { [void] $failures.Add("the setup ended with $($run.Exit), not 7, after a copy that skipped a file") }
+if ($script:shown37.Count -ge 2 -and $script:shown37[1] -notmatch [regex]::Escape("qKVM Desktop $newVersion was not installed: the copy was not whole (") ) {
+    [void] $failures.Add('the setup did not say that its copy was not whole')
+}
+$said = Read-Log '37-skip-is-not-whole'
+if ($said -notmatch 'The copy does not count: the copy was not whole \(' -or $said -notmatch 'The copy did not complete: the earlier version is whole again\.') {
+    [void] $failures.Add('the setup''s log does not say the copy did not count and the earlier version is whole again')
+}
+if ($said -match 'Finished an update whose copy was whole') { [void] $failures.Add('the setup removed what it had set aside after a copy that skipped a file') }
+# (The earlier version byte for byte, its version named again; the uninstaller Inno Setup wrote at the end of its copy is
+# the newer one's, which uninstalls the earlier version as well, and is not looked at.)
+$now = Get-Installed
+foreach ($path in $older.Files.Keys) {
+    if ($path -like 'unins000.*') { continue }
+    if (-not $now.Files.Contains($path)) { [void] $failures.Add("$path of the earlier version is gone") }
+    elseif ($now.Files[$path].sha256 -ne $older.Files[$path].sha256) { [void] $failures.Add("$path is not the earlier version's") }
+}
+foreach ($path in $now.Files.Keys) { if (-not $older.Files.Contains($path)) { [void] $failures.Add("$path is in the program's folder, and was not before") } }
+if (-not $now.Entry -or $now.Entry.DisplayVersion -ne $oldVersion) { [void] $failures.Add("Settings > Apps names version $(if ($now.Entry) { $now.Entry.DisplayVersion }), not the earlier $oldVersion") }
+$restarted = Start-Program
+if (-not $restarted.Up) { [void] $failures.Add('after the copy that did not count, the earlier program does not start') }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '37-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '37' 'skip-is-not-whole' $began $failures ([ordered]@{ run = $run; held = $heldName37; stage = $script:stage37; shown = @($script:shown37); ended = $how; finish = $finish })
+
+# --- 38 (0.2.0, M2, L1): what was set aside that cannot be removed after a whole copy never stops a setup. First every
+# file set aside made read-only during the copy (a rename keeps the attribute, a delete refuses it): the upgrade ends 0
+# and nothing set aside is left. Then one held open by this test with no sharing of its deletion, through the whole
+# upgrade: it ends 0, the file stays, named in the finishing marker's record; the program starts as usual beside it.
+# The next setup, with the file held still, finishes nothing of it, carries it into its own record, ends 0, and leaves
+# a finishing marker naming it; let go of, the setup after removes it first, and nothing is left.
+function Get-SetAside {
+    <# The files of the program's folder of a set-aside ending, by their names under it. #>
+    return @(Get-ChildItem -LiteralPath $App -Recurse -File -Force | Where-Object { $_.Name -like "*$AsideEnding" } | ForEach-Object { $_.FullName.Substring($App.Length + 1) })
+}
+$FinishingMarker = Join-Path $App 'qkvm-desktop.update-finishing'
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '38' $failures)
+[void] (Test-Installed $oldVersion $failures)
+$log = Get-Log '38-read-only-set-aside'
+$script:madeReadOnly38 = 0
+$run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+    param($process, $gone)
+    if ($script:madeReadOnly38 -eq 0 -and (Read-Shared $log).Contains('Dest filename:')) {
+        foreach ($name in Get-SetAside) {
+            $file = Get-Item -LiteralPath (Join-Path $App $name) -Force
+            $file.Attributes = $file.Attributes -bor [IO.FileAttributes]::ReadOnly
+            $script:madeReadOnly38++
+        }
+    }
+    return $false
+}
+if ($script:madeReadOnly38 -lt 10) { [void] $failures.Add("only $($script:madeReadOnly38) files set aside could be made read-only during the copy") }
+if ($run.Exit -ne 0) { [void] $failures.Add("the upgrade ended with $($run.Exit) over files set aside made read-only") }
+$leftReadOnly = @(Get-SetAside)
+if ($leftReadOnly.Count) { [void] $failures.Add("files set aside are left after the upgrade, though only read-only: $($leftReadOnly -join ', ')") }
+if ((Test-Path -LiteralPath $UpdateMarker) -or (Test-Path -LiteralPath $FinishingMarker)) { [void] $failures.Add('a marker is left after the upgrade over read-only files set aside') }
+[void] (Test-Installed $newVersion $failures)
+# (Then one that cannot be removed at all while it is held: the setup's delete refused for as long as this test holds it.)
+[void] (Reset-ToOlder '38b' $failures)
+$heldName38 = "Qt6Core.dll$AsideEnding"
+$held38 = Join-Path $App $heldName38
+$log = Get-Log '38-set-aside-held'
+$script:hold38 = $null
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        if (-not $script:hold38 -and (Test-Path -LiteralPath $held38)) {
+            try { $script:hold38 = [IO.File]::Open($held38, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) } catch { }
+        }
+        return $false
+    }
+    if (-not $script:hold38) { [void] $failures.Add("$heldName38 could not be held during the upgrade") }
+    if ($run.Exit -ne 0) { [void] $failures.Add("the upgrade ended with $($run.Exit) where a file it set aside could not be removed") }
+    $leftHeld = @(Get-SetAside)
+    if (($leftHeld -join '|') -ne $heldName38) { [void] $failures.Add("after the upgrade what is set aside is not the held file alone: $($leftHeld -join ', ')") }
+    if (-not (Test-Path -LiteralPath $FinishingMarker) -or -not ([IO.File]::ReadAllText($FinishingMarker)).Contains("aside Qt6Core.dll`r`n")) {
+        [void] $failures.Add('the finishing marker does not name the file set aside that could not be removed')
+    }
+    if (Test-Path -LiteralPath $UpdateMarker) { [void] $failures.Add('the marker of an unfinished update is left after a whole upgrade') }
+    $started = Start-Program
+    if (-not $started.Up) { [void] $failures.Add('the program did not start beside what a finished update could not remove') }
+    Start-Sleep -Seconds 3
+    $boxText = Get-ProgramBoxText $started.Process.Id
+    if ($boxText) { [void] $failures.Add("the program showed a box beside what a finished update could not remove: $boxText") }
+    $how = Stop-Program
+    # (The next setup, the file still held: nothing of it finished, carried into its own record, never in its way.)
+    $again = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '38-next-setup-held')`""
+    if ($again.Exit -ne 0) { [void] $failures.Add("the next setup ended with $($again.Exit) while the file left by the update before was still held") }
+    $carried = if (Test-Path -LiteralPath $FinishingMarker) { [IO.File]::ReadAllText($FinishingMarker) } else { '' }
+    if (-not $carried.Contains("left $AsideEnding Qt6Core.dll`r`n")) { [void] $failures.Add('the next setup did not carry the file it could not remove into its own record') }
+    if (@(Get-SetAside).Count -ne 1) { [void] $failures.Add("after the next setup, what is set aside is not the held file alone: $(@(Get-SetAside) -join ', ')") }
+} finally {
+    if ($script:hold38) { $script:hold38.Dispose() }
+}
+# (Let go of: the setup after removes it first.)
+$last = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '38-setup-after')`""
+if ($last.Exit -ne 0) { [void] $failures.Add("the setup after ended with $($last.Exit)") }
+if (@(Get-SetAside).Count -or (Test-Path -LiteralPath $FinishingMarker) -or (Test-Path -LiteralPath $UpdateMarker)) {
+    [void] $failures.Add("something set aside, or a marker, is left after the setup after: $(@(Get-SetAside) -join ', ')")
+}
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '38' 'set-aside-not-removable' $began $failures ([ordered]@{ run = $run; madeReadOnly = $script:madeReadOnly38; held = $heldName38; again = $again; last = $last; ended = $how })
+
+# --- 39 (0.2.0; review i020-2, M1): a first install that /DIR sends into a folder that holds what is not an install of
+# ours is refused in Preparing to Install (exit 7, the result line) before anything is closed or changed, whatever the
+# names there, and every file of that folder stays byte for byte, with nothing added: first another program's folder of
+# names no package of ours has (in plugins and qml too), then one of names the package shares (vcruntime140.dll,
+# msvcp140.dll, Qt6Core.dll, plugins\platforms\qwindows.dll), which the set-aside would have renamed and the copy written
+# over before. Nothing in Settings > Apps for either. Then a first install by /DIR into an empty folder goes on as before
+# (exit 0, the program there, no earlier version of ours found there), and its uninstall leaves nothing there. Nothing
+# installed first (the uninstaller of the program's folder run), and the new version installed in its own folder again
+# after.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$uninstalled = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '39-uninstall-first')`"" 180
+[void] (Wait-Until { -not (Test-Path -LiteralPath $App) } 30)
+if ($uninstalled.Exit -ne 0 -or (Test-Path -LiteralPath $UserKey)) { [void] $failures.Add("qKVM Desktop could not be uninstalled first ($($uninstalled.Exit))") }
+function Get-FolderSums([string] $Folder) {
+    <# Every file under $Folder, by its path within it, with its SHA-256; and every folder within it, by its path. #>
+    $sums = [ordered]@{}
+    if (Test-Path -LiteralPath $Folder) {
+        foreach ($item in @(Get-ChildItem -LiteralPath $Folder -Recurse -Force | Sort-Object FullName)) {
+            $sums[$item.FullName.Substring($Folder.Length + 1)] = $(if ($item.PSIsContainer) { 'folder' } else { Get-Sha256 $item.FullName })
+        }
+    }
+    return $sums
+}
+$refused39 = New-Object System.Collections.ArrayList
+$kinds39 = @(
+    [ordered]@{ Name = 'foreign-names'; Files = @('plugins\platforms\foreign.dll', 'qml\Foreign\qmldir', 'foreign.exe') },
+    [ordered]@{ Name = 'shared-names'; Files = @('vcruntime140.dll', 'msvcp140.dll', 'Qt6Core.dll', 'plugins\platforms\qwindows.dll') })
+foreach ($kind in $kinds39) {
+    $foreign = Join-Path $Local "qkvm-vm-$($kind.Name)"
+    foreach ($file in $kind.Files) {
+        $at = Join-Path $foreign $file
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $at) | Out-Null
+        Set-Content -LiteralPath $at -Value "another program's, put here by test_setup_vm.ps1: $file" -Encoding ASCII
+    }
+    $before = Get-FolderSums $foreign
+    $logName = "39-dir-into-$($kind.Name)"
+    $run = Invoke-Setup $Setup "$SilentArguments /DIR=`"$foreign`" /LOG=`"$(Get-Log $logName)`"" 180
+    $lines = @(Get-ResultLines $logName)
+    if ($run.Exit -ne 7) { [void] $failures.Add("the install into another program's folder ($($kind.Name)) did not refuse with 7 (it ended with $($run.Exit))") }
+    if ($lines.Count -ne 1 -or $lines[0] -cnotmatch '\AqKVM-RESULT: 7 nothing was changed: the folder .+ holds what is not an install of qKVM Desktop \(.+\): qKVM Desktop is installed only into a folder of its own, or an empty one\z') {
+        [void] $failures.Add("the setup's log does not have the one result line of 7 for another program's folder ($($kind.Name): $($lines -join ' | '))")
+    }
+    $after = Get-FolderSums $foreign
+    if (($before | ConvertTo-Json) -cne ($after | ConvertTo-Json)) {
+        [void] $failures.Add("another program's folder ($($kind.Name)) is not as it was: $(@($after.Keys) -join ', ')")
+    }
+    if (Test-Path -LiteralPath $UserKey) { [void] $failures.Add("the refused install ($($kind.Name)) left an entry in Settings > Apps") }
+    if (Test-Path -LiteralPath $StartMenuEntry) { [void] $failures.Add("the refused install ($($kind.Name)) left a Start menu entry") }
+    [void] $refused39.Add([ordered]@{ kind = $kind.Name; run = $run; resultLines = $lines; files = @($kind.Files) })
+    Remove-Item -LiteralPath $foreign -Recurse -Force -ErrorAction SilentlyContinue
+}
+# (An empty folder by /DIR: a first install there, as before.)
+$empty = Join-Path $Local 'qkvm-vm-empty'
+New-Item -ItemType Directory -Force -Path $empty | Out-Null
+$run = Invoke-Setup $Setup "$SilentArguments /DIR=`"$empty`" /LOG=`"$(Get-Log '39-dir-into-empty')`""
+if ($run.Exit -ne 0) { [void] $failures.Add("the install into an empty folder ended with $($run.Exit)") }
+if (-not (Test-Path -LiteralPath (Join-Path $empty 'qkvm-desktop.exe'))) { [void] $failures.Add('the install did not go into the empty folder /DIR named') }
+if ((Read-Log '39-dir-into-empty') -match 'was installed in this folder') { [void] $failures.Add('the setup took an empty folder for one where qKVM was installed') }
+$removed = Invoke-Setup (Join-Path $empty 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '39-uninstall-empty')`"" 180
+if ($removed.Exit -ne 0) { [void] $failures.Add("the uninstall from that folder ended with $($removed.Exit)") }
+# (Until the uninstaller has removed itself: Inno Setup's second phase waits for its first process to end, then half a
+# second, then deletes unins000.exe (Setup.Uninstall.pas, DeleteUninstallDataFiles), so that it is still there as that
+# process ends. b5235009 looked at the folder then. And until the folder is gone or empty: a file whose delete is still
+# pending is listed, and its sum cannot be read; what is left after the wait is judged below.)
+[void] (Wait-Until { -not (Test-Path -LiteralPath $empty) -or -not @(Get-ChildItem -LiteralPath $empty -Recurse -Force).Count } 30)
+$leftInEmpty = @((Get-FolderSums $empty).Keys)
+if ($leftInEmpty.Count) { [void] $failures.Add("the uninstall left in that folder: $($leftInEmpty -join ', ')") }
+Remove-Item -LiteralPath $empty -Recurse -Force -ErrorAction SilentlyContinue
+$again = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '39-install-again')`""
+if ($again.Exit -ne 0) { [void] $failures.Add("the new version did not install in its own folder again ($($again.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '39' 'dir-into-foreign-folder' $began $failures ([ordered]@{ uninstalled = $uninstalled; refused = @($refused39); intoEmpty = $run; removed = $removed; again = $again })
+
+# --- 40 (0.2.0, M3): a cut while what was set aside is removed after a whole copy marked finished. Three files set
+# aside held by this test (no sharing of their deletion) from the start of the copy, so that the removal stalls on them
+# (each tried again for half a second), and the setup ended by force once its log says the first could not be removed:
+# the finishing marker is left with what was set aside not yet removed, beside the new version whole; the program starts
+# as usual (no box); let go of, the next setup removes the rest first (its log says so), installs, and nothing set
+# aside or marked is left. Tried up to three times, as the cut must come within those moments.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$FinishingMarker40 = Join-Path $App 'qkvm-desktop.update-finishing'
+$held40 = @("Qt6Core.dll$AsideEnding", "Qt6Gui.dll$AsideEnding", "Qt6Network.dll$AsideEnding")
+$cutDuring = $false
+$tries40 = 0
+while (-not $cutDuring -and $tries40 -lt 3) {
+    $tries40++
+    [void] (Reset-ToOlder "40-$tries40" $failures)
+    $log = Get-Log "40-cut-during-finishing-$tries40"
+    $script:holds40 = New-Object System.Collections.ArrayList
+    try {
+        $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+            param($process, $gone)
+            if ($script:holds40.Count -eq 0 -and (Read-Shared $log).Contains('Dest filename:')) {
+                foreach ($name in $held40) {
+                    try { [void] $script:holds40.Add([IO.File]::Open((Join-Path $App $name), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)) } catch { }
+                }
+            }
+            # (The first of them refused for its half second: the copy is marked finished, and the removal under way.)
+            return (Read-Shared $log).Contains("Could not remove yet what an update set aside: Qt6Core.dll$AsideEnding")
+        }
+    } finally {
+        foreach ($hold in $script:holds40) { $hold.Dispose() }
+    }
+    $cutDuring = $run.Exit -eq 'killed' -and (Test-Path -LiteralPath $FinishingMarker40) -and @(Get-ChildItem -LiteralPath $App -Recurse -File -Force | Where-Object { $_.Name -like "*$AsideEnding" }).Count -gt 0
+    if (-not $cutDuring) { Start-Sleep -Seconds 2; [void] (Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log "40-tidy-$tries40")`"") }
+}
+if (-not $cutDuring) { [void] $failures.Add("the setup could not be cut while it removed what was set aside, in $tries40 tries") }
+else {
+    if (Test-Path -LiteralPath $UpdateMarker) { [void] $failures.Add('the marker of an unfinished update is there after a cut during the finishing removal') }
+    if ((Get-Version $Program) -ne $newVersion) { [void] $failures.Add('the new version is not in its place after a cut during the finishing removal') }
+    $started = Start-Program
+    if (-not $started.Up) { [void] $failures.Add('the program did not start after a cut during the finishing removal') }
+    Start-Sleep -Seconds 3
+    $boxText = Get-ProgramBoxText $started.Process.Id
+    if ($boxText) { [void] $failures.Add("the program showed a box after a cut during the finishing removal: $boxText") }
+    $how = Stop-Program
+    $next = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '40-next-setup')`""
+    if ($next.Exit -ne 0) { [void] $failures.Add("the next setup ended with $($next.Exit)") }
+    $said = Read-Log '40-next-setup'
+    $finishedFirst = $said.IndexOf('Finished an update whose copy was whole')
+    $asideAgain = $said.IndexOf('Set the earlier version aside for the copy')
+    if ($finishedFirst -lt 0 -or $asideAgain -lt 0 -or $finishedFirst -gt $asideAgain) { [void] $failures.Add('the next setup did not finish the earlier update first, before it set aside again') }
+    if (@(Get-ChildItem -LiteralPath $App -Recurse -File -Force | Where-Object { $_.Name -like "*$AsideEnding" }).Count -or (Test-Path -LiteralPath $FinishingMarker40) -or (Test-Path -LiteralPath $UpdateMarker)) {
+        [void] $failures.Add('something set aside, or a marker, is left after the next setup')
+    }
+}
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '40' 'cut-during-finishing' $began $failures ([ordered]@{ tries = $tries40; cutDuring = $cutDuring; run = $run })
+
+# --- 41 (0.2.0, L4): what an update that did not finish left, put back by a setup that then refuses as older than the
+# version Settings > Apps names. The older version again, the upgrade cut in the middle of its copy (as 30), and
+# Settings > Apps' entry made to name a version above this setup's (9.9.9, as a later version's would): the setup run
+# then puts the earlier version back first, as every setup does before its refusal of an older version, and then
+# refuses; its words say that it put the earlier version back and changed nothing else, never that nothing was changed;
+# the folder is the earlier version byte for byte. The entry put back as it was, the setup then installs.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '41' $failures
+$log = Get-Log '41-cut'
+$run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 120 {
+    param($process, $gone)
+    $said = Read-Shared $log
+    $at = $said.IndexOf('\Qt6Core.dll')
+    return ($at -ge 0 -and $said.IndexOf('Dest filename:', $at) -ge 0) -or $gone -gt 60
+}
+if ($run.Exit -ne 'killed') { [void] $failures.Add("the setup was not ended in the middle of its copy (it ended with $($run.Exit))") }
+Start-Sleep -Seconds 2
+$named41 = (Get-ItemProperty -LiteralPath $UserKey).DisplayVersion
+Set-ItemProperty -LiteralPath $UserKey -Name DisplayVersion -Value '9.9.9'
+try {
+    $refused = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '41-put-back-then-refused')`"" 120
+} finally {
+    Set-ItemProperty -LiteralPath $UserKey -Name DisplayVersion -Value $named41
+}
+if ($refused.Exit -eq 0) { [void] $failures.Add('the setup did not refuse beside a later version named in Settings > Apps') }
+$said = Read-Log '41-put-back-then-refused'
+$back = $said.IndexOf('Put the earlier version back, which an update that did not finish had set aside')
+$refusal = $said.IndexOf("qKVM Desktop 9.9.9 is installed, newer than this setup's $newVersion. First, this setup put back the earlier version, which an update that did not finish had set aside; nothing else was changed.")
+if ($back -lt 0 -or $refusal -lt 0 -or $back -gt $refusal) { [void] $failures.Add('the setup did not put the earlier version back first and then say so in its refusal') }
+if ($said.Contains("$newVersion. Nothing was changed.")) { [void] $failures.Add('the refusal after a put-back says that nothing was changed') }
+# (The earlier version byte for byte; the entry is the one this test put back.)
+Test-Earlier $older $failures
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '41-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '41' 'put-back-then-refused' $began $failures ([ordered]@{ run = $run; refused = $refused; namedBefore = $named41; finish = $finish })
+
+# --- 42 (0.2.0; outside review 1.1): a record of what an update set aside, put in another program's folder, is never
+# acted on: whether the folder is one of the setup's own is decided before any record is. Nothing installed first (the
+# uninstaller of the program's folder run). A folder of another program's holds a file of a name the package shares
+# (Qt6Core.dll), a file of its own (foreign.exe), its own Qt6Core.dll.old-update, and beside them the marker of an
+# unfinished update whose record, one the setup can read, names Qt6Core.dll as set aside and as what the copy writes. A
+# silent setup told /DIR that folder does not begin (not 0), its log has the one result line of 7 saying that the folder
+# holds what is not an install of qKVM Desktop, every file of that folder is byte for byte what it was, nothing added,
+# and nothing is in Settings > Apps. The new version is then installed in its own folder again.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$uninstalled42 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '42-uninstall-first')`"" 180
+[void] (Wait-Until { -not (Test-Path -LiteralPath $App) } 30)
+if ($uninstalled42.Exit -ne 0 -or (Test-Path -LiteralPath $UserKey)) { [void] $failures.Add("qKVM Desktop could not be uninstalled first ($($uninstalled42.Exit))") }
+$foreign42 = Join-Path $Local 'qkvm-vm-planted-record'
+$files42 = [ordered]@{
+    'Qt6Core.dll' = "another program's Qt6Core.dll, put here by test_setup_vm.ps1"
+    "Qt6Core.dll$AsideEnding" = "another program's Qt6Core.dll$AsideEnding, put here by test_setup_vm.ps1"
+    'foreign.exe' = "another program's foreign.exe, put here by test_setup_vm.ps1"
+    'qkvm-desktop.update-unfinished' = "words`r`nqKVM Desktop set-aside record 1`r`nending $AsideEnding`r`naside Qt6Core.dll`r`ncopy Qt6Core.dll`r`ncopy qkvm-desktop.exe`r`nend of the record`r`n" }
+New-Item -ItemType Directory -Force -Path $foreign42 | Out-Null
+foreach ($name in $files42.Keys) { [IO.File]::WriteAllText((Join-Path $foreign42 $name), $files42[$name]) }
+$before42 = Get-FolderSums $foreign42
+$run = Invoke-Setup $Setup "$SilentArguments /DIR=`"$foreign42`" /LOG=`"$(Get-Log '42-dir-into-planted-record')`"" 180
+$lines42 = @(Get-ResultLines '42-dir-into-planted-record')
+if ($run.Exit -eq 0 -or $run.Exit -eq 'killed') { [void] $failures.Add("the setup into another program's folder with a record in it did not refuse (it ended with $($run.Exit))") }
+if ($lines42.Count -ne 1 -or $lines42[0] -cnotmatch '\AqKVM-RESULT: 7 nothing was changed: an update that did not finish left what this setup cannot put right: the folder .+ holds what is not an install of qKVM Desktop \(.+\): qKVM Desktop is installed only into a folder of its own, or an empty one\z') {
+    [void] $failures.Add("the setup's log does not have the one result line of 7 for a record in another program's folder: $($lines42 -join ' | ')")
+}
+$after42 = Get-FolderSums $foreign42
+if (($before42 | ConvertTo-Json) -cne ($after42 | ConvertTo-Json)) { [void] $failures.Add("another program's folder with a record in it is not as it was: $(@($after42.Keys) -join ', ')") }
+if (Test-Path -LiteralPath $UserKey) { [void] $failures.Add('the refused setup left an entry in Settings > Apps') }
+Remove-Item -LiteralPath $foreign42 -Recurse -Force -ErrorAction SilentlyContinue
+$again42 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '42-install-again')`""
+if ($again42.Exit -ne 0) { [void] $failures.Add("the new version did not install in its own folder again ($($again42.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '42' 'record-in-foreign-folder' $began $failures ([ordered]@{ uninstalled = $uninstalled42; run = $run; resultLines = $lines42; again = $again42 })
+
+# --- 43 (0.2.0; outside review 1.8): what an uninstall could not remove of what an update had set aside never keeps a
+# later setup out of qKVM's own folder. The older version again, then the upgrade with Qt6Core.dll.old-update held by
+# this test (no sharing of its deletion), as 38: it ends 0, and that file stays, named in the finishing marker. Then the
+# uninstall with the file still held: it ends 0, and the program's folder keeps that file and the finishing marker alone
+# (no file of the package's). Let go of, the new setup, silent, into the program's own folder, which holds no install of
+# ours now: it ends 0, its log says it removed what an uninstall had left of what an update set aside, nothing set aside
+# and no marker is left, and the new version is installed whole.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '43' $failures)
+$held43 = Join-Path $App "Qt6Core.dll$AsideEnding"
+$script:hold43 = $null
+$left43 = @()
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '43-upgrade-held')`"" 300 {
+        param($process, $gone)
+        if (-not $script:hold43 -and (Test-Path -LiteralPath $held43)) {
+            try { $script:hold43 = [IO.File]::Open($held43, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read) } catch { }
+        }
+        return $false
+    }
+    if (-not $script:hold43) { [void] $failures.Add("Qt6Core.dll$AsideEnding could not be held during the upgrade") }
+    if ($run.Exit -ne 0) { [void] $failures.Add("the upgrade ended with $($run.Exit) where a file it set aside could not be removed") }
+    $removed43 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '43-uninstall-held')`"" 180
+    if ($removed43.Exit -ne 0) { [void] $failures.Add("the uninstall ended with $($removed43.Exit) where a file an update set aside was held") }
+    # (Until the uninstaller has removed itself, after its first process has ended, as in 39: 02dd349d looked before.
+    # And until the folder holds what it should, the two below: a file whose delete is still pending is listed. What it
+    # holds after the wait is judged.)
+    # (The two it should leave, sorted as the list read of the folder is: 02dd349d wrote them in an order of their own,
+    # which unins000.exe, still there as the step looked, hid.)
+    $list43 = { @(if (Test-Path -LiteralPath $App) { Get-ChildItem -LiteralPath $App -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($App.Length + 1) } | Sort-Object }) }
+    $expected43 = @(@("Qt6Core.dll$AsideEnding", 'qkvm-desktop.update-finishing') | Sort-Object) -join '|'
+    [void] (Wait-Until { (@(& $list43) -join '|') -ceq $expected43 } 30)
+    $left43 = @(& $list43)
+    if (($left43 -join '|') -cne $expected43) {
+        [void] $failures.Add("the uninstall did not leave the held file and the finishing marker alone: $($left43 -join ', ')")
+    }
+} finally {
+    if ($script:hold43) { $script:hold43.Dispose() }
+}
+$after43 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '43-setup-after-uninstall')`""
+if ($after43.Exit -ne 0) { [void] $failures.Add("the setup after the uninstall ended with $($after43.Exit) in qKVM's own folder") }
+if (-not (Read-Log '43-setup-after-uninstall').Contains('The folder holds no install of qKVM Desktop, only what a setup of it left: what the records name is removed, and nothing is put back.')) {
+    [void] $failures.Add('the setup after the uninstall did not say it removed what the uninstall had left')
+}
+if (@(Get-SetAside).Count -or (Test-Path -LiteralPath $FinishingMarker) -or (Test-Path -LiteralPath $UpdateMarker)) {
+    [void] $failures.Add("something set aside, or a marker, is left after the setup after the uninstall: $(@(Get-SetAside) -join ', ')")
+}
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '43' 'uninstall-left-aside' $began $failures ([ordered]@{ run = $run; leftByTheUninstall = $left43; after = $after43 })
+
+# --- 44 (0.2.0; outside review 1.2): only into a folder that this Windows account and Windows itself alone may change.
+# Nothing installed first. A silent setup told /DIR each of: an empty folder to which this test (its owner) gave the
+# users of this PC the right to change it; a folder not made yet below one to which it gave them that right, for what is
+# made in it; two folders not made yet, each below one to which it gave them a right for its files alone, (OI) without
+# (CI): Modify on "files only" ((OI)(IO)), and Write on "this folder and files", which lets them remove neither that
+# folder nor what is in it (Windows gives a new folder there that entry for its own files, and each folder below it the
+# same, so that every file installed would be theirs to change; outside review 2, 1.2. Modify on "this folder and
+# files" was refused before it, as it lets them remove the folder above, for which every folder above is judged); and a
+# junction that leads to an empty folder. Each is refused (exit 7) with the one result line of 7 that says why (another account may change it; or
+# a redirection), before anything is changed: nothing is in Settings > Apps, nothing is added to the folder, the folder
+# not made yet is still not there, and the folder's own rights are as this test left them. (A case that installs all the
+# same is uninstalled again, so that the cases and steps after it begin as they should.) Then the new version is
+# installed in its own folder again, which passes as every other step shows.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$uninstalled44 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '44-uninstall-first')`"" 180
+[void] (Wait-Until { -not (Test-Path -LiteralPath $App) } 30)
+if ($uninstalled44.Exit -ne 0 -or (Test-Path -LiteralPath $UserKey)) { [void] $failures.Add("qKVM Desktop could not be uninstalled first ($($uninstalled44.Exit))") }
+$shared44 = Join-Path $Local 'qkvm-vm-shared'
+$sharedParent44 = Join-Path $Local 'qkvm-vm-shared-parent'
+$filesParent44 = Join-Path $Local 'qkvm-vm-shared-files-parent'
+$writeParent44 = Join-Path $Local 'qkvm-vm-shared-write-parent'
+$target44 = Join-Path $Local 'qkvm-vm-junction-target'
+$junction44 = Join-Path $Local 'qkvm-vm-junction'
+foreach ($folder in $shared44, $sharedParent44, $filesParent44, $writeParent44, $target44) { New-Item -ItemType Directory -Force -Path $folder | Out-Null }
+# (The users of this PC, by their SID, may change the folder and what is made in it: as an administrator's /DIR may name.
+# And, for the next two, the files made in them alone.)
+& icacls.exe $shared44 /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+& icacls.exe $sharedParent44 /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+& icacls.exe $filesParent44 /grant '*S-1-5-32-545:(OI)(IO)M' | Out-Null
+& icacls.exe $writeParent44 /grant '*S-1-5-32-545:(OI)W' | Out-Null
+& cmd.exe /c mklink /J "$junction44" "$target44" | Out-Null
+$cases44 = @(
+    [ordered]@{ Name = 'shared'; Dir = $shared44; Want = 'is not one that this Windows account and Windows itself alone may change \(the users of this PC \(BU\) may change ' },
+    [ordered]@{ Name = 'below-shared'; Dir = (Join-Path $sharedParent44 'qKVM Desktop'); Want = 'is not one that this Windows account and Windows itself alone may change \(the users of this PC \(BU\) may change ' },
+    [ordered]@{ Name = 'below-shared-files'; Dir = (Join-Path $filesParent44 'qKVM Desktop'); Want = 'is not one that this Windows account and Windows itself alone may change \(the users of this PC \(BU\) may change ' },
+    [ordered]@{ Name = 'below-shared-write'; Dir = (Join-Path $writeParent44 'qKVM Desktop'); Want = 'is not one that this Windows account and Windows itself alone may change \(the users of this PC \(BU\) may change ' },
+    [ordered]@{ Name = 'junction'; Dir = $junction44; Want = 'is a redirection \(a junction or a link\)' })
+$refused44 = New-Object System.Collections.ArrayList
+foreach ($case in $cases44) {
+    # (Its rights only where it is there: icacls on a folder not made yet writes to its error stream, which Windows
+    # PowerShell 5.1 turns into an exception under Stop, and the suite ended here, 2026-11-21.)
+    $rightsBefore = if (Test-Path -LiteralPath $case.Dir) { (& icacls.exe $case.Dir 2>$null) -join "`n" } else { '' }
+    $logName = "44-dir-$($case.Name)"
+    $run = Invoke-Setup $Setup "$SilentArguments /DIR=`"$($case.Dir)`" /LOG=`"$(Get-Log $logName)`"" 180
+    $lines = @(Get-ResultLines $logName)
+    if ($run.Exit -ne 7) { [void] $failures.Add("the install into $($case.Name) did not refuse with 7 (it ended with $($run.Exit))") }
+    if ($lines.Count -ne 1 -or $lines[0] -cnotmatch "\AqKVM-RESULT: 7 nothing was changed: the folder .+ $($case.Want).*\z") {
+        [void] $failures.Add("the setup's log does not have the one result line of 7 for $($case.Name): $($lines -join ' | ')")
+    }
+    if (Test-Path -LiteralPath $UserKey) {
+        [void] $failures.Add("the refused install into $($case.Name) left an entry in Settings > Apps")
+        # (Installed all the same: uninstalled from where it went, so that what follows begins with nothing installed.)
+        $went = [string] (Get-ItemProperty -LiteralPath $UserKey).InstallLocation
+        if ($went) {
+            [void] (Invoke-Setup (Join-Path $went 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log "$logName-uninstall")`"" 180)
+            # (Until the folder is gone or empty, not only its uninstaller: the looks below are at that folder.)
+            [void] (Wait-Until { -not (Test-Path -LiteralPath $went) -or -not @(Get-ChildItem -LiteralPath $went -Recurse -Force).Count } 30)
+        }
+    }
+    if ($case.Name -like 'below-shared*') {
+        if (Test-Path -LiteralPath $case.Dir) { [void] $failures.Add("the refused install made its folder below the shared one ($($case.Name))") }
+    } else {
+        $inside = @(Get-ChildItem -LiteralPath $case.Dir -Force -ErrorAction SilentlyContinue)
+        if ($inside.Count) { [void] $failures.Add("the refused install put something in $($case.Name): $(@($inside | ForEach-Object Name) -join ', ')") }
+        if (((& icacls.exe $case.Dir 2>$null) -join "`n") -cne $rightsBefore) { [void] $failures.Add("the refused install changed the rights of $($case.Name)") }
+    }
+    [void] $refused44.Add([ordered]@{ case = $case.Name; run = $run; resultLines = $lines })
+}
+& cmd.exe /c rmdir "$junction44" | Out-Null
+foreach ($folder in $shared44, $sharedParent44, $filesParent44, $writeParent44, $target44) { Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue }
+$again44 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '44-install-again')`""
+if ($again44.Exit -ne 0) { [void] $failures.Add("the new version did not install in its own folder again ($($again44.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '44' 'folder-others-may-change' $began $failures ([ordered]@{ uninstalled = $uninstalled44; refused = @($refused44); again = $again44 })
+
+# --- 45 (0.2.0; outside review 1.3): one setup or uninstall at a time for the Windows account, in whatever session. This
+# test holds the account's gate (Global\qKVM-Desktop-Setup-Account-<its SID>, owned) as a setup at work in another Windows
+# session of the account holds it. A silent setup then does not begin (not 0) within a few seconds, with the one result
+# line of 7 saying another setup or uninstall is at work for this account, and the uninstaller does not begin either
+# (not 0); the new version is still installed byte for byte. Let go of, the setup ends 0, and the uninstaller would too
+# (step 46 runs it).
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$Sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$GateName = "Global\qKVM-Desktop-Setup-Account-$Sid"
+$before45 = Get-Installed
+$made45 = $false
+$gate45 = New-Object System.Threading.Mutex($true, $GateName, [ref] $made45)
+try {
+    if (-not $made45) { [void] $failures.Add('the account''s gate was there already before this test took it') }
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '45-setup-while-gate-held')`"" 120
+    $lines45 = @(Get-ResultLines '45-setup-while-gate-held')
+    if ($run.Exit -eq 0 -or $run.Exit -eq 'killed' -or $run.Exit -eq 'timeout') { [void] $failures.Add("the setup did not refuse while another held the account's gate (it ended with $($run.Exit))") }
+    if ($run.Seconds -gt 30) { [void] $failures.Add("the setup took $($run.Seconds) s to refuse, not a few") }
+    if ($lines45.Count -ne 1 -or $lines45[0] -cne 'qKVM-RESULT: 7 nothing was changed: another setup or uninstall of qKVM Desktop is at work for this Windows account, here or in another Windows session of it') {
+        [void] $failures.Add("the setup's log does not have the one result line of 7 for the account's gate held: $($lines45 -join ' | ')")
+    }
+    $removed45 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '45-uninstall-while-gate-held')`"" 120
+    if ($removed45.Exit -eq 0) { [void] $failures.Add('the uninstaller did not refuse while another held the account''s gate') }
+    if (-not (Read-Log '45-uninstall-while-gate-held').Contains('another setup or uninstall of qKVM Desktop is at work for this Windows account')) { [void] $failures.Add('the uninstaller''s log does not say why it did not begin') }
+    Test-Earlier $before45 $failures
+} finally {
+    $gate45.ReleaseMutex()
+    $gate45.Dispose()
+}
+$after45 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '45-setup-after')`""
+if ($after45.Exit -ne 0) { [void] $failures.Add("the setup ended with $($after45.Exit) once the account's gate was let go of") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '45' 'account-gate' $began $failures ([ordered]@{ gate = $GateName; run = $run; resultLines = $lines45; uninstall = $removed45; after = $after45 })
+
+# --- 46 (0.2.0; outside review 1.3): an uninstall before qKVM has ever run for the account holds the lock of its
+# profile all the same. The program not running and its lock file settings.json.running taken away, as before a first
+# start of 0.2.0: during the uninstall this test finds the lock held (it tries to take it every quarter of a second, and
+# lets go at once), the uninstall ends 0 and says it removed the lock it had made, the file is not there afterwards, and
+# the program's data is as it was. Then the new version is installed again.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$LockFile46 = Join-Path $Local 'QKVM Desktop\settings.json.running'
+$how = Stop-Program
+Remove-Item -LiteralPath $LockFile46 -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $LockFile46) { [void] $failures.Add('the lock file could not be taken away first') }
+$script:seenHeld46 = 0
+# (Looked at every 10 ms from beside, while the uninstall runs: it holds the lock for as long as it works, about a
+# quarter of a second on a test VM, which a look every quarter of a second missed (9b470a8c). A read of the file's
+# first byte, which the lock refuses, never a lock of this test's own, which could stand in the uninstall's way.)
+$stop46 = New-Object System.Threading.ManualResetEvent($false)
+$probe46 = [PowerShell]::Create()
+[void] $probe46.AddScript({
+        param([string] $Path, [System.Threading.ManualResetEvent] $Stop)
+        $seen = 0
+        while (-not $Stop.WaitOne(10)) {
+            if ([IO.File]::Exists($Path)) {
+                try {
+                    $file = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare] ([int] [IO.FileShare]::ReadWrite -bor [int] [IO.FileShare]::Delete))
+                    try { $one = New-Object byte[] 1; [void] $file.Read($one, 0, 1) } catch [System.IO.IOException] { $seen++ } finally { $file.Dispose() }
+                } catch { }
+            }
+        }
+        $seen
+    }).AddArgument($LockFile46).AddArgument($stop46)
+$looking46 = $probe46.BeginInvoke()
+try {
+    $removed46 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '46-uninstall-before-first-start')`"" 180
+} finally {
+    [void] $stop46.Set()
+    $script:seenHeld46 = [int] (@($probe46.EndInvoke($looking46)) | Select-Object -Last 1)
+    $probe46.Dispose()
+    $stop46.Dispose()
+}
+[void] (Wait-Until { -not (Test-Path -LiteralPath $App) } 30)
+if ($removed46.Exit -ne 0) { [void] $failures.Add("the uninstall ended with $($removed46.Exit)") }
+if ($script:seenHeld46 -lt 1) { [void] $failures.Add('the lock of the profile was never seen held during the uninstall') }
+if (-not (Read-Log '46-uninstall-before-first-start').Contains('Removed the lock of the profile, which this uninstall had made')) { [void] $failures.Add('the uninstall did not say it removed the lock it had made') }
+if (Test-Path -LiteralPath $LockFile46) { [void] $failures.Add('the uninstall left the lock it had made') }
+Test-Data $failures
+$again46 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '46-install-again')`""
+if ($again46.Exit -ne 0) { [void] $failures.Add("the new version did not install again ($($again46.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Write-Step '46' 'uninstall-before-first-start' $began $failures ([ordered]@{ seenHeld = $script:seenHeld46; uninstall = $removed46; again = $again46; ended = $how })
+
+# --- 47 (0.2.0; outside review 1.4): a start of the program takes away a stale marker of an update only while it holds the
+# account's gate. A marker beside the new version whose record names Qt6Core.dll as set aside, with no such file beside
+# it (what a setup that has just written its record, and renamed nothing yet, has there); this test holds the account's
+# gate as that setup does. The program starts as usual (no box), and the marker is still there. The gate let go of, the
+# next start takes the marker away.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$record47 = "qKVM Desktop $newVersion is being installed here; the version before it is set aside beside this file.`r`nqKVM Desktop set-aside record 1`r`nending $AsideEnding`r`naside Qt6Core.dll`r`ncopy Qt6Core.dll`r`nend of the record`r`n"
+[IO.File]::WriteAllText($UpdateMarker, $record47)
+$made47 = $false
+$gate47 = New-Object System.Threading.Mutex($true, $GateName, [ref] $made47)
+try {
+    $started = Start-Program
+    if (-not $started.Up) { [void] $failures.Add('the program did not start beside a stale marker while the account''s gate was held') }
+    Start-Sleep -Seconds 3
+    $boxText = Get-ProgramBoxText $started.Process.Id
+    if ($boxText) { [void] $failures.Add("the program showed a box: $boxText") }
+    if (-not (Test-Path -LiteralPath $UpdateMarker)) { [void] $failures.Add('the program took the marker away while the account''s gate was held') }
+    $how = Stop-Program
+} finally {
+    $gate47.ReleaseMutex()
+    $gate47.Dispose()
+}
+$again47 = Start-Program
+if (-not $again47.Up) { [void] $failures.Add('the program did not start once the account''s gate was let go of') }
+[void] (Wait-Until { -not (Test-Path -LiteralPath $UpdateMarker) } 15)
+if (Test-Path -LiteralPath $UpdateMarker) { [void] $failures.Add('the program did not take the stale marker away once the account''s gate was free') }
+$how = Stop-Program
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '47' 'stale-marker-while-gate-held' $began $failures ([ordered]@{ gate = $GateName; heldRun = $started.Up; box = $boxText; ended = $how })
+
+# --- 48 (0.2.0; outside review 1.5): a put-back counts as whole only where it saw every file its record names. The older
+# version again; a silent upgrade whose copy fails at its very end (the program's own file held, as 29), and, once the
+# copy has begun, plugins\platforms\qwindows.dll.old-update made one that this account may not look at (this test, its
+# owner, denies itself reading its attributes and listing its folder). The setup ends not 0, its log says that file could
+# not be looked at and that the earlier version could not all be put back, the marker of an unfinished update is still
+# there and its record still names it, and the update check stands at the program's name. Let it be looked at again (the
+# denials taken away), the next setup puts the earlier version back first, then installs, and the new version is whole.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '48' $failures)
+$unseen48 = Join-Path $App "plugins\platforms\qwindows.dll$AsideEnding"
+$unseenFolder48 = Join-Path $App 'plugins\platforms'
+$log = Get-Log '48-unseen-aside'
+$script:held48 = $null
+$script:heldAt48 = $false
+$script:denied48 = $false
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        # (Taken once only, as 29 does: let go of at the rollback, it is never taken again, so that the put-back can put the
+        # update check in the program's place.)
+        if (-not $script:heldAt48 -and $said.Contains('Dest filename:')) {
+            try { $script:held48 = [IO.File]::Open($Program, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:heldAt48 = $true } catch { }
+            # (The denial asked first: once made, the file may not be looked at, and Test-Path would throw.)
+            if (-not $script:denied48 -and (Test-Path -LiteralPath $unseen48)) {
+                & icacls.exe $unseen48 /deny "*${Sid}:(RA)" | Out-Null
+                & icacls.exe $unseenFolder48 /deny "*${Sid}:(RD)" | Out-Null
+                $script:denied48 = $true
+            }
+        }
+        if ($script:held48 -and $said.Contains('Rolling back changes.')) { $script:held48.Dispose(); $script:held48 = $null }
+        return $false
+    }
+} finally {
+    if ($script:held48) { $script:held48.Dispose() }
+}
+$said48 = Read-Log '48-unseen-aside'
+$markerLeft48 = Test-Path -LiteralPath $UpdateMarker
+$checkInPlace48 = Test-UpdateCheckAt $Program
+if ($script:denied48) {
+    & icacls.exe $unseenFolder48 /remove:d "*$Sid" | Out-Null
+    & icacls.exe $unseen48 /remove:d "*$Sid" | Out-Null
+}
+if (-not $script:denied48) { [void] $failures.Add('the file set aside could not be made one this account may not look at during the copy') }
+if ($run.Exit -eq 0) { [void] $failures.Add('the upgrade did not fail with the program''s own file held') }
+if (-not $said48.Contains("what an update set aside could not be looked at (plugins\platforms\qwindows.dll$AsideEnding)")) { [void] $failures.Add('the setup''s log does not say what it could not look at') }
+if ($said48 -match 'the earlier version is whole again') { [void] $failures.Add('the setup said the earlier version was whole though it could not look at a file its record names') }
+if (-not $markerLeft48) { [void] $failures.Add('the marker of the unfinished update did not stay') }
+elseif (-not ([IO.File]::ReadAllText($UpdateMarker)).Contains("aside plugins\platforms\qwindows.dll`r`n")) { [void] $failures.Add('the marker''s record no longer names the file it could not look at') }
+if (-not (Test-Path -LiteralPath $unseen48)) { [void] $failures.Add('the file set aside that could not be looked at is gone') }
+if (-not $checkInPlace48) { [void] $failures.Add('the update check does not stand at the program''s name') }
+$next48 = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '48-next-setup')`""
+if ($next48.Exit -ne 0) { [void] $failures.Add("the next setup ended with $($next48.Exit)") }
+if (-not (Test-PutBackFirst (Read-Log '48-next-setup'))) { [void] $failures.Add('the next setup did not put the earlier version back first') }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '48' 'unseen-aside-stays-named' $began $failures ([ordered]@{ run = $run; denied = $script:denied48; markerLeft = $markerLeft48; updateCheckInPlace = $checkInPlace48; next = $next48 })
+
+# --- 49 (0.2.0; outside review 1.6): a copy that cannot all be written to the disk does not count, and nothing set aside
+# goes. The older version again; a silent upgrade, and once its copy has written Qt6Core.dll (the next file begun), that
+# new file held by this test for reading, sharing reading alone, so that Windows' flush of it, which writes, is refused;
+# let go of once the log says it could not be flushed. The setup ends with 7, its log says the copy could not all be
+# written to the disk (Qt6Core.dll) and that the earlier version is whole again, and never that it finished the update;
+# every file of the earlier version is back byte for byte, Settings > Apps names its version, and it starts.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$older = Reset-ToOlder '49' $failures
+$log = Get-Log '49-flush-refused'
+$script:held49 = $null
+$script:heldAt49 = $false
+try {
+    $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        $at = $said.IndexOf('\Qt6Core.dll')
+        if (-not $script:heldAt49 -and $at -ge 0 -and $said.IndexOf('Dest filename:', $at) -ge 0) {
+            try { $script:held49 = [IO.File]::Open((Join-Path $App 'Qt6Core.dll'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read); $script:heldAt49 = $true } catch { }
+        }
+        if ($script:held49 -and $said.Contains('could not be flushed to the disk before the copy is marked finished')) { $script:held49.Dispose(); $script:held49 = $null }
+        return $false
+    }
+} finally {
+    if ($script:held49) { $script:held49.Dispose() }
+}
+if (-not $script:heldAt49) { [void] $failures.Add('the new Qt6Core.dll could not be held during the copy') }
+if ($run.Exit -ne 7) { [void] $failures.Add("the setup ended with $($run.Exit), not 7, where a file of its copy could not be written to the disk") }
+$said = Read-Log '49-flush-refused'
+if (-not $said.Contains('The copy does not count: the copy could not all be written to the disk (Qt6Core.dll).')) { [void] $failures.Add('the setup''s log does not say its copy could not all be written to the disk') }
+if ($said -notmatch 'The copy did not complete: the earlier version is whole again\.') { [void] $failures.Add('the setup''s log does not say the earlier version is whole again') }
+if ($said -match 'Finished an update whose copy was whole') { [void] $failures.Add('the setup removed what it had set aside though its copy was not on the disk') }
+$now = Get-Installed
+foreach ($path in $older.Files.Keys) {
+    if ($path -like 'unins000.*') { continue }
+    if (-not $now.Files.Contains($path)) { [void] $failures.Add("$path of the earlier version is gone") }
+    elseif ($now.Files[$path].sha256 -ne $older.Files[$path].sha256) { [void] $failures.Add("$path is not the earlier version's") }
+}
+foreach ($path in $now.Files.Keys) { if (-not $older.Files.Contains($path)) { [void] $failures.Add("$path is in the program's folder, and was not before") } }
+if (-not $now.Entry -or $now.Entry.DisplayVersion -ne $oldVersion) { [void] $failures.Add("Settings > Apps names version $(if ($now.Entry) { $now.Entry.DisplayVersion }), not the earlier $oldVersion") }
+$restarted = Start-Program
+if (-not $restarted.Up) { [void] $failures.Add('after the copy that could not be written to the disk, the earlier program does not start') }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '49-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '49' 'flush-refused-keeps-earlier' $began $failures ([ordered]@{ run = $run; held = 'Qt6Core.dll'; ended = $how; finish = $finish })
+
+# --- 50 (0.2.0; outside review 1.7): a first install whose copy does not count starts nothing. Interactive, by UI
+# Automation, as 37: nothing installed; the new setup by hand (Next, Next, Install), and once its copy has begun, the name
+# of the last file before the program taken by this test with no sharing; Skip this file chosen once it is let go of. The
+# setup's box says it was not installed; the last page offers no "Start qKVM Desktop", and Finish starts nothing. The
+# setup ends with 7. Then the new setup, silent, installs whole.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$manifest50 = Get-Content -LiteralPath (Join-Path $App 'package-manifest.json') -Raw | ConvertFrom-Json
+$names50 = [string[]] @($manifest50.files | ForEach-Object { [string] $_.path } | Where-Object { $_ -ne 'qkvm-desktop.exe' })
+[Array]::Sort($names50, [StringComparer]::Ordinal)
+$heldName50 = $names50[-1]
+$uninstalled50 = Invoke-Setup (Join-Path $App 'unins000.exe') "$SilentArguments /LOG=`"$(Get-Log '50-uninstall-first')`"" 180
+[void] (Wait-Until { -not (Test-Path -LiteralPath $App) } 30)
+if ($uninstalled50.Exit -ne 0 -or (Test-Path -LiteralPath $UserKey)) { [void] $failures.Add("qKVM Desktop could not be uninstalled first ($($uninstalled50.Exit))") }
+$log = Get-Log '50-first-install-skip'
+$script:stage50 = 0
+$script:held50 = $null
+$script:shown50 = New-Object System.Collections.ArrayList
+try {
+    $run = Invoke-Setup $Setup "/LOG=`"$log`"" 600 {
+        param($process, $gone)
+        if ($gone -lt 3) { return $false }
+        switch ($script:stage50) {
+            0 { $found = Find-SetupButton $process.Id 'Next'; if ($found) { Push-SetupButton $found; $script:stage50 = 1 } }
+            1 {
+                $found = Find-SetupButton $process.Id 'Install'
+                if ($found) { Push-SetupButton $found; $script:stage50 = 2 }
+                else { $found = Find-SetupButton $process.Id 'Next'; if ($found) { Push-SetupButton $found } }
+            }
+            2 {
+                if ((Read-Shared $log).Contains('Dest filename:')) {
+                    try { $script:held50 = [IO.File]::Open((Join-Path $App ($heldName50 -replace '/', '\')), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:stage50 = 3 } catch { }
+                }
+            }
+            3 {
+                $found = Find-SetupButton $process.Id 'Skip this file'
+                if ($found) { $script:held50.Dispose(); $script:held50 = $null; Push-SetupButton $found; $script:stage50 = 4 }
+            }
+            4 {
+                $found = Find-SetupButton $process.Id 'OK'
+                if ($found) { [void] $script:shown50.Add((Get-SetupText $process.Id)); Push-SetupButton $found; $script:stage50 = 5 }
+            }
+            5 {
+                $found = Find-SetupButton $process.Id 'Finish'
+                if ($found) { [void] $script:shown50.Add((Get-SetupText $process.Id)); Push-SetupButton $found; $script:stage50 = 6 }
+            }
+        }
+        return $false
+    }
+} finally {
+    if ($script:held50) { $script:held50.Dispose() }
+}
+if ($script:stage50 -lt 6) { [void] $failures.Add("the setup was not seen through by hand (stage $($script:stage50) of 6; it ended with $($run.Exit))") }
+if ($run.Exit -ne 7) { [void] $failures.Add("the first install ended with $($run.Exit), not 7, after a copy that skipped a file") }
+if ($script:shown50.Count -ge 1 -and $script:shown50[0] -notmatch [regex]::Escape("qKVM Desktop $newVersion was not installed: the copy was not whole (")) { [void] $failures.Add('the setup did not say that its copy was not whole') }
+if ($script:shown50.Count -ge 2 -and $script:shown50[1] -match 'Start qKVM Desktop') { [void] $failures.Add('the last page offers Start qKVM Desktop after a first install that does not count') }
+Start-Sleep -Seconds 10
+if (@(Get-ProgramProcesses).Count) { [void] $failures.Add('the program was started after a first install that does not count') }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '50-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '50' 'first-install-skip-starts-nothing' $began $failures ([ordered]@{ uninstalled = $uninstalled50; run = $run; held = $heldName50; stage = $script:stage50; shown = @($script:shown50); ended = $how; finish = $finish })
+
+# --- 51 (0.2.0; the coordinator's rule for 15): a start of the program made during an update that still runs from the
+# program's folder past the minute the setup waits for such starts is never ended by the setup: the copy does not count,
+# as any that does not, and the setup says why. The older version again; the contract's update with one start of the new
+# program held suspended (as Windows' scanner holds a first start, for longer than any did) from the moment its file is
+# in until the setup has ended: it ends with 7, its log says that qKVM Desktop, started during the copy, still ran from
+# its folder after a minute, nothing set aside is removed, nothing is ended by force, and the held start is there still
+# as the setup ends. This test then ends it (as it would end by itself), and the next setup puts right what was left and
+# installs the new version whole. (The put-back in between is whole only where the start lets go of what it holds:
+# held through it, the program's file cannot be removed, and the marker of an unfinished update stays for the next
+# setup, as for any file held through a put-back, review 1.5.)
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '51' $failures)
+$log = Get-Log '51-start-held'
+$script:held51 = 0
+$stillThere51 = $false
+try {
+    $run = Invoke-Setup $Setup (& $contract $log) 300 {
+        param($process, $gone)
+        if (-not $script:held51) {
+            $said = if (Test-Path -LiteralPath $log) { (Read-Shared $log) } else { '' }
+            $at = $said.IndexOf("Dest filename: $Program")
+            if ($at -ge 0 -and $said.IndexOf('Successfully installed the file.', $at) -ge 0) { $script:held51 = [QkvmVmHeldStart]::Start($Program, $App) }
+        }
+        return $false
+    }
+    $stillThere51 = [QkvmVmHeldStart]::Running()
+} finally {
+    [QkvmVmHeldStart]::End()
+}
+if (-not $script:held51) { [void] $failures.Add('no start of the new program could be held as its file came in') }
+if ($run.Exit -ne 7) { [void] $failures.Add("the setup ended with $($run.Exit), not 7, while a start made during its copy still ran from its folder") }
+$said51 = Read-Log '51-start-held'
+if (-not $said51.Contains('The copy does not count: qKVM Desktop, started during the copy, still ran from its folder after a minute.')) {
+    [void] $failures.Add('the setup''s log does not say that its copy does not count because a start made during it still ran')
+}
+if ($said51 -notmatch 'starts of qKVM Desktop made during the copy still run from its folder after \d+ ms: this setup ends none of them') {
+    [void] $failures.Add('the setup''s log does not say that it waited the minute and ended none of the starts')
+}
+if ($said51 -match 'Finished an update whose copy was whole') { [void] $failures.Add('the setup removed what it had set aside though a start made during its copy still ran') }
+if ($said51 -match 'ended by force') { [void] $failures.Add('the setup ended something by force') }
+if ($script:held51 -and -not $stillThere51) { [void] $failures.Add('the held start was not there any more as the setup ended: something ended it') }
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '51-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the next setup did not install ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '51' 'start-held-past-the-minute' $began $failures ([ordered]@{ run = $run; held = $script:held51; heldThereAtTheEnd = $stillThere51; finish = $finish })
+
+# --- 52 (review armp-1 L9): an interactive install's wait for a start of the program made during its copy is shown, on
+# a page of its own whose progress is stepped at each look. The new version is installed (51 left it so); the new setup
+# run by hand, Next and Install; one start of the new program held suspended from the moment its file is in, as Windows'
+# scanner holds a first start, and let go of once the page has been seen: until then the setup waits for it and says so;
+# then the start ends by itself, the install completes, its log says it waited, and Finish starts nothing (the program
+# did not run before). Whether the wizard's windows answer a message within a second during the wait is recorded
+# (answered, unanswered) and not judged: Inno Setup's progress page takes no message while the script sleeps (a test VM,
+# 2026-11-22: 10 of 12 looks unanswered), so Windows may show the setup as not responding until the wait ends, within
+# the minute, a known limit (CHANGELOG); the setup is not changed for it before 0.2.0 (the coordinator, 2026-11-22).
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$log52 = Get-Log '52-interactive-start-held'
+$script:held52 = 0
+$script:heldAt52 = $null
+$script:page52 = ''
+$script:answered52 = 0
+$script:unanswered52 = 0
+$script:let52 = $false
+$hold52 = {
+    # (Once the new program's file is in, by the setup's log: a start of it held, a minute at the most to come.)
+    $until = (Get-Clock) + 120
+    while (-not $script:held52 -and (Get-Clock) -lt $until) {
+        $said = if (Test-Path -LiteralPath $log52) { (Read-Shared $log52) } else { '' }
+        $at = $said.IndexOf("Dest filename: $Program")
+        if ($at -ge 0 -and $said.IndexOf('Successfully installed the file.', $at) -ge 0) {
+            $script:held52 = [QkvmVmHeldStart]::Start($Program, $App)
+            $script:heldAt52 = Get-Clock
+        } else { Start-Sleep -Milliseconds 100 }
+    }
+}
+$watch52 = {
+    # (The wizard's windows looked at while it waits, every quarter of a second, for the page's words and whether they
+    # answer within a second; the loader's are not, whose thread waits for the wizard without pumping a message. Let
+    # go of once the page has been seen and looked at three times, and 10 s after it was held, or after 30 s of looks
+    # at the most: a look at the setup's words can take seconds, and the first VM runs of this step, 2026-11-22, let go
+    # by the clock before the first look; the setup's minute is never reached so.)
+    if (-not $script:held52) { return }
+    # (What the setup's windows said just before this turn, as Invoke-SetupByHand kept it, is a look too.)
+    $shownBefore52 = @($script:byHand.Shown)
+    if ($shownBefore52.Count -and [string] $shownBefore52[-1] -match 'Waiting for qKVM Desktop, started during the install, to end') { $script:page52 = [string] $shownBefore52[-1] }
+    $lookUntil = (Get-Clock) + 30
+    $looks = 0
+    while ((Get-Clock) -lt $lookUntil -and -not ($script:page52 -and $looks -ge 3 -and ((Get-Clock) - $script:heldAt52) -ge 10)) {
+        $looks++
+        $windows = @(Get-SetupProcesses $process.Id | Where-Object { $_ -ne $process.Id } | ForEach-Object { [QkvmVm]::WindowsOf([uint32] $_) })
+        foreach ($window in $windows) { if ([QkvmVm]::Answers($window)) { $script:answered52++ } else { $script:unanswered52++ } }
+        $shown = Get-SetupText $process.Id
+        if ($shown -match 'Waiting for qKVM Desktop, started during the install, to end') { $script:page52 = $shown }
+        Start-Sleep -Milliseconds 250
+    }
+    [QkvmVmHeldStart]::Release()
+    $script:let52 = $true
+}
+try {
+    $hand = Invoke-SetupByHand $log52 @('Next', 'Install', $hold52, $watch52, 'Finish')
+} finally {
+    [QkvmVmHeldStart]::Release()
+}
+if ($hand.Pressed -ne 5) { [void] $failures.Add("the setup was not seen through by hand: $($hand.Pressed) of 5 steps made (it ended with $($hand.Run.Exit))") }
+elseif ($hand.Run.Exit -ne 0) { [void] $failures.Add("the setup ended with $($hand.Run.Exit)") }
+if (-not $script:held52) { [void] $failures.Add('no start of the new program could be held as its file came in') }
+elseif (-not $script:page52) { [void] $failures.Add('while it waited for the start made during its copy, the setup did not show "Waiting for qKVM Desktop, started during the install, to end"') }
+if ((Read-Log '52-interactive-start-held') -notmatch 'Waited \d+ ms for the starts of qKVM Desktop made during the copy to end') {
+    [void] $failures.Add('the setup''s log does not say it waited for the start made during its copy before it judged the copy')
+}
+[void] (Test-Installed $newVersion $failures)
+Test-StartedAgain '52-interactive-start-held' $failures $false
+$how = Stop-Program
+Test-Data $failures
+Write-Step '52' 'interactive-start-held' $began $failures ([ordered]@{ run = $hand.Run; pressed = $hand.Pressed; held = $script:held52; letGo = $script:let52
+    windowAnswers = [ordered]@{ answered = $script:answered52; unanswered = $script:unanswered52; judged = $false
+        why = 'recorded, not judged: Inno Setup''s progress page takes no message while the script sleeps; Windows may show the setup as not responding until the wait ends (a known limit, CHANGELOG)' }
+    page = $script:page52; shown = $hand.Shown; lastSeen = $hand.LastSeen; ended = $how })
+
+# --- 53 (outside review 2, 1.3): what an update that did not finish left is put right only in a folder that no other
+# account may change, which is decided before anything there is read. The older version installed again; this test (its
+# owner) then gives the users of this PC the right to change the program's folder and what is in it, as a folder an
+# administrator chose for 0.1.x could have, and puts in it what another account could then put there: first the marker of
+# an unfinished update whose record, one the setup reads, names Qt6Core.dll as what the copy made (a put-back would
+# remove the earlier version's Qt6Core.dll by it); then, that marker taken away, the earlier program as a setup of 0.1.2
+# set it aside (qkvm-desktop.exe.old-update beside the program, which 0.1.2's rule would remove). Each time, a silent
+# setup follows nothing of it: its log says that nothing there is put right, it ends with 7 and the one result line that
+# says the users of this PC may change the folder, that what an update left there stays as it is, and what to do; and the
+# folder is byte for byte as it was, with what this test put in;
+# its rights are as this test left them. Then the grant and those files taken away, the folder gives what it gave before
+# (Get-RightsGiven), and the new version installs.
+# (What a folder gives, and to whom: each entry of its list as it is kept, inherited or its own alike, once each, in no
+# order. On the Windows on Arm test PC, whose profile's folders held their inherited entries without the mark that they
+# are kept up from above (an SDDL of "D:" without "AI"), icacls's /grant wrote the list anew with those entries as the
+# folder's own beside the same ones taken again from above, and the /remove:g after it left the same entries in that
+# other form; an x64 Windows 11 given the same form kept no copies. So the end is held to the entries, not to the form;
+# the forms are kept with the step.)
+function Get-RightsGiven([string] $Path) {
+    # (A list Get-Acl cannot read is said, and the step fails by it below, rather than ending the suite here.)
+    try { $rules = @((Get-Acl -LiteralPath $Path).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) }
+    catch { return "not read: $($_.Exception.Message)" }
+    $given = @($rules | ForEach-Object { '{0} {1} 0x{2:x8} {3} {4}' -f $_.AccessControlType, $_.IdentityReference.Value, [int] $_.FileSystemRights, $_.InheritanceFlags, $_.PropagationFlags })
+    return (@($given | Sort-Object -Unique) -join "`n")
+}
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+[void] (Reset-ToOlder '53' $failures)
+$planted53 = @(
+    [ordered]@{ Name = 'record'; File = $UpdateMarker; Text = "words`r`nqKVM Desktop set-aside record 1`r`nending $AsideEnding`r`ncopy Qt6Core.dll`r`nend of the record`r`n" },
+    [ordered]@{ Name = 'program-of-0.1.2'; File = "$Program$AsideEnding"; Text = "qkvm-desktop.exe$AsideEnding, put here by test_setup_vm.ps1" })
+$refused53 = New-Object System.Collections.ArrayList
+$rightsBefore53 = (& icacls.exe $App 2>$null) -join "`n"
+$rightsGiven53Before = Get-RightsGiven $App
+& icacls.exe $App /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null
+$shared53 = (& icacls.exe $App 2>$null) -join "`n"
+try {
+    if ($shared53 -ceq $rightsBefore53) { [void] $failures.Add('the users of this PC could not be given the right to change the program''s folder') }
+    foreach ($plant in $planted53) {
+        [IO.File]::WriteAllText($plant.File, $plant.Text)
+        $sums53Before = Get-FolderSums $App
+        $logName = "53-$($plant.Name)"
+        $run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log $logName)`"" 180
+        $lines = @(Get-ResultLines $logName)
+        $said = Read-Log $logName
+        if ($run.Exit -ne 7) { [void] $failures.Add("the setup into the shared folder with the $($plant.Name) in it did not refuse with 7 (it ended with $($run.Exit))") }
+        if ($lines.Count -ne 1 -or $lines[0] -cnotmatch '\AqKVM-RESULT: 7 nothing was changed: the folder .+ is not one that this Windows account and Windows itself alone may change \(the users of this PC \(BU\) may change .+\): qKVM Desktop is installed only into such a folder\. What an update that did not finish left there stays as it is until then, and qKVM Desktop may not start meanwhile: run this setup again once no other account may change the folder, or uninstall qKVM Desktop in Settings, Apps\z') {
+            [void] $failures.Add("the setup's log does not have the one result line of 7 for the shared folder with the $($plant.Name) in it: $($lines -join ' | ')")
+        }
+        if (-not $said.Contains('Nothing that an update left is put right, nor looked for: the folder ')) { [void] $failures.Add("the setup's log does not say that it put nothing right in the shared folder ($($plant.Name))") }
+        foreach ($followed in 'Removed what the copy that did not complete had made', 'Put the earlier version back', 'Removed the earlier program, set aside by a setup before', 'Put the earlier program back') {
+            if ($said.Contains($followed)) { [void] $failures.Add("the setup followed what was put in the shared folder ($($plant.Name)): $followed") }
+        }
+        $sums53After = Get-FolderSums $App
+        if (($sums53Before | ConvertTo-Json) -cne ($sums53After | ConvertTo-Json)) {
+            $changed = @(@($sums53Before.Keys) + @($sums53After.Keys) | Sort-Object -Unique | Where-Object { -not $sums53Before.Contains($_) -or -not $sums53After.Contains($_) -or $sums53Before.Item($_) -ne $sums53After.Item($_) })
+            [void] $failures.Add("the shared folder with the $($plant.Name) in it is not as it was: $($changed -join ', ')")
+        }
+        if (((& icacls.exe $App 2>$null) -join "`n") -cne $shared53) { [void] $failures.Add("the setup changed the rights of the shared folder ($($plant.Name))") }
+        Remove-Item -LiteralPath $plant.File -Force -ErrorAction SilentlyContinue
+        [void] $refused53.Add([ordered]@{ case = $plant.Name; run = $run; resultLines = $lines })
+    }
+} finally {
+    foreach ($plant in $planted53) { Remove-Item -LiteralPath $plant.File -Force -ErrorAction SilentlyContinue }
+    & icacls.exe $App /remove:g '*S-1-5-32-545' | Out-Null
+}
+$rightsAfter53 = (& icacls.exe $App 2>$null) -join "`n"
+$rightsGiven53After = Get-RightsGiven $App
+if ($rightsGiven53Before -like 'not read:*' -or $rightsGiven53After -like 'not read:*') {
+    [void] $failures.Add("the program's folder's rights could not be read: before [$rightsGiven53Before] after [$rightsGiven53After]")
+} elseif ($rightsGiven53After -cne $rightsGiven53Before) {
+    [void] $failures.Add("the program's folder does not give what it gave once this test took its grant away: before [$($rightsGiven53Before -replace "`n", ' | ')] after [$($rightsGiven53After -replace "`n", ' | ')]")
+}
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '53-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+Test-Data $failures
+Write-Step '53' 'put-right-in-shared-folder' $began $failures ([ordered]@{ refused = @($refused53); finish = $finish
+    rights = [ordered]@{ before = $rightsBefore53; shared = $shared53; after = $rightsAfter53; givenBefore = $rightsGiven53Before; givenAfter = $rightsGiven53After } })
+
+# --- 54 and 55 (0.2.0; the outside review of 0.2.0, 1.4): an earlier install of the other kind in the program's folder,
+# which only Windows on Arm holds: an x64 install, carried over from an x64 PC (no setup of ours makes one there: the head
+# of this test). Planted from -OtherKindZip, then upgraded to the PC's own kind by the contract's update (54), and cut and
+# put back (55). Not run on x64 Windows, nor without -OtherKindZip.
+function New-OtherKindInstall([string] $Number, [System.Collections.ArrayList] $Failures) {
+    <# The older version installed again (Reset-ToOlder), then made the other kind's earlier version as an install carried
+    over from a PC of that kind leaves it: every file of the older version's package taken away (and each of its folders
+    that leaves empty), the package of -OtherKindZip put in, file by file as its manifest has them, beside the setup's own
+    marker and uninstaller, and the Settings > Apps entry made that version's: its version, and the kind noted only where
+    that version's setup noted one (0.2.0 and later). What Get-Installed then says of the folder. #>
+    # (Where the older version could not be installed again (an earlier part of the step that failed may have left no
+    # uninstaller, or a folder the setup takes for another's), or the plant fails, the step fails and the run goes on.)
+    try { [void] (Reset-ToOlder $Number $Failures) } catch { [void] $Failures.Add("the older version could not be installed again first: $($_.Exception.Message)") }
+    try { [void] (Write-OtherKindInPlace $Failures) } catch { [void] $Failures.Add("the $OtherPcKind install could not be planted: $($_.Exception.Message)") }
+    return (Get-Installed)
+}
+function Write-OtherKindInPlace([System.Collections.ArrayList] $Failures) {
+    <# New-OtherKindInstall's plant, over the older version just installed. #>
+    $olderManifest = Get-Content -LiteralPath (Join-Path $App 'package-manifest.json') -Raw | ConvertFrom-Json
+    $folders = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($entry in @($olderManifest.files)) {
+        $relative = ([string] $entry.path) -replace '/', '\'
+        Remove-Item -LiteralPath (Join-Path $App $relative) -Force
+        $parent = Split-Path -Parent $relative
+        while ($parent) { [void] $folders.Add($parent); $parent = Split-Path -Parent $parent }
+    }
+    Remove-Item -LiteralPath (Join-Path $App 'package-manifest.json') -Force
+    foreach ($folder in @($folders | Sort-Object { $_.Length } -Descending)) {
+        $at = Join-Path $App $folder
+        if ((Test-Path -LiteralPath $at) -and -not @(Get-ChildItem -LiteralPath $at -Force).Count) { Remove-Item -LiteralPath $at -Force }
+    }
+    $archive = [IO.Compression.ZipFile]::OpenRead($OtherKindZip)
+    try {
+        foreach ($file in @($otherPackage.files) + @([pscustomobject] @{ path = 'package-manifest.json'; sha256 = '' })) {
+            $to = Join-Path $App ($file.path -replace '/', '\')
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+            $from = $archive.GetEntry("$($otherPackage.top)/$($file.path)")
+            if (-not $from) { [void] $Failures.Add("-OtherKindZip has no $($file.path), which its manifest names"); continue }
+            $in = $from.Open()
+            try {
+                $written = [IO.File]::Create($to)
+                try { $in.CopyTo($written) } finally { $written.Dispose() }
+            } finally { $in.Dispose() }
+            if ($file.sha256 -and (Get-Sha256 $to) -ne $file.sha256) { [void] $Failures.Add("$($file.path) of -OtherKindZip is not as its manifest has it") }
+        }
+    } finally { $archive.Dispose() }
+    $version = [version] $otherPackage.version
+    Set-ItemProperty -LiteralPath $UserKey -Name 'DisplayVersion' -Value $otherPackage.version
+    foreach ($part in @(@('MajorVersion', $version.Major), @('MinorVersion', $version.Minor))) {
+        if ($null -ne (Get-EntryValue $part[0])) { Set-ItemProperty -LiteralPath $UserKey -Name $part[0] -Value $part[1] -Type DWord }
+    }
+    if ($version -lt [version] '0.2.0') { Remove-ItemProperty -LiteralPath $UserKey -Name 'qKVM Desktop Architecture' -ErrorAction SilentlyContinue }
+    else { Set-ItemProperty -LiteralPath $UserKey -Name 'qKVM Desktop Architecture' -Value $OtherPcKind }
+    $plantedKind = Get-ImageKind $Program
+    if ($plantedKind -cne $OtherPcKind) { [void] $Failures.Add("the planted install's program is of $plantedKind, not of $OtherPcKind") }
+}
+function Start-ProgramIfThere {
+    <# Start-Program where the program's file is there; where a part of the step before failed and left none, a start
+    that did not come up (the step fails by that, and the run goes on). #>
+    if (-not (Test-Path -LiteralPath $Program -PathType Leaf)) { return [pscustomobject]@{ Process = $null; Up = $false } }
+    return (Start-Program)
+}
+function Test-OtherKindGone([string] $Said, [System.Collections.ArrayList] $Failures) {
+    <# After a whole copy over the planted install: each file only the other kind's package had (by the two manifests) is
+    gone, and the setup's log names it as removed, by that version's own list (RemoveEarlierFiles). Those names. (No
+    manifest there, where the setup did not install: the step fails, and the run goes on.) #>
+    $manifestFile = Join-Path $App 'package-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestFile)) { [void] $Failures.Add('the program''s folder has no package-manifest.json, to tell what only the other kind''s install had'); return @() }
+    $newNames = @(@((Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json).files | ForEach-Object { [string] $_.path }) + 'package-manifest.json')
+    $onlyOther = @($otherPackage.files | ForEach-Object { [string] $_.path } | Where-Object { $newNames -notcontains $_ })
+    foreach ($name in $onlyOther) {
+        $relative = $name -replace '/', '\'
+        if (Test-Path -LiteralPath (Join-Path $App $relative)) { [void] $Failures.Add("$name, which only the $OtherPcKind install had, is still there") }
+        if (-not $Said.Contains("Removed what qKVM Desktop $($otherPackage.version) ($OtherPcKind) installed and this one has not: $relative")) {
+            [void] $Failures.Add("the setup's log does not say it removed $name, which only the $OtherPcKind install had")
+        }
+    }
+    return $onlyOther
+}
+$otherNotRun = if ($PcKind -ne 'arm64') {
+    'an earlier install of the other kind (ARM64) on x64 Windows: no setup of ours makes one, and one carried over from a PC on Arm could not start here; the case is Windows on Arm''s, where an x64 install carried over from an x64 PC runs under emulation (the head of this test)'
+} elseif (-not $otherPackage) {
+    'it needs -OtherKindZip, the ZIP of an earlier published version''s x64 package (0.1.2''s), planted as an x64 install carried over from an x64 PC (the head of this test says why no setup can make one here)'
+} else { '' }
+if ($otherNotRun) {
+    Write-NotRun '54' 'other-kind-upgraded' $otherNotRun
+    Write-NotRun '55' 'other-kind-cut-put-back' $otherNotRun
+} else {
+# 54: the planted x64 install, its program running (under Windows' emulation), then the contract's update: the new
+# version of the PC's kind installed whole, what only the x64 package had removed, and the program started again as ARM64.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$planted54 = New-OtherKindInstall '54' $failures
+$foundLine = "qKVM Desktop $($otherPackage.version) ($OtherPcKind) was installed in this folder: what it installed and this version ($PcKind) has not goes after a whole copy."
+$started = Start-ProgramIfThere
+if (-not $started.Up) { [void] $failures.Add("the planted $OtherPcKind program did not start (its mutex did not appear within 30 s)") }
+$plantedRunsAs = @(Test-RunsAsKind $OtherPcKind $failures "the planted $OtherPcKind program")
+$firstId = if ($started.Process) { $started.Process.Id } else { 0 }
+$log = Get-Log '54-other-kind-upgraded'
+$script:ended54 = $null
+$run = Invoke-Setup $Setup (& $contract $log) 300 {
+    param($process, $gone)
+    # (As the program does: it starts the setup, then closes and exits within 10 s; here after 3 s.)
+    if (-not $script:ended54 -and $gone -gt 3) { if ($firstId) { Stop-Process -Id $firstId -Force -ErrorAction SilentlyContinue }; $script:ended54 = $gone }
+    return $false
+}
+if ($run.Exit -ne 0) { [void] $failures.Add("the update over the $OtherPcKind install ended with $($run.Exit)") }
+$said = Read-Log '54-other-kind-upgraded'
+if (-not $said.Contains($foundLine)) { [void] $failures.Add("the setup's log does not say: $foundLine") }
+$state = Test-Installed $newVersion $failures
+$onlyOther54 = @(Test-OtherKindGone $said $failures)
+$notSeen54 = if (-not $onlyOther54.Count) { "files only the $OtherPcKind install had, removed: the two packages share every name" } else { '' }
+if (-not (Wait-Until { Test-ProgramRunning } 30)) { [void] $failures.Add('the setup did not start the program again after the update') }
+if ((Read-Log '54-other-kind-upgraded') -notmatch $StartedLine) { [void] $failures.Add('the setup''s log does not say it started the program with the one argument --after-update') }
+$runsAs54 = @(Test-RunsAsKind $PcKind $failures 'the program the update started again')
+$how = Stop-Program
+Test-Data $failures -ProgramStarted
+Write-Step '54' 'other-kind-upgraded' $began $failures ([ordered]@{ planted = [ordered]@{ version = $otherPackage.version; kind = $OtherPcKind; files = $planted54.Files.Count; runsAs = $plantedRunsAs }
+    run = $run; programEndedAfterSeconds = $script:ended54; onlyTheOtherKindHad = $onlyOther54; runsAs = $runsAs54; files = $state.Files.Count; ended = $how }) $notSeen54
+
+# 55: the planted x64 install, and the setup ended by force in the middle of its copy, as a power cut ends it: the x64
+# install kept (as itself or set aside), the update check of the PC's kind at the program's name, the x64 program aside
+# beside it; the next setup puts the x64 version back first, then installs the PC's kind. Then a copy that fails at the
+# program's own file (held by this test, as in 29): the x64 version back whole, and its program starts as x64.
+$began = [DateTime]::UtcNow
+$failures = New-Object System.Collections.ArrayList
+$planted55 = New-OtherKindInstall '55' $failures
+$log = Get-Log '55-other-kind-cut'
+$run = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 120 {
+    param($process, $gone)
+    $said = Read-Shared $log
+    $at = $said.IndexOf('\Qt6Core.dll')
+    return ($at -ge 0 -and $said.IndexOf('Dest filename:', $at) -ge 0) -or $gone -gt 60
+}
+if ($run.Exit -ne 'killed') { [void] $failures.Add("the setup over the $OtherPcKind install was not ended in the middle of its copy (it ended with $($run.Exit))") }
+[void] (Wait-Until { @(Get-SetupProcessesLeft).Count -eq 0 } 10)
+Start-Sleep -Seconds 2
+$cut55 = Get-Installed
+$notKept55 = @(Get-NotKept $planted55 $cut55)
+if ($notKept55.Count) { [void] $failures.Add("files of the $OtherPcKind install are neither there nor set aside as they were: $($notKept55 -join ', ')") }
+$markerLeft55 = Test-Path -LiteralPath $UpdateMarker
+if (-not $markerLeft55) { [void] $failures.Add('there is no marker of an unfinished update beside what the copy set aside') }
+$atName55 = Get-AtProgramName
+$checkThere55 = Test-UpdateCheckAt $Program
+if (-not $checkThere55) { [void] $failures.Add("the update check of this PC's kind ($PcKind) is not at the program's name after the cut (at its name: $atName55)") }
+$asideKind55 = Get-ImageKind "$Program$AsideEnding"
+if ($asideKind55 -cne $OtherPcKind) { [void] $failures.Add("the program set aside for the copy is $(if ($asideKind55) { "of $asideKind55" } else { 'not there' }), not the $OtherPcKind one") }
+$next = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '55-next-setup')`""
+if ($next.Exit -ne 0) { [void] $failures.Add("the next setup ended with $($next.Exit)") }
+$saidNext = Read-Log '55-next-setup'
+if (-not (Test-PutBackFirst $saidNext)) { [void] $failures.Add("the next setup did not put the $OtherPcKind version back first, before it set it aside again") }
+if (-not $saidNext.Contains($foundLine)) { [void] $failures.Add("the next setup's log does not say: $foundLine") }
+[void] (Test-Installed $newVersion $failures)
+$onlyOther55 = @(Test-OtherKindGone $saidNext $failures)
+# (Planted again: a copy that fails at its very end, the program's own file taken by this test once the copy has begun.)
+$earlier55 = New-OtherKindInstall '55b' $failures
+$log = Get-Log '55-other-kind-copy-fails'
+$script:held55 = $null
+$script:heldAt55 = $false
+try {
+    $failed = Invoke-Setup $Setup "$SilentArguments /LOG=`"$log`"" 300 {
+        param($process, $gone)
+        $said = Read-Shared $log
+        if (-not $script:heldAt55 -and $said.Contains('Dest filename:')) {
+            try { $script:held55 = [IO.File]::Open($Program, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None); $script:heldAt55 = $true } catch { }
+        }
+        if ($script:held55 -and $said.Contains('Rolling back changes.')) { $script:held55.Dispose(); $script:held55 = $null }
+        return $false
+    }
+} finally {
+    if ($script:held55) { $script:held55.Dispose() }
+}
+if (-not $script:heldAt55) { [void] $failures.Add('the program''s own file could not be taken during the copy over the planted install') }
+if ($failed.Exit -eq 0) { [void] $failures.Add("the upgrade over the $OtherPcKind install did not fail with the program's own file held during its copy") }
+if ((Read-Log '55-other-kind-copy-fails') -notmatch 'The copy did not complete: the earlier version is whole again\.') {
+    [void] $failures.Add('the setup''s log does not say the earlier version is whole again')
+}
+Test-Earlier $earlier55 $failures
+$restarted = Start-ProgramIfThere
+if (-not $restarted.Up) { [void] $failures.Add("the $OtherPcKind program put back does not start") }
+$backRunsAs = @(Test-RunsAsKind $OtherPcKind $failures "the $OtherPcKind program put back")
+$backVersion = Get-Version $Program
+if ($backVersion -ne $otherPackage.version) { [void] $failures.Add("the program put back is version $backVersion, not $($otherPackage.version)") }
+$how = Stop-Program
+$finish = Invoke-Setup $Setup "$SilentArguments /LOG=`"$(Get-Log '55-finish')`""
+if ($finish.Exit -ne 0) { [void] $failures.Add("the new setup did not install afterwards ($($finish.Exit))") }
+[void] (Test-Installed $newVersion $failures)
+[void] (Test-OtherKindGone (Read-Log '55-finish') $failures)
+Test-Data $failures -ProgramStarted
+Write-Step '55' 'other-kind-cut-put-back' $began $failures ([ordered]@{ run = $run; notKept = $notKept55; markerLeft = $markerLeft55; atProgramName = $atName55
+    updateCheckInPlace = $checkThere55; programSetAsideKind = $asideKind55; next = $next; onlyTheOtherKindHad = $onlyOther55
+    copyFails = [ordered]@{ run = $failed; held = 'qkvm-desktop.exe'; putBackRunsAs = $backRunsAs; version = $backVersion }; ended = $how; finish = $finish })
+}
+
+$notRun = @($results | Where-Object { $_.Contains('notRun') } | ForEach-Object { $_.step })
+$notSeen = @($results | Where-Object { $_.Contains('notSeen') } | ForEach-Object { $_.step })
+$summary = [ordered]@{ machine = $Machine; windows = "$os"; kind = $PcKind; hypervisor = $Hypervisor; setup = $newVersion; olderSetup = $oldVersion; notRun = $notRun; notSeen = $notSeen
     passed = (@($results | Where-Object { -not $_.passed }).Count -eq 0); steps = @($results) }
 $summary | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $Out 'summary.json') -Encoding UTF8
-if ($summary.passed) { Write-Output "All $($results.Count) steps passed: $Out" } else { Write-Output "Not all steps passed: $Out"; exit 1 }
+if ($summary.passed) { Write-Output "All $($results.Count - $notRun.Count) steps run passed$(if ($notRun.Count) { ", $($notRun.Count) not run ($($notRun -join ', '))" })$(if ($notSeen.Count) { ", part of $($notSeen.Count) not seen with these setups ($($notSeen -join ', '))" }): $Out" } else { Write-Output "Not all steps passed: $Out"; exit 1 }

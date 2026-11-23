@@ -341,6 +341,7 @@ Dialog {
                 required property bool ticked
                 required property bool open
                 required property bool hasText
+                required property bool ofAVncServer
 
                 readonly property bool isDevice: kind === "device" || kind === "action" || kind === "settings"
                 property string revealedText: ""
@@ -528,7 +529,7 @@ Dialog {
                                 width: parent.width
                                 visible: row.fingerprint !== ""
                                 topPadding: 3
-                                text: Words.sha256OfTheCertificateTheFileNames
+                                text: row.ofAVncServer ? Words.sha256OfTheCertificateTheFileNamesOfAVncServer : Words.sha256OfTheCertificateTheFileNames
                                 color: Theme.muted
                                 font.pixelSize: Theme.smallSize
                                 wrapMode: Text.Wrap

@@ -40,6 +40,7 @@ MachineActions::MachineActions(ActionsView& view, WallView& wall, WallMachines& 
     connect(&m_view, &ActionsView::closeAsked, this, &MachineActions::close);
     connect(&m_view, &ActionsView::chosen, this, &MachineActions::choose);
     connect(&m_view, &ActionsView::answered, this, &MachineActions::answer);
+    connect(&m_view, &ActionsView::saidNo, this, &MachineActions::answerNo);
     connect(&m_view, &ActionsView::portAsked, this, &MachineActions::showPort);
     connect(&m_view, &ActionsView::consoleAsked, this, &MachineActions::openConsole);
     connect(&m_view, &ActionsView::cardActionAsked, this, &MachineActions::cardAction);
@@ -494,6 +495,39 @@ void MachineActions::cardAction(const QString& machine)
         perform(whom, ask, false, std::nullopt);
         return;
     }
+    if (way == CardWay::ConfirmServer) {
+        // Asked once, Yes or No (the owner's decision of 2026-11-22), of the number the card asks about (review cx2-2,
+        // L1), with what that computer says of itself, and nothing of the card's words beside it (cx2-3, L-d): Yes is
+        // said to the card's driver, which takes that number for the card; No, by its button, too, and the card
+        // refuses that computer from then on, until it is changed with its password typed (M2), whatever the card
+        // says by the time it is clicked (cx2-3, M-a: answerNo). The box put away sends nothing, and the card goes on
+        // asking.
+        const QString askedAbout = status == m_machines.status().constEnd() ? QString() : status->askedAbout;
+        Ask ask;
+        ask.title = words("Is it this server?");
+        ask.action = core::Action::plain(u"its_server"_s);
+        ask.action.text = askedAbout;
+        ask.done = words("known by its number from now on");
+        ask.confirm = true;
+        ask.question =
+            words("Is the server that answers now at %1's place the server you added as %1?").arg(known->name);
+        ask.detail = status == m_machines.status().constEnd() ? QString() : status->saysOfItself;
+        ask.warning =
+            words("It gives a number of its own now (its UUID), and gave none when its card was added. Say yes "
+                  "only if you know it is that server: the card then knows it by that number, and its power "
+                  "buttons, its BIOS setup and its console go to it. If it is another computer, say no: the card "
+                  "then refuses it, on or off. To take your own server there after that, once it stands there again, "
+                  "switch it on from its BMC's own page, then change the card and type its password; or remove the "
+                  "card and add it again.");
+        ask.yes = words("Yes, it is");
+        ask.no = words("No");
+        core::Action no = core::Action::plain(u"not_its_server"_s);
+        no.text = askedAbout;
+        ask.noAction = no;
+        const core::Machine whom = *known;
+        perform(whom, ask, false, std::nullopt);
+        return;
+    }
     if (way != CardWay::None) {
         emit m_view.editAsked(at.machine, way == CardWay::ReviewCertificate);
     }
@@ -514,7 +548,10 @@ void MachineActions::openThePage(const QUrl& address)
 
 void MachineActions::browseTo(const core::Machine& machine, const QUrl& address)
 {
-    if (!m_opener || !m_opener(address)) {
+    // Only a web address is handed on to be opened, whatever a machine's page says (outside review M4: a VNC server's
+    // vnc:// would have Windows start whatever program took that scheme), as openThePage holds it.
+    const QUrl page = core::webAddress(address.toString());
+    if (page.isEmpty() || !m_opener || !m_opener(page)) {
         m_view.notices()->tell(Notices::Kind::Failed,
                                words("%1: no browser could be opened for its console.").arg(machine.name));
     }
@@ -636,17 +673,23 @@ void MachineActions::openMedia(const QString& machine)
     const QString key = machine; // NOLINT(performance-unnecessary-copy-initialization): see above
     const core::Machine* known = machineOf(key);
     const Reached at = m_machines.reach(key);
-    core::ServerClient* client = at ? mediaOf(at.source) : nullptr;
-    if (known == nullptr || client == nullptr || !mayActAt(at.source)) {
+    core::MediaPlace* place = at ? mediaOf(at.source) : nullptr;
+    if (known == nullptr || place == nullptr || !mayActAt(at.source)) {
         return;
     }
     const QString name = known->name;
+    m_mediaWhere = whereOf(*known);
     close();
     m_mediaFor = at.source;
-    m_view.media()->open(client, at.machine, name, key, &m_underWay, m_machines.actionKey(key));
+    m_view.media()->open(place, at.machine, name, key, &m_underWay, m_machines.actionKey(key));
 }
 
-core::ServerClient* MachineActions::mediaOf(const QString& source) const
+QString MachineActions::whereOf(const core::Machine& machine)
+{
+    return machine.host + u'\n' + machine.page.toString(QUrl::FullyEncoded);
+}
+
+core::MediaPlace* MachineActions::mediaOf(const QString& source) const
 {
     return m_mediaOf && mayActAt(source) ? m_mediaOf(source) : nullptr;
 }
@@ -657,10 +700,10 @@ void MachineActions::keepTheMediaBox()
     if (!media.opened()) {
         return;
     }
-    // Of a source whose media whoever sits here may have no longer, or through another client by now: it goes.
-    const core::ServerClient* client = mediaOf(m_mediaFor);
+    // Of a source whose media whoever sits here may have no longer, or of another place by now: it goes.
+    const core::MediaPlace* place = mediaOf(m_mediaFor);
     const Reached at = m_machines.reach(media.key());
-    if (client == nullptr || client != media.client() || !at || at.source != m_mediaFor) {
+    if (place == nullptr || place != media.place() || !at || at.source != m_mediaFor) {
         media.letGo();
     }
 }
@@ -670,11 +713,14 @@ void MachineActions::followTheWall()
     // The media box is of a machine on the wall, by the name it is called now: one that left takes it with it. (What
     // was sent from it goes on, and is told in the corner: the server holds to the machine it was sent to.)
     if (MediaView& media = *m_view.media(); media.opened()) {
-        if (const core::Machine* machine = machineOf(media.key()); machine != nullptr) {
+        if (const core::Machine* machine = machineOf(media.key()); machine == nullptr) {
+            media.close();
+        } else if (whereOf(*machine) != m_mediaWhere) {
+            // At another address now (finding 7 of the wave-1 review): nothing of the box goes there.
+            media.movedElsewhere();
+        } else {
             media.rename(machine->name);
             keepTheMediaBox();
-        } else {
-            media.close();
         }
     }
     // A machine that left the wall takes the box that was open for it with it; and where the box
@@ -1086,6 +1132,41 @@ void MachineActions::answer(bool yes, int paceSeconds, bool ticked)
     }
 }
 
+void MachineActions::answerNo()
+{
+    // A no that sends something (a card's No: Ask::noAction), said by its button; any other no, as ever.
+    if (!m_asked || !m_asked->ask.noAction || m_askedOfSeveral) {
+        answer(false, -1, false);
+        return;
+    }
+    const Asked asked = *m_asked;
+    m_asked.reset();
+    m_view.showQuestion({});
+    if (machineOf(asked.machine.id) == nullptr) {
+        // (Never in silence: review cx2-3, M-a.)
+        m_view.notices()->tell(Notices::Kind::Failed, notSaid(asked.machine));
+        return;
+    }
+    Ask no = asked.ask;
+    no.action = *asked.ask.noAction;
+    no.done = words("refused from now on");
+    send(asked.machine, no, asked.fromMenu, asked.savedOf);
+}
+QString MachineActions::notSaid(const core::Machine& machine)
+{
+    return words("%1: your No did not reach its card, and nothing was changed. Until it does, do not press its "
+                 "buttons: say No again when the card asks, or remove the card.")
+        .arg(machine.name);
+}
+
+bool MachineActions::heldToItsStatus(const core::Action& action)
+{
+    // A card's No only ever makes it refuse more, and sends nothing to any computer: it goes whatever the card says by
+    // the time it is clicked (the computer it asked about gone off, a look that failed), for its driver to judge
+    // (review cx2-3, M-a: dropped before, and the card then took that computer as its own).
+    return action.kind != "not_its_server"_L1;
+}
+
 bool MachineActions::goesTo(const Ask& ask, const std::optional<QString>& savedOf, const QString& source)
 {
     return ask.action.savedId.isEmpty() || (savedOf && *savedOf == source);
@@ -1099,12 +1180,15 @@ void MachineActions::send(const core::Machine& machine, const Ask& ask, bool fro
     // machine of the source it is of.)
     const Reached at = m_machines.reach(machine.id);
     if (!isFree(machine) || !at || !goesTo(ask, savedOf, at.source) || !mayActAt(at.source) ||
-        !supportsOn(machine.id, abilityFor(ask.action))) {
+        (heldToItsStatus(ask.action) && !supportsOn(machine.id, abilityFor(ask.action)))) {
         if (ask.action.kind == "text"_L1 && m_control != nullptr) {
             m_control->cancelText();
         }
         if (fromMenu) {
             holdStill(false);
+        }
+        if (!heldToItsStatus(ask.action)) {
+            m_view.notices()->tell(Notices::Kind::Failed, notSaid(machine));
         }
         return;
     }
@@ -1153,7 +1237,7 @@ void MachineActions::send(const core::Machine& machine, const Ask& ask, bool fro
             finish(false);
             return;
         }
-        if (!guard->supportsOn(key, abilityFor(action))) {
+        if (heldToItsStatus(action) && !guard->supportsOn(key, abilityFor(action))) {
             completed(base::Error{"not_supported", "This machine no longer allows that action. Nothing was sent."});
             finish(false);
             return;
@@ -1199,6 +1283,13 @@ void MachineActions::told(const core::Machine& machine, const Ask& ask, const ba
     Notices& notices = *m_view.notices();
     if (!answer) {
         const base::Error& error = answer.error();
+        if (ask.action.kind == "not_its_server"_L1 && error.code != "invalid") {
+            // A No its wall did not hand on (something else under way on that card, say) is lost: what to do is said
+            // with why. (The driver's own refusal says it already: review cx2-4, L2.)
+            notices.tell(Notices::Kind::Failed,
+                         words("%1 (%2)").arg(notSaid(machine), QString::fromStdString(error.message)));
+            return;
+        }
         // No answer is not a refusal: what was asked may have arrived, and been done. Which errors
         // are no answer is for the place it was sent to to say.
         const bool mayHaveBeenDone = sentTo.place->mayHaveBeenDone(sentTo.machine, error);

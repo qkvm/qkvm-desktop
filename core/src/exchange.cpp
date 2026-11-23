@@ -19,8 +19,10 @@
 
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/kvmd_answers.h>
+#include <qkvm/core/proxmox_answers.h>
 #include <qkvm/core/sealing.h>
 #include <qkvm/core/strict_json.h>
+#include <qkvm/core/vnc_device.h>
 
 #include "windows_certificate.h"
 
@@ -947,7 +949,7 @@ bool isAServersNumberOfBefore(QStringView text) noexcept
            });
 }
 
-constexpr std::array<QLatin1StringView, 3> kindsOfDevice{"kvmd"_L1, "jetkvm"_L1, "redfish"_L1};
+constexpr std::array<QLatin1StringView, 5> kindsOfDevice{"kvmd"_L1, "jetkvm"_L1, "redfish"_L1, "vnc"_L1, "proxmox"_L1};
 constexpr std::array<QLatin1StringView, 3> waysOfChecking{"pinned"_L1, "system"_L1, "insecure"_L1};
 
 bool isOneOf(const json::Value* value, std::span<const QLatin1StringView> those) noexcept
@@ -1028,13 +1030,26 @@ std::optional<Device> deviceFrom(const json::Value& entry, Certificates& certifi
         return no("it has no address", "its address is longer than a file holds");
     }
     const std::optional<QString> name = shortLineOr(entry.find(u"name"), longestName, QString());
-    const base::Result<QUrl> where = kvm::addressFrom(url->text);
-    if (!where) {
-        // Not shown: what was wrong with it, and whose it was (whyNoAddress).
-        said.whose = name.value_or(QString());
-        return no(whyNoAddress(url->text));
+    // A VNC server's address says so by itself (vnc://, vncs://), and is written as its family writes it (the web's
+    // vnc_url); every other device's as a KVM's.
+    const bool ofAVncServer = vnc::namesOne(url->text);
+    QString address;
+    if (ofAVncServer) {
+        const base::Result<QString> at = vnc::addressFrom(url->text);
+        if (!at) {
+            said.whose = name.value_or(QString());
+            return no("its address is not a VNC server's");
+        }
+        address = at.value();
+    } else {
+        const base::Result<QUrl> where = kvm::addressFrom(url->text);
+        if (!where) {
+            // Not shown: what was wrong with it, and whose it was (whyNoAddress).
+            said.whose = name.value_or(QString());
+            return no(whyNoAddress(url->text));
+        }
+        address = where.value().toString(QUrl::FullyEncoded);
     }
-    const QString address = where.value().toString(QUrl::FullyEncoded);
     const std::optional<QString> user = shortLineOr(entry.find(u"username"), longestUser, u"admin"_s);
     const std::optional<QString> group = shortLineOr(entry.find(u"group"), longestGroupAsWritten, QString());
     if (!name || !user || !group) {
@@ -1044,7 +1059,8 @@ std::optional<Device> deviceFrom(const json::Value& entry, Certificates& certifi
     if (password != nullptr && (!password->isText() || signsOf(password->text) > longestPassword)) {
         return no("its password is not one", "its password is longer than a file holds");
     }
-    if (!isOneOf(entry.find(u"kind"), kindsOfDevice)) {
+    // (A VNC server's kind and address go together, both ways: the web's rule.)
+    if (!isOneOf(entry.find(u"kind"), kindsOfDevice) || isTextOf(entry.find(u"kind"), "vnc"_L1) != ofAVncServer) {
         return no("it is not a kind of device this version knows");
     }
     const json::Value* tls = entry.find(u"tls");
@@ -1086,7 +1102,7 @@ std::optional<Device> deviceFrom(const json::Value& entry, Certificates& certifi
     device.password = password != nullptr ? password->text : QString();
     device.kind = entry.find(u"kind")->text;
     device.group = oneGroup;
-    const bool encrypted = address.startsWith("https://"_L1);
+    const bool encrypted = address.startsWith("https://"_L1) || address.startsWith("vncs://"_L1);
     const QString checked = tls != nullptr ? tls->text : u"pinned"_s;
     // Over plain HTTP there is no certificate to check, whatever the file says about one.
     device.tls = encrypted ? checked : u"pinned"_s;
@@ -1131,6 +1147,21 @@ std::optional<Device> deviceFrom(const json::Value& entry, Certificates& certifi
     }
     const json::Value* keepBoth = entry.find(u"keep_both");
     device.keepBoth = keepBoth != nullptr && keepBoth->isFlag() && keepBoth->flag;
+    // A Proxmox guest: its url names its Proxmox (over HTTPS alone), its node and its number, as the web keeps one.
+    // Read as a wall keeps it, which is what both writers mean (each keeps 443 unwritten): a url without a port is a
+    // guest of a Proxmox at 443, and not at the 8006 the Add box takes for an address typed without one. Read that way,
+    // a wall's guest of a Proxmox at 443 was no guest of a file: the writer, which reads back what it writes, wrote
+    // nothing at all (review cx3-3, M1). (The web's own reader takes such a url at 8006, its tile then at another
+    // port.)
+    if (device.kind == "proxmox"_L1) {
+        const base::Result<proxmox::Address> guest = proxmox::keptAddressOf(url->text);
+        if (!guest || guest.value().node.isEmpty() || !guest.value().vmid || !encrypted ||
+            guest.value().origin.toString(QUrl::FullyEncoded) != address) {
+            return no("it is not the address of a Proxmox guest");
+        }
+        device.node = guest.value().node;
+        device.vmid = *guest.value().vmid;
+    }
     return device;
 }
 
@@ -1176,21 +1207,31 @@ QList<Device> devicesFrom(const json::Value& said, QStringList& leftOut, NotHeld
     }
     const qsizetype looked = std::min<qsizetype>(static_cast<qsizetype>(said.list.size()), mostDevices);
     Certificates certificates;
+    // Where each device stands, by the wall's own rule for it (LocalWall::placeOf): its address; and a Proxmox guest's,
+    // its Proxmox's address and its number there, for the guests of one Proxmox share its address and are machines of
+    // their own (review cx3-2, M1). Not its node: a guest's number is one in its cluster, and the wall's place leaves
+    // the node out, so one guest under two nodes is one. (The web keys a guest by its url, its node in it.)
     QSet<QString> found;
     const Asked asked = notHeld != nullptr ? Asked::ByTheWriter : Asked::ByAReader;
     for (qsizetype index = 0; index < looked; ++index) {
         SaidOfADevice of;
         std::optional<Device> device =
             deviceFrom(said.list.at(static_cast<std::size_t>(index)), certificates, of, asked);
+        const bool aGuest = device && device->kind == "proxmox"_L1;
+        const QString place = !device  ? QString()
+                              : aGuest ? device->address + u'\n' + QString::number(device->vmid)
+                                       : device->address;
         if (!device) {
             leftOut.append(ofADeviceLeftOut(index, of.whose, of.why));
             noteNotHeld(notHeld, NotHeld::Part::Device, index, of.toAWriter);
-        } else if (found.contains(device->address)) {
-            leftOut.append(ofADeviceLeftOut(index, device->name, words("the file has that address twice")));
+        } else if (found.contains(place)) {
+            leftOut.append(ofADeviceLeftOut(index, device->name,
+                                            aGuest ? words("the file has that guest twice")
+                                                   : words("the file has that address twice")));
             noteNotHeld(notHeld, NotHeld::Part::Device, index,
                         words("another device of this wall is at the same address"));
         } else {
-            found.insert(device->address);
+            found.insert(place);
             // Where it stood, as the sentences above count: for whoever shows it beside them.
             device->place = PlaceInAFile(index + 1);
             devices.append(std::move(*device));
@@ -1789,7 +1830,9 @@ void writeParts(Script& script, const Content& content, bool secrets)
             script.name("name");
             script.text(device.name);
             script.name("url");
-            script.text(device.address);
+            // (A Proxmox guest's as the web keeps it: its Proxmox, its node and its number.)
+            script.text(device.kind == "proxmox"_L1 ? proxmox::guestUrl(QUrl(device.address), device.node, device.vmid)
+                                                    : device.address);
             script.name("username");
             script.text(device.user);
             if (secrets) {
@@ -2020,8 +2063,9 @@ QStringList notInAFile(const Content& content)
                                "this device out for it, and a qKVM server may too: read the file there and look.")
                              .arg(which));
         }
-        if (device.tls == "pinned"_L1 && device.address.startsWith("https://"_L1) && !device.certificate.isEmpty() &&
-            device.certificatePem.isEmpty()) {
+        if (device.tls == "pinned"_L1 &&
+            (device.address.startsWith("https://"_L1) || device.address.startsWith("vncs://"_L1)) &&
+            !device.certificate.isEmpty() && device.certificatePem.isEmpty()) {
             lines.append(words("%1: only the fingerprint of its certificate is known here, and a file holds a "
                                "certificate itself or none. A qKVM server that reads this file will take the "
                                "first certificate this device shows.")
@@ -2213,6 +2257,16 @@ base::Result<Written> writeWith(const Content& handedIn, const Passphrase& typed
     if (content.devices) {
         QList<Device>& devices = *content.devices;
         for (qsizetype at = 0; at < devices.size(); ++at) {
+            // (A VNC server's as its family writes it: vnc:// or vncs://, the web's vnc_url.)
+            if (vnc::namesOne(devices.at(at).address)) {
+                const base::Result<QString> asWritten = vnc::addressFrom(devices.at(at).address);
+                if (!asWritten) {
+                    return notHeldByAFile(whichOfTheWall(NotHeld::Part::Device, at, devices.at(at).name),
+                                          words("its address is not a VNC server's"));
+                }
+                devices[at].address = asWritten.value();
+                continue;
+            }
             const base::Result<QUrl> where = kvm::addressFrom(devices.at(at).address);
             if (!where) {
                 return notHeldByAFile(whichOfTheWall(NotHeld::Part::Device, at, devices.at(at).name),

@@ -17,6 +17,7 @@
 
 #include "memory_secrets.h"
 #include "own_kvms_view.h"
+#include "stand_in.h"
 
 using namespace Qt::StringLiterals;
 using namespace qkvm;
@@ -408,6 +409,47 @@ private slots:
         // (One out of its box runs without a password: none is kept, and the list says so, as the
         // wall's mark has it; how that is shown is the screen's.)
         QVERIFY(at(view, 1, "noPassword").toBool());
+    }
+
+    void aVncServersRowSaysHowItIsSpokenTo()
+    {
+        // A VNC server over vncs:// is known as a KVM over HTTPS is, by its certificate or by Windows' word; over
+        // vnc:// it is spoken to in the clear (the page's "Unencrypted (vnc)", which is the screen's to say).
+        Held held;
+        // (At ports where nothing listens, which Windows gives nobody else meanwhile: outside review c9a-3, L3.)
+        const core::testing::NobodyThere pinnedsPlace;
+        const core::testing::NobodyThere trustedsPlace;
+        const core::testing::NobodyThere plainsPlace;
+        core::OwnKvm pinned;
+        pinned.address = u"vncs://127.0.0.1:%1"_s.arg(pinnedsPlace.port());
+        pinned.name = u"Pinned"_s;
+        pinned.kind = u"vnc"_s;
+        pinned.knownByCertificate = true;
+        pinned.certificate = QByteArray(32, 'p');
+        core::OwnKvm trusted = pinned;
+        trusted.address = u"vncs://127.0.0.1:%1"_s.arg(trustedsPlace.port());
+        trusted.name = u"Trusted"_s;
+        trusted.knownByCertificate = false;
+        trusted.certificate.clear();
+        core::OwnKvm plain = trusted;
+        plain.address = u"vnc://127.0.0.1:%1"_s.arg(plainsPlace.port());
+        plain.name = u"Plain"_s;
+        QStringList ids;
+        for (const core::OwnKvm& one : {pinned, trusted, plain}) {
+            const base::Result<QString> added = held.wall.add(one, u"secret"_s);
+            QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+            ids.append(added.value());
+        }
+        ui::OwnKvmsView view;
+        view.use(&held.wall);
+        view.begin();
+        QCOMPARE(keysOf(view), ids);
+        QCOMPARE(at(view, 0, "family").toString(), u"vnc"_s);
+        QCOMPARE(at(view, 0, "way").toString(), u"certificate"_s);
+        QCOMPARE(at(view, 1, "way").toString(), u"windows"_s);
+        QCOMPARE(at(view, 2, "way").toString(), u"plain"_s);
+        QCOMPARE(at(view, 2, "host").toString(), u"127.0.0.1:%1"_s.arg(plainsPlace.port()));
+        view.end();
     }
 
     void withNoWallTheListIsEmptyAndAsksNothing()

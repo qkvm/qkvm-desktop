@@ -630,9 +630,24 @@ void MergedWall::addStream(Screen& screen, const QString& key, quint32 number, e
         return;
     }
     engine::Stream& stream = scene->add(number, codec);
-    // A wall's pictures are small ones, decoded for a card and not for one machine shown large.
+    // A wall's pictures are small ones, decoded for a card and not for one machine shown large; and a card's still is
+    // kept at the size drawn, but where its machine is the one shown large in this window (tellCards).
     stream.shownAt({}, engine::Importance::Preview);
+    stream.shownAsACard(key != screen.wall->enlarged());
     screen.streams.insert(key, &stream);
+}
+
+void MergedWall::tellCards(const WallView& wall)
+{
+    const auto screen = std::ranges::find_if(m_screens, [&](const Screen& one) { return one.wall == &wall; });
+    if (screen == m_screens.end()) {
+        return;
+    }
+    // The machine shown large is drawn from its card's stream until its picture live comes, and a copy of its screen
+    // may be made of that: no card then, and its still whole (the review of f513c8e6, M1).
+    for (auto stream = screen->streams.cbegin(); stream != screen->streams.cend(); ++stream) {
+        stream.value()->shownAsACard(stream.key() != wall.enlarged());
+    }
 }
 
 void MergedWall::dropStreams(Screen& screen)
@@ -679,15 +694,15 @@ void MergedWall::add(WallView& wall, ActionsView& actions, Engine drawsIn)
             [picture = screen.live.get(), &wall] { wall.setLiveDiagnostics(picture->diagnostics()); });
     // Whoever sends keyboard and mouse from this window hears of whatever they go by.
     screen.may = &actions;
-    // A machine's virtual media through its qKVM: an admin of that qKVM, signed in in person, and not while the
-    // program only shows. Never of this PC's own wall, which has no server.
-    screen.actions->useMedia([this](const QString& source) -> core::ServerClient* {
+    // A machine's virtual media through its qKVM: an admin of that qKVM, signed in in person; or of this PC's own wall,
+    // whose whoever is one (PcSource::whoever) and which has them itself; and not while the program only shows.
+    screen.actions->useMedia([this](const QString& source) -> core::MediaPlace* {
         const Side* side = sideNamed(source);
         if (side == nullptr || !side->who || !side->answered || onlyShows() || side->who->role != "admin"_L1 ||
             side->who->isDisplay || side->who->mustEnroll) {
             return nullptr;
         }
-        return side->source->detailsClient();
+        return side->source->mediaPlace();
     });
     connect(screen.live.get(), &LivePicture::liveChanged, this, [this, &wall] { tellControl(wall); });
     connect(&actions, &ActionsView::allowedChanged, this, [this, &wall] { tellControl(wall); });
@@ -696,6 +711,7 @@ void MergedWall::add(WallView& wall, ActionsView& actions, Engine drawsIn)
     connect(this, &MergedWall::wallChanged, &wall, [this, &wall] { tellControl(wall); });
     connect(this, &MergedWall::statusChanged, &wall, [this, &wall] { tellControl(wall); });
     connect(&wall, &WallView::enlargedChanged, this, [this, &wall] { tellDetails(wall); });
+    connect(&wall, &WallView::enlargedChanged, this, [this, &wall] { tellCards(wall); });
     connect(&wall, &WallView::enlargedChanged, this, [this, &wall] { tellNoteSeen(wall); });
     connect(wall.details(), &DetailsView::changed, this, [this, &wall] { tellNoteSeen(wall); });
     connect(&wall, &WallView::displayingChanged, this, [this, &wall] { tellDetails(wall); });

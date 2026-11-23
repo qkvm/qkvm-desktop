@@ -33,6 +33,11 @@ public:
     using Source = std::function<base::Result<std::unique_ptr<QIODevice>>()>;
     // The file at this path, opened read only, there.
     static Source fileAt(const QString& path);
+    // The same, read only while it stays as it was when it was opened (its length, and when it was last written):
+    // looked at before every piece is read, and after the last. A file that changes while it is read fails the read
+    // that finds it so ("It was changed while it was read."), and what is read of this fails then as well: an image
+    // that was being written to as it went is not carried as one.
+    static Source unchangedFileAt(const QString& path);
     // A piece read at once, and how much is read ahead at the most.
     static constexpr qint64 pieceBytes = qint64{256} << 10;
     static constexpr qint64 aheadBytes = qint64{4} << 20;

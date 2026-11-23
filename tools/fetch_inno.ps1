@@ -153,7 +153,8 @@ try {
     # Out of the low folder: a copy takes the ordinary integrity of where it is put.
     if (Test-Path -LiteralPath $Root) { Remove-Item -LiteralPath $Root -Recurse -Force }
     Copy-Item -LiteralPath $made -Destination $Root -Recurse
-    $low = @(Get-ChildItem -LiteralPath $Root -Recurse -Force | Where-Object { ((& $icacls $_.FullName) -join "`n") -match 'Low Mandatory Level' })
+    # (Each file and folder by its label, how icacls ends read: one it could not read stops this; outside review 2, 5.1.)
+    $low = @(Get-LowIntegrityItems -Folder $Root -Icacls $icacls)
     if ($low.Count) { throw "Copied out, $($low.Count) file(s) are still marked low integrity." }
     $digest = Get-TreeDigest $Root
     $count = @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force).Count

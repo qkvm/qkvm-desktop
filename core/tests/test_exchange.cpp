@@ -1619,6 +1619,83 @@ private slots:
                               u"Device 3 (\"Written another way\"): the file has that address twice"_s}));
     }
 
+    // Review cx3-2, M1: two guests of one Proxmox share its address and are two machines, each at a place of its own in
+    // a file, as on the wall (LocalWall::placeOf: its Proxmox's address and its number there), and so are a guest and a
+    // KVM at that address. One guest twice is one, its number under another node too: a number is one in its cluster,
+    // and the wall's place leaves the node out (the web keys a guest by its url, its node in it).
+    void twoGuestsOfOneProxmoxAreTwoDevicesAndOneGuestTwiceIsOne()
+    {
+        const auto guest = [](const char* url, const char* name) {
+            return QJsonObject{{u"url"_s, QLatin1StringView(url)},
+                               {u"kind"_s, u"proxmox"_s},
+                               {u"name"_s, QLatin1StringView(name)},
+                               {u"username"_s, u"wall@pve!qkvm"_s}};
+        };
+        const Content content = devicesOf({
+            guest("https://192.168.1.50:8006/nodes/pve1/qemu/100", "web"),
+            guest("https://192.168.1.50:8006/nodes/pve1/qemu/101", "db"),
+            guest("https://192.168.1.50:8006/nodes/pve2/qemu/100", "web under another node"),
+            guest("https://192.168.1.51:8006/nodes/pve1/qemu/100", "another Proxmox's"),
+            deviceWith({{u"url"_s, u"https://192.168.1.50:8006"_s}, {u"name"_s, u"A KVM at its address"_s}}),
+            guest("https://192.168.1.50:8006/nodes/pve1/qemu/101", "db again"),
+        });
+        QVERIFY(content.devices.has_value());
+        const QList<Device> devices = devicesIn(content);
+        QCOMPARE(devices.size(), qsizetype{4});
+        QCOMPARE(devices.at(0).name, u"web"_s);
+        QCOMPARE(devices.at(0).address, u"https://192.168.1.50:8006"_s);
+        QCOMPARE(devices.at(0).node, u"pve1"_s);
+        QCOMPARE(devices.at(0).vmid, qint64{100});
+        QCOMPARE(devices.at(1).name, u"db"_s);
+        QCOMPARE(devices.at(1).address, u"https://192.168.1.50:8006"_s);
+        QCOMPARE(devices.at(1).vmid, qint64{101});
+        QCOMPARE(devices.at(2).address, u"https://192.168.1.51:8006"_s);
+        QCOMPARE(devices.at(2).vmid, qint64{100});
+        QCOMPARE(devices.at(3).kind, u"kvmd"_s);
+        QCOMPARE(devices.at(3).address, u"https://192.168.1.50:8006"_s);
+        // (Each where it stood in the file, as the sentences count.)
+        QCOMPARE(devices.at(0).place.counted(), qsizetype{1});
+        QCOMPARE(devices.at(1).place.counted(), qsizetype{2});
+        QCOMPARE(devices.at(2).place.counted(), qsizetype{4});
+        QCOMPARE(devices.at(3).place.counted(), qsizetype{5});
+        QCOMPARE(content.leftOut,
+                 (QStringList{u"Device 3 (\"web under another node\"): the file has that guest twice"_s,
+                              u"Device 6 (\"db again\"): the file has that guest twice"_s}));
+    }
+
+    // Review cx3-3, M1: a guest's url without a port, as the web writes one of a Proxmox at 443 (its device_url keeps
+    // 443 unwritten, as this program's address does), names a guest of the Proxmox at 443, and is taken: the same url
+    // written with ":443" is that guest, and the one at 8006 another Proxmox's.
+    void aGuestsUrlWithoutAPortIsAGuestOfAProxmoxAt443()
+    {
+        const auto guest = [](const char* url, const char* name) {
+            return QJsonObject{{u"url"_s, QLatin1StringView(url)},
+                               {u"kind"_s, u"proxmox"_s},
+                               {u"name"_s, QLatin1StringView(name)},
+                               {u"username"_s, u"wall@pve!qkvm"_s}};
+        };
+        const Content content = devicesOf({
+            guest("https://192.168.1.50/nodes/pve1/qemu/100", "web"),
+            guest("https://192.168.1.50:443/nodes/pve1/qemu/100", "web with its port written"),
+            guest("https://192.168.1.50:8006/nodes/pve2/qemu/100", "at 8006"),
+            guest("https://pve.example/nodes/pve1/qemu/101", "behind a proxy"),
+        });
+        QVERIFY(content.devices.has_value());
+        const QList<Device> devices = devicesIn(content);
+        QCOMPARE(devices.size(), qsizetype{3});
+        QCOMPARE(devices.at(0).name, u"web"_s);
+        QCOMPARE(devices.at(0).kind, u"proxmox"_s);
+        QCOMPARE(devices.at(0).address, u"https://192.168.1.50"_s);
+        QCOMPARE(devices.at(0).node, u"pve1"_s);
+        QCOMPARE(devices.at(0).vmid, qint64{100});
+        QCOMPARE(devices.at(1).address, u"https://192.168.1.50:8006"_s);
+        QCOMPARE(devices.at(1).node, u"pve2"_s);
+        QCOMPARE(devices.at(2).address, u"https://pve.example"_s);
+        QCOMPARE(devices.at(2).vmid, qint64{101});
+        QCOMPARE(content.leftOut,
+                 QStringList{u"Device 2 (\"web with its port written\"): the file has that guest twice"_s});
+    }
+
     void aDevicesCertificateIsKeptAsTheServerKeepsOne()
     {
         const QString pem = theCertificate();

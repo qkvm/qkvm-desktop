@@ -12,6 +12,7 @@
 #include "d3d.h"
 #include "decode_pool.h"
 #include "ffmpeg.h"
+#include "stills_gate.h"
 
 namespace qkvm::engine {
 
@@ -54,6 +55,9 @@ protected:
 //   lock of its own, held while a packet is applied to it on a decoding thread and while what changed
 //   is copied to the card. The drawing, which holds the device's lock, only tries it, and draws the
 //   screen as it was where a packet is being applied; no other lock is asked for while it is held.
+// * The stills' line (StillsGate: how many card stills that are key frames are decoded at once) has a lock of its
+//   own, asked for after the device's, a stream's decoding and a stream's inbox where those are held, and the pool's
+//   is asked for while it is held (a stream is woken under it); no other.
 class GpuCore final : public Gpu {
 public:
     explicit GpuCore(const Options& options);
@@ -85,6 +89,7 @@ public:
     void slowApplying(int ms) override { m_applyingMs.store(ms, std::memory_order_release); }
     int applyingMs() const noexcept { return m_applyingMs.load(std::memory_order_acquire); }
     std::uint64_t timesRecovered() const override;
+    Stills stillsSeen() override;
     std::vector<std::string> objections() override;
 
     std::recursive_mutex& lock() noexcept { return m_lock; }
@@ -113,6 +118,8 @@ public:
     void detach(const Host* host);
 
     DecodePool& decodePool() noexcept { return m_pool; }
+    // Where a card still that is a key frame is handed in to the pool (Options::stillsAtOnce).
+    StillsGate& stillsGate() noexcept { return m_stills; }
     DecodingChoice decodingChoice() const noexcept
     {
         return static_cast<DecodingChoice>(m_decoding.load(std::memory_order_acquire));
@@ -135,6 +142,7 @@ private:
 
     const Options m_options;
     DecodePool m_pool;
+    StillsGate m_stills;
 
     mutable std::recursive_mutex m_lock;
     ComPtr<IDXGIFactory2> m_factory;

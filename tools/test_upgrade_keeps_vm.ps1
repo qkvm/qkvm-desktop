@@ -39,8 +39,11 @@ and the newer setup upgrades over it. Steps, one JSON file each in -Out, summary
                       byte for byte; settings.json says
                       all the old one said, the same (a window that Windows moved onto the screen is said, and is no
                       loss); the sign-ins' counts (no refusal forgotten), the alert and the setup override still there;
-                      the settings as they were found kept as settings.json.before-<new version>.bak, byte for byte;
-                      the new version recorded; no lock marker
+                      the settings as they were found kept, byte for byte, as settings.json.<older version>.bak where
+                      they name the version that wrote them (from 0.1.2 on) or as settings.json.before-<new
+                      version>.bak where they name none (0.1.0, 0.1.1); a setup override marked queued (from 0.1.2)
+                      still marked so; the new version recorded, with the older one as the one before it where the
+                      older one kept a record (from 0.1.2); no lock marker
   06 second-start     started again: the same views again, and no second copy of the settings (one at the version's
                       first start, and only then)
 What the program does with the made-up KVMs of the fixture (192.0.2.0/24, 198.51.100.0/24, set aside for examples) and
@@ -56,8 +59,8 @@ Before: the two tools, each built in release, as test programs (never in a packa
     (ui\tests\fixtures\profiles\README.md says how; the builder of 0.1.2 handed both over with their SHA-256);
   - the new version's checker, from the same tree as the new setup (it names the new version):
         cmake --preset release ; cmake --build --preset release --target qkvm-test-check-profile
-Copy both, and the older version's fixture folder (ui\tests\fixtures\profiles\0.1.1 with 0.1.1's setup, or 0.1.0 with
-0.1.0's), into the VM. Each runs with the libraries of the program installed at its step: this copies every DLL of
+Copy both, and the older version's fixture folder (ui\tests\fixtures\profiles\0.1.2 with 0.1.2's setup, 0.1.1 with
+0.1.1's, or 0.1.0 with 0.1.0's), into the VM. Each runs with the libraries of the program installed at its step: this copies every DLL of
 the installed folder beside it (-Out\writer after step 01, -Out\checker after step 03). Run it from a fresh snapshot,
 not after test_setup_vm.ps1 (that one leaves data behind).#>
 param(

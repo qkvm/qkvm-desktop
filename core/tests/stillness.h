@@ -19,7 +19,9 @@
 #include <QThread>
 #include <QTimer>
 
+#if !defined(_M_ARM64)
 #include <intrin.h>
+#endif
 #include <windows.h>
 
 namespace qkvm::core::testing {
@@ -30,7 +32,13 @@ namespace qkvm::core::testing {
 // the PC asked for finer), and each word says how long it waited to be taken (a timer of the thread's own is no
 // measure: Windows turns one no more often than every 10 ms), and how much of that wait the thread was running: its
 // own processor time, as Windows counts its cycles (in the units of the processor's time-stamp counter, at a steady
-// pace whatever the core's).
+// pace whatever the core's). On Windows on ARM those cycles are the core's own, at whatever pace the core runs, and no
+// counter at a steady pace in their units is there to reckon them against: they are reckoned at the pace the measured
+// thread's core keeps while the thread works, measured as the measuring begins and again as it ends, the lower of the
+// two (pacePerNsWhileWorking): where the core slowed in between (power management: one program ran 2.7 times slower in
+// its second and third runs, 2026-11-19), the same cycles were more time, and the lower pace reckons the work the
+// longer, the safe side. A core that slowed only while the measured work ran, and was quick again at both ends, is
+// beyond it: that work is reckoned shorter by as much as the core slowed (review arm 1, L1).
 // What it worked is what the program did on that thread; the rest of a wait is what it waited for (a lock, a file) and
 // Windows' own pauses of it, which on a busy PC were half a second (2026-11-06, release, the slow cores beside a full
 // build: 507.8 ms of stillness, 0.3 of it working). So while it measures, the thread and the one that asks run above
@@ -77,8 +85,13 @@ public:
         m_measured = measured;
         m_priorityBefore = GetThreadPriority(GetCurrentThread());
         static_cast<void>(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST));
+#if defined(_M_ARM64)
+        m_stampsPerNs = pacePerNsWhileWorking();
+#endif
         m_clock.start();
+#if !defined(_M_ARM64)
         m_stampsAtStart = __rdtsc();
+#endif
         m_going = true;
         m_asker = std::thread([this] {
             static_cast<void>(SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST));
@@ -110,8 +123,16 @@ public:
             m_going = false;
             m_asker.join();
             QCoreApplication::sendPostedEvents(&m_here, QEvent::MetaCall);
+#if defined(_M_ARM64)
+            // (The pace again, and the lower of the two: see above. A pace that could not be read is not taken.)
+            const double paceNow = pacePerNsWhileWorking();
+            if (paceNow > 0 && (m_stampsPerNs <= 0 || paceNow < m_stampsPerNs)) {
+                m_stampsPerNs = paceNow;
+            }
+#else
             const qint64 ns = m_clock.nsecsElapsed();
             m_stampsPerNs = ns > 0 ? static_cast<double>(__rdtsc() - m_stampsAtStart) / static_cast<double>(ns) : 0;
+#endif
             static_cast<void>(SetThreadPriority(GetCurrentThread(), m_priorityBefore));
             CloseHandle(m_measured);
             m_measured = nullptr;
@@ -145,6 +166,28 @@ public:
 
 private:
     static double tenths(qint64 ns) { return std::round(static_cast<double>(ns) / 100'000.0) / 10.0; }
+#if defined(_M_ARM64)
+    // The calling thread's cycles a nanosecond while it works: a twentieth of a second's work on it, the first quarter
+    // to bring its core up to the pace it works at and the rest counted (above the PC's other work, as start() has set
+    // it, so that Windows seldom puts it aside meanwhile: a pause would make the pace look slower, and the work it
+    // reckons longer, never shorter).
+    static double pacePerNsWhileWorking()
+    {
+        QElapsedTimer clock;
+        clock.start();
+        while (clock.nsecsElapsed() < 12'500'000) {
+        }
+        ULONG64 from = 0;
+        ULONG64 to = 0;
+        static_cast<void>(QueryThreadCycleTime(GetCurrentThread(), &from));
+        const qint64 begun = clock.nsecsElapsed();
+        while (clock.nsecsElapsed() - begun < 37'500'000) {
+        }
+        static_cast<void>(QueryThreadCycleTime(GetCurrentThread(), &to));
+        const qint64 ns = clock.nsecsElapsed() - begun;
+        return ns > 0 && to > from ? static_cast<double>(to - from) / static_cast<double>(ns) : 0;
+    }
+#endif
     qint64 nsOf(ULONG64 cycles) const
     {
         return m_stampsPerNs > 0 ? static_cast<qint64>(static_cast<double>(cycles) / m_stampsPerNs) : 0;

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <functional>
 
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -77,6 +78,8 @@ struct Pretended {
     QJsonArray wake{QJsonObject{{u"mac"_s, u"00:11:22:aa:bb:cc"_s}, {u"name"_s, u"Backup box"_s}}};
     bool serverIsOn = true;
     bool kvmIsThere = true;
+    // Where the server says its KVM is (an admin may edit that there).
+    QString kvmHost = u"192.168.1.22"_s;
     std::optional<QStringList> capabilities;
     std::optional<QStringList> serverCapabilities;
     // More KVMs on the wall, after the server: "n1", "n2", … called "Node 1", "Node 2", …, each
@@ -105,9 +108,9 @@ struct Pretended {
         if (kvmIsThere) {
             devices.append(QJsonObject{{u"id"_s, u"kvm"_s},
                                        {u"name"_s, u"NAS"_s},
-                                       {u"host"_s, u"192.168.1.22"_s},
+                                       {u"host"_s, kvmHost},
                                        {u"kind"_s, u"kvmd"_s},
-                                       {u"open_url"_s, u"http://192.168.1.22/"_s},
+                                       {u"open_url"_s, u"http://%1/"_s.arg(kvmHost)},
                                        {u"picture"_s, true}});
         }
         devices.append(QJsonObject{{u"id"_s, u"srv"_s},
@@ -509,6 +512,7 @@ public:
     {
         ++acted;
         actions.append(machine + u':' + what.kind);
+        texts.insert(machine + u':' + what.kind, what.text);
         later([this, done = std::move(done)] {
             if (refuses) {
                 done(*refuses);
@@ -545,6 +549,7 @@ public:
     // How often something was to be done to a machine, and what ("machine:kind"); what it is refused, where set.
     int acted = 0;
     QStringList actions;
+    QHash<QString, QString> texts; // (each action's text, by "machine:kind")
     std::optional<base::Error> refuses;
 
 private:
@@ -2059,6 +2064,42 @@ private slots:
         QTRY_VERIFY(!box.opened());
     }
 
+    void theMediaBoxGoesWhereItsMachineIsSaidToBeElsewhereNow()
+    {
+        // The wave-1 review, finding 7, through a server: the box was opened for the machine where the wall said it
+        // is; the server says it is elsewhere now (its address edited there). The box goes, and that is said, before
+        // anything of it can go to whatever is there now (the server holds to the name alone).
+        Pretended pretended;
+        pretended.capabilities = QStringList{u"keys"_s, u"text"_s, u"power"_s, u"ports"_s, u"media"_s};
+        Desk desk(pretended, u"admin"_s, 50);
+        core::ServerClient* media = &desk.client;
+        desk.actions.useMedia([&](const QString&) { return media; });
+        QTRY_VERIFY(desk.isReady());
+        desk.view.open(u"kvm"_s);
+        desk.view.choose(u"media"_s);
+        ui::MediaView& box = *desk.view.media();
+        QVERIFY(box.opened());
+        // Its name or another field: the box stays.
+        QTest::qWait(300);
+        QVERIFY(box.opened());
+        pretended.kvmHost = u"192.168.1.23"_s;
+        // (As the server's live line tells a wall edited there: it is asked anew.)
+        desk.feed.askAnew();
+        QTRY_VERIFY(!box.opened());
+        QVERIFY2(std::ranges::any_of(desk.told,
+                                     [](const QString& one) {
+                                         return one.contains(u"NAS: its media box was closed: it is at another "
+                                                             u"address now. Open it again from its menu."_s);
+                                     }),
+                 qPrintable(desk.told.join(u" | "_s)));
+        // Opened again, it is of the machine where it is now, and stays.
+        desk.view.open(u"kvm"_s);
+        desk.view.choose(u"media"_s);
+        QVERIFY(box.opened());
+        QTest::qWait(300);
+        QVERIFY(box.opened());
+    }
+
     void theBiosSetupIsAskedFirstOpensTheLargeViewAndMayBeSetWithoutAnAnswer()
     {
         Pretended pretended;
@@ -3253,6 +3294,165 @@ private slots:
         view.answer(false);
         QTest::qWait(100);
         QCOMPARE(source.acted, 2);
+    }
+
+    // The owner's decision of 2026-11-22: a server's card of this PC's wall that asks whether the computer at its
+    // place, which gives a number of its own now, is the server it was added for. Its button asks that once, Yes or No:
+    // Yes sends its answer to the card's driver (act "its_server"), which takes that number for the card; No sends
+    // nothing. Nothing else of the card's is offered while it asks, and no server's card asks this.
+    void aCardThatAsksWhetherItIsItsServerAsksYesOrNo()
+    {
+        ToldSource source;
+        source.add(u"srv"_s, true, u"error"_s, u"another_machine"_s);
+        source.status[u"srv"_s].asksItsServer = true;
+        source.status[u"srv"_s].askedAbout = u"server:0123456789abcdef0123456789abcdef"_s;
+        source.status[u"srv"_s].errorMessage =
+            u"The server at this address gives a number of its own now. It says it is: SRV-2200, named db-01.lan."_s;
+        source.status[u"srv"_s].saysOfItself = u"It says it is: SRV-2200, named db-01.lan."_s;
+        source.status[u"srv"_s].capabilities = QStringList{u"its_server"_s, u"not_its_server"_s};
+        source.add(u"server-srv"_s, false, u"error"_s, u"another_machine"_s);
+        source.status[u"server-srv"_s].asksItsServer = true;
+        core::WallFeed feed(source, 50);
+        ui::OnePlace place(source, feed);
+        ui::WallView wall;
+        ui::ActionsView view;
+        ui::UnderWay underWay;
+        ui::MachineActions actions(view, wall, place, underWay);
+        QSignalSpy editAsked(&view, &ui::ActionsView::editAsked);
+        feed.start();
+        QTRY_COMPARE(feed.status().size(), 2);
+        core::Account account;
+        account.role = u"admin"_s;
+        actions.enter(account);
+        view.cardAction(u"srv"_s);
+        const QVariantMap question = view.question();
+        QCOMPARE(question.value(u"title"_s).toString(), u"Is it this server?"_s);
+        QVERIFY2(question.value(u"text"_s).toString().contains(u"srv"_s),
+                 qPrintable(question.value(u"text"_s).toString()));
+        QCOMPARE(question.value(u"yes"_s).toString(), u"Yes, it is"_s);
+        QCOMPARE(question.value(u"no"_s).toString(), u"No"_s);
+        QVERIFY(!question.value(u"warning"_s).toString().isEmpty());
+        // (What the computer says of itself, to go by, and nothing of the card's words beside it: review cx2-2, L1;
+        // cx2-3, L-d.)
+        QCOMPARE(question.value(u"detail"_s).toString(), u"It says it is: SRV-2200, named db-01.lan."_s);
+        // The box put away (Esc, the cross, a click beside it): nothing is sent.
+        view.answer(false);
+        QTest::qWait(100);
+        QCOMPARE(source.acted, 0);
+        // No, by its button: said to the card's driver, which keeps the card refusing (review cx2-2, M2).
+        view.cardAction(u"srv"_s);
+        view.answerNo();
+        QTRY_VERIFY(source.actions.contains(u"srv:not_its_server"_s));
+        QCOMPARE(source.acted, 1);
+        QCOMPARE(source.texts.value(u"srv:not_its_server"_s), u"server:0123456789abcdef0123456789abcdef"_s);
+        QTest::qWait(200); // (its answer come back: the machine is free again for what is sent next)
+        // Yes: its answer goes to the card's driver, of the number the card asked about.
+        view.cardAction(u"srv"_s);
+        view.answer(true);
+        QTRY_VERIFY(source.actions.contains(u"srv:its_server"_s));
+        QCOMPARE(source.acted, 2);
+        QCOMPARE(source.texts.value(u"srv:its_server"_s), u"server:0123456789abcdef0123456789abcdef"_s);
+        // A server's card asks nothing here: its page has its own way.
+        view.cardAction(u"server-srv"_s);
+        QVERIFY(view.question().isEmpty());
+        QCOMPARE(editAsked.size(), 0);
+    }
+
+    // (Review cx2-3, M-a.) The box of a card that asks whether the computer at its place is its server stands open, and
+    // meanwhile the card stops asking (the computer went off, or a look failed): its No is sent all the same, of the
+    // number the box was shown, for the card's driver to judge (a No only ever refuses more). Where it cannot be sent
+    // at all (its card cannot be reached, or left the wall), that is said in the corner: the box never closes in
+    // silence.
+    void aCardsNoIsSentWhateverItsStatusSaysByThen()
+    {
+        ToldSource source;
+        source.add(u"srv"_s, true, u"error"_s, u"another_machine"_s);
+        const QString number = u"server:0123456789abcdef0123456789abcdef"_s;
+        const auto asks = [&source, number] {
+            core::Status& asking = source.status[u"srv"_s];
+            asking.state = u"error"_s;
+            asking.errorCode = u"another_machine"_s;
+            asking.asksItsServer = true;
+            asking.askedAbout = number;
+            asking.capabilities = QStringList{u"its_server"_s, u"not_its_server"_s};
+        };
+        asks();
+        core::WallFeed feed(source, 50);
+        ui::OnePlace place(source, feed);
+        ReachesNothing cut(place);
+        cut.reachesNothing = false;
+        ui::WallView wall;
+        ui::ActionsView view;
+        ui::UnderWay underWay;
+        ui::MachineActions actions(view, wall, cut, underWay);
+        QStringList told;
+        QObject::connect(view.notices(), &QAbstractItemModel::rowsInserted, &view,
+                         [&told, &view](const QModelIndex&, int first, int) {
+                             const QModelIndex notice = view.notices()->index(first, 0);
+                             told.append(notice.data(ui::Notices::KindRole).toString() + u": "_s +
+                                         notice.data(ui::Notices::TextRole).toString());
+                         });
+        feed.start();
+        QTRY_VERIFY(feed.status().value(u"srv"_s).asksItsServer);
+        core::Account account;
+        account.role = u"admin"_s;
+        actions.enter(account);
+        view.cardAction(u"srv"_s);
+        QCOMPARE(view.question().value(u"title"_s).toString(), u"Is it this server?"_s);
+        // The card asks no more: Off, with Power on.
+        core::Status off;
+        off.state = u"online"_s;
+        off.capabilities = QStringList{u"power_on"_s};
+        source.status[u"srv"_s] = off;
+        QTRY_VERIFY(!feed.status().value(u"srv"_s).asksItsServer);
+        view.answerNo();
+        QTRY_VERIFY(source.actions.contains(u"srv:not_its_server"_s));
+        QCOMPARE(source.acted, 1);
+        QCOMPARE(source.texts.value(u"srv:not_its_server"_s), number);
+        QTest::qWait(200);
+        // Asked again, and its card cannot be reached by the time its No is clicked: nothing is sent, and that is said.
+        asks();
+        QTRY_VERIFY(feed.status().value(u"srv"_s).asksItsServer);
+        view.cardAction(u"srv"_s);
+        QCOMPARE(view.question().value(u"title"_s).toString(), u"Is it this server?"_s);
+        cut.reachesNothing = true;
+        const qsizetype beforeCut = told.size();
+        view.answerNo();
+        QTRY_VERIFY(told.size() > beforeCut);
+        QVERIFY2(told.constLast().startsWith(u"error: "_s) && told.constLast().contains(u"No"_s),
+                 qPrintable(told.join(u'\n')));
+        QTest::qWait(100);
+        QCOMPARE(source.acted, 1);
+        cut.reachesNothing = false;
+        // ...and its wall does not hand it on (something else is under way on that card): that is said, with what to
+        // do.
+        view.cardAction(u"srv"_s);
+        QCOMPARE(view.question().value(u"title"_s).toString(), u"Is it this server?"_s);
+        source.refuses =
+            base::Error{"busy", "Something else is being done to srv at this moment. Wait for it to finish."};
+        const qsizetype beforeBusy = told.size();
+        view.answerNo();
+        QTRY_VERIFY(told.size() > beforeBusy && !told.constLast().startsWith(u"working: "_s));
+        QVERIFY2(told.constLast().startsWith(u"error: "_s) && told.constLast().contains(u"did not reach its card"_s) &&
+                     told.constLast().contains(u"Something else is being done"_s),
+                 qPrintable(told.constLast()));
+        QCOMPARE(source.acted, 2);
+        source.refuses.reset();
+        QTest::qWait(200);
+        // ...and the card goes from the wall while its box stands open.
+        view.cardAction(u"srv"_s);
+        QCOMPARE(view.question().value(u"title"_s).toString(), u"Is it this server?"_s);
+        source.wall.machines.clear();
+        source.status.clear();
+        QTRY_VERIFY(feed.machines().isEmpty());
+        const qsizetype before = told.size();
+        view.answerNo();
+        QTRY_VERIFY(told.size() > before);
+        QVERIFY2(told.constLast().startsWith(u"error: "_s) && told.constLast().contains(u"No"_s),
+                 qPrintable(told.join(u'\n')));
+        QTest::qWait(100);
+        QCOMPARE(source.acted, 2);
+        QVERIFY(view.question().isEmpty());
     }
 
     void aFailedResumeOpensNothing()

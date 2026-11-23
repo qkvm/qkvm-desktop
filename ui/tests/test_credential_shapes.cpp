@@ -21,7 +21,8 @@ using namespace qkvm;
 namespace {
 
 // Every published version, by each kind of profile it has a fixture of: none may go.
-const QStringList published{u"0.1.0"_s, u"0.1.1"_s, u"0.1.0-wall-screen"_s, u"0.1.1-wall-screen"_s};
+const QStringList published{
+    u"0.1.0"_s, u"0.1.1"_s, u"0.1.2"_s, u"0.1.0-wall-screen"_s, u"0.1.1-wall-screen"_s, u"0.1.2-wall-screen"_s};
 
 QJsonObject jsonIn(const QString& file)
 {

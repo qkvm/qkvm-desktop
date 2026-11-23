@@ -27,6 +27,7 @@
 #include <QSignalSpy>
 #include <QSize>
 #include <QSizeF>
+#include <QSslCertificate>
 #include <QStringList>
 #include <QTcpServer>
 #include <QTemporaryDir>
@@ -35,6 +36,7 @@
 #include <QUrl>
 
 #include <qkvm/core/kvm_adding.h>
+#include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/local_wall.h>
 #include <qkvm/core/settings.h>
 #include <qkvm/engine/gpu.h>
@@ -55,6 +57,7 @@
 #include "session_view.h"
 #include "settings_view.h"
 #include "update_by_hand.h"
+#include "vnc_by_hand.h"
 #include "wall_view.h"
 #include "workspaces_view.h"
 
@@ -1192,6 +1195,52 @@ public:
     }
 };
 
+// A certificate and its key of the tests' own (.testdata/tls), and its SHA-256.
+core::testing::Tls tlsOf(const QString& name)
+{
+    return {QStringLiteral(QKVM_TESTDATA "/tls/") + name + u".crt"_s,
+            QStringLiteral(QKVM_TESTDATA "/tls/") + name + u".key"_s};
+}
+QByteArray sha256Of(const QString& name)
+{
+    const QList<QSslCertificate> certificates =
+        QSslCertificate::fromPath(QStringLiteral(QKVM_TESTDATA "/tls/") + name + u".crt"_s, QSsl::Pem);
+    return certificates.isEmpty() ? QByteArray() : certificates.first().digest(QCryptographicHash::Sha256);
+}
+
+// The KVM of the wall with this id, as it is now; one with nothing in it where there is none.
+core::OwnKvm onTheWall(const Desk& desk, const QString& id)
+{
+    for (const core::OwnKvm& kvm : desk.own->wall().kvms()) {
+        if (kvm.id == id) {
+            return kvm;
+        }
+    }
+    return {};
+}
+
+// Whether the wall comes to say this of a machine within a minute by the clock, asked as a window that shows it asks:
+// this error (empty: online, with none). (Rounds that wait up to three seconds each are counted by the clock, not by
+// their number: outside review c9a-3, L3.)
+bool wallSays(Desk& desk, const QString& id, const QString& code)
+{
+    QElapsedTimer clock;
+    clock.start();
+    while (clock.elapsed() < 60000) {
+        std::optional<base::Result<QHash<QString, core::Status>>> said;
+        desk.own->wall().askStatus([&said](base::Result<QHash<QString, core::Status>> all) { said = std::move(all); });
+        static_cast<void>(QTest::qWaitFor([&said] { return said.has_value(); }, 3000));
+        if (said && said->ok()) {
+            const core::Status now = said->value().value(id);
+            if (code.isEmpty() ? now.state == u"online"_s : now.errorCode == code) {
+                return true;
+            }
+        }
+        QTest::qWait(200);
+    }
+    return false;
+}
+
 } // namespace
 
 // The settings box, on the screen: its sections in their groups, the one shape every section has,
@@ -2177,6 +2226,297 @@ private slots:
         QVERIFY(theOne(desk.window, u"editUser"_s) != nullptr && theOne(desk.window, u"editUser"_s)->isVisible());
         clickOn(desk.window, theOne(desk.window, u"editCancel"_s));
         QTRY_VERIFY(!desk.isOpen(u"editKvm"_s));
+        QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
+    }
+
+    void aVncServersRowAndItsBoxSayWhatItIs()
+    {
+        // A VNC server on this PC's wall, in the list of KVMs and in its change box, in the page's words: "VNC server",
+        // "Unencrypted (vnc)" over vnc://, no "No password saved" (one may ask for none), and no line for a user name.
+        // (At ports where nothing listens, which Windows gives nobody else meanwhile: outside review c9a-3, L3.)
+        const core::testing::NobodyThere rack;
+        const core::testing::NobodyThere guestsPlace;
+        const core::testing::NobodyThere consolesPlace;
+        Desk desk;
+        const QStringList ids =
+            desk.put({{u"https://127.0.0.1:%1"_s.arg(rack.port()), u"Rack"_s, 'a'},
+                      {u"vnc://127.0.0.1:%1"_s.arg(guestsPlace.port()), u"Guest"_s, 0, QString(), u"vnc"_s},
+                      {u"vncs://127.0.0.1:%1"_s.arg(consolesPlace.port()), u"Console"_s, 'c', u"secret"_s, u"vnc"_s}});
+        QVERIFY(!ids.contains(QString()));
+        QVERIFY(desk.load() != nullptr);
+        QVERIFY(openSettings(desk));
+        QTRY_COMPARE(kvmRows(desk).size(), 3);
+        const QQuickItem* guest = rowOfKvm(desk, ids.at(1));
+        const QQuickItem* console = rowOfKvm(desk, ids.at(2));
+        QVERIFY(rowSays(guest, u"VNC server"_s));
+        QVERIFY(!rowSays(guest, u"GL.iNet Comet / PiKVM"_s));
+        QVERIFY(rowSays(guest, u"Unencrypted (vnc)"_s));
+        QVERIFY(!rowSays(guest, u"Plain HTTP: its password goes in the clear"_s));
+        QVERIFY(!rowSays(guest, u"No password saved"_s));
+        QVERIFY(rowSays(guest, u"No password: fine if it runs without one"_s));
+        QVERIFY(rowSays(console, u"VNC server"_s));
+        QVERIFY(rowSays(console, u"Known by its certificate"_s));
+        QVERIFY(!rowSays(rowOfKvm(desk, ids.at(0)), u"VNC server"_s));
+
+        // "Edit": its type, and no line for a user name.
+        clickOn(desk.window, inRow(console, u"kvmEdit"_s));
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QCOMPARE(desk.editing.family(), u"vnc"_s);
+        QVERIFY(says(desk.window, u"Type: VNC server"_s));
+        QVERIFY(!says(desk.window, u"Type: GL.iNet Comet / PiKVM"_s));
+        const auto* user = theOne(desk.window, u"editUser"_s);
+        QVERIFY(user == nullptr || !user->isVisible());
+        clickOn(desk.window, theOne(desk.window, u"editCancel"_s));
+        QTRY_VERIFY(!desk.isOpen(u"editKvm"_s));
+        // A vnc:// one's box says that it is spoken to unencrypted, in its family's words and not plain HTTP's
+        // (outside review c9a-2, L4).
+        clickOn(desk.window, inRow(guest, u"kvmEdit"_s));
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QTRY_VERIFY(boxSaying(desk,
+                              u"This VNC server is spoken to unencrypted (vnc://): what is seen and typed there "
+                              "can be read on the way, and its password worked out from what goes."_s) != nullptr);
+        QVERIFY(boxSaying(desk, u"This KVM is spoken to over plain HTTP: its password, and what is seen and typed "
+                                "there, can be read on the way."_s) == nullptr);
+        clickOn(desk.window, theOne(desk.window, u"editCancel"_s));
+        QTRY_VERIFY(!desk.isOpen(u"editKvm"_s));
+        QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
+    }
+
+    void aVncServerMovedToAnotherCertificateIsSavedAtVncsByTheYesWithNothingInTheClear_data()
+    {
+        QTest::addColumn<QString>("scheme");
+        QTest::addColumn<char>("known");
+        QTest::newRow("vncs, to another certificate") << u"vncs"_s << 'c';
+        QTest::newRow("vnc, onto vncs") << u"vnc"_s << char{0};
+        QTest::newRow("vncs on Windows' word, to a certificate") << u"vncs"_s << char{0};
+    }
+    void aVncServerMovedToAnotherCertificateIsSavedAtVncsByTheYesWithNothingInTheClear()
+    {
+        // Outside review c9a-2, H1. A VNC server moved in its box, with its password typed, to a vncs:// address where
+        // another certificate shows (or one at all, for a vnc:// one): the two side by side, the address kept whole in
+        // its line, and the yes saves it there at vncs://, known by that certificate, the password over TLS. Not one
+        // byte goes to what answers RFB in the clear at that port, which a yes landing on vnc:// would sign in to.
+        QFETCH(QString, scheme);
+        QFETCH(char, known);
+        // (Where it is now, nothing listens, and Windows gives that port to nobody else meanwhile: outside review
+        // c9a-3, L3. Its driver goes there in the clear, for a vnc:// one, with its password.)
+        const core::testing::NobodyThere itsPlace;
+        const QString from = scheme + u"://127.0.0.1:%1"_s.arg(itsPlace.port());
+        core::testing::VncEitherWay there(tlsOf(u"second"_s));
+        Desk desk;
+        const QStringList ids = desk.put({{from, u"Console"_s, known, u"secret"_s, u"vnc"_s}});
+        QVERIFY(!ids.contains(QString()));
+        QVERIFY(desk.load() != nullptr);
+        QVERIFY(openSettings(desk));
+        QTRY_COMPARE(kvmRows(desk).size(), 1);
+        QVERIFY(clickInRow(desk, ids.at(0), u"kvmEdit"_s));
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QTRY_VERIFY(theOne(desk.window, u"editSave"_s) != nullptr);
+        QVERIFY(typeInto(desk, u"editAddress"_s, there.url()));
+        QVERIFY(typeInto(desk, u"editPassword"_s, u"secret"_s));
+        clickOn(desk.window, theOne(desk.window, u"editSave"_s));
+        QTRY_VERIFY_WITH_TIMEOUT(desk.editing.differs(), 20000);
+        QCOMPARE(desk.editing.presented(), core::kvm::fingerprint(sha256Of(u"second"_s)));
+        QCOMPARE(desk.editing.newAddress(), there.url());
+        QCOMPARE(desk.window->findChild<QQuickItem*>(u"editAddress"_s)->property("text").toString(), there.url());
+        // What it is known by now, where that is no certificate: a vncs:// one by Windows' word, said as that (outside
+        // review c9a-2, M1, the words that hang on its showing a certificate); a vnc:// one by none yet.
+        const bool onWindowsWord = from.startsWith(u"vncs://"_s) && known == 0;
+        QCOMPARE(boxSaying(desk, u"Windows' word for the certificate it shows"_s) != nullptr, onWindowsWord);
+        QCOMPARE(boxSaying(desk, u"none yet"_s) != nullptr, known == 0 && !onWindowsWord);
+        QCOMPARE(desk.box(u"editKvm"_s)->property("saidOfTheTwo").toString().contains(u"Windows' word"_s),
+                 onWindowsWord);
+        // Said of a VNC server in its family's words, where they are this program's own (outside review c9a-3, L2):
+        // it has no page of its own to compare with, and VNC authentication sends no password. (Where it is known by
+        // a certificate, the page's own warning, which the page says of every device.)
+        const QString saidOfTheTwo = desk.box(u"editKvm"_s)->property("saidOfTheTwo").toString();
+        if (known != 0) {
+            QVERIFY2(saidOfTheTwo.startsWith(u"A KVM gets a new certificate after a factory reset"_s),
+                     qPrintable(saidOfTheTwo));
+        } else if (onWindowsWord) {
+            QCOMPARE(saidOfTheTwo,
+                     u"This VNC server is known by Windows' word and by no certificate of its own, so there is none "
+                     "here to compare this one with: compare it with the certificate the server was set up with. "
+                     "Saying yes signs in to what shows it, and the server is known by this certificate from then on, "
+                     "and no longer by Windows' word."_s);
+        } else {
+            QCOMPARE(saidOfTheTwo, u"This VNC server is known by no certificate yet, so there is none here to compare "
+                                   "this one with: compare it with the certificate the server was set up with. Saying "
+                                   "yes signs in to what shows it, and the server is known by it from then on."_s);
+        }
+        QCOMPARE(there.behind.passwordTries, 0);
+        const QQuickItem* yes = theOne(desk.window, u"reviewTrust"_s);
+        QVERIFY(yes != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(yes->isEnabled(), 5000);
+        clickOn(desk.window, yes);
+        QTRY_VERIFY(desk.editing.busy() || !desk.isOpen(u"editKvm"_s) || !desk.editing.problem().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!desk.editing.busy(), 40000);
+        // Every line accepted there began TLS by its first byte, one that ended at once among them (outside review
+        // c9a-3, L3: told by the bytes and by no timer, each line counted as it is accepted).
+        const auto allOverTls = [&there] {
+            QTRY_COMPARE(there.undecided(), 0);
+            QCOMPARE(there.inTheClear, 0);
+            QCOMPARE(there.clearBytesHeard, qint64{0});
+            QCOMPARE(there.overTls, there.connections);
+            QVERIFY(there.connections >= 1);
+        };
+        allOverTls();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QVERIFY2(desk.editing.problem().isEmpty(), qPrintable(desk.editing.problem()));
+        const core::OwnKvm now = onTheWall(desk, ids.at(0));
+        QCOMPARE(now.address, there.url());
+        QVERIFY(now.knownByCertificate);
+        QCOMPARE(now.certificate, sha256Of(u"second"_s));
+        QVERIFY(there.behind.handshakes >= 1);
+        QVERIFY(there.behind.passwordTries >= 1);
+        // (And what the wall's own driver asks there from now on goes over TLS too.)
+        QTest::qWait(1000);
+        allOverTls();
+        if (QTest::currentTestFailed()) {
+            return;
+        }
+        QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
+    }
+
+    void aVncsServerMovedIntoTheClearElsewhereIsAskedForFirstAndSavedAtVncByTheYes()
+    {
+        // Outside review c9a-3, M1, as the coordinator decided: the desktop's own KVM rule, stricter than the web. A
+        // vncs:// server whose address is retyped bare (which is a vnc:// one) at another port, with its password
+        // typed: saved, its box asks first, in VNC's words, with the address whole in its line, and not one line is
+        // accepted at that port. Saved again without the yes, it asks again. With the yes it is saved at vnc://,
+        // signed in to there, and says that it is spoken to unencrypted now.
+        core::testing::VncByHand there;
+        // (Where it is now, nothing listens, and Windows gives that port to nobody else meanwhile.)
+        const core::testing::NobodyThere itsPlace;
+        const quint16 itsPort = itsPlace.port();
+        QVERIFY(itsPort != 0);
+        Desk desk;
+        const QStringList ids =
+            desk.put({{u"vncs://127.0.0.1:%1"_s.arg(itsPort), u"Console"_s, 'c', u"secret"_s, u"vnc"_s}});
+        QVERIFY(!ids.contains(QString()));
+        QVERIFY(desk.load() != nullptr);
+        QVERIFY(openSettings(desk));
+        QTRY_COMPARE(kvmRows(desk).size(), 1);
+        QVERIFY(clickInRow(desk, ids.at(0), u"kvmEdit"_s));
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QTRY_VERIFY(theOne(desk.window, u"editSave"_s) != nullptr);
+        QVERIFY(typeInto(desk, u"editAddress"_s, u"127.0.0.1:%1"_s.arg(there.port())));
+        QVERIFY(typeInto(desk, u"editPassword"_s, u"secret"_s));
+        const QString givenUp =
+            u"Unencrypted at %1: nothing shows who answers there, what is seen and typed can be read "
+            "on the way, and its password worked out from what goes"_s.arg(there.url());
+        for (int round = 0; round < 2; ++round) {
+            clickOn(desk.window, theOne(desk.window, u"editSave"_s));
+            QTRY_VERIFY_WITH_TIMEOUT(desk.editing.differs() && desk.editing.isPlainHttpThere(), 20000);
+            QCOMPARE(desk.editing.newAddress(), there.url());
+            QCOMPARE(desk.window->findChild<QQuickItem*>(u"editAddress"_s)->property("text").toString(), there.url());
+            const QQuickItem* yes = theOne(desk.window, u"reviewTrust"_s);
+            QVERIFY(yes != nullptr);
+            QCOMPARE(yes->property("text").toString(), u"Use vnc:// (unencrypted)"_s);
+            QVERIFY(boxSaying(desk, givenUp) != nullptr);
+            QVERIFY(saying(desk.box(u"editKvm"_s)->property("contentItem").value<QQuickItem*>(), u"Use plain HTTP"_s) ==
+                    nullptr);
+            QCOMPARE(there.connections, 0);
+            if (round == 0) {
+                // Without the yes: back to its lines, which hold the address whole, as it was asked for.
+                clickOn(desk.window, theOne(desk.window, u"reviewClose"_s));
+                QTRY_VERIFY(!desk.editing.differs());
+                QTRY_VERIFY(theOne(desk.window, u"editSave"_s) != nullptr);
+                QCOMPARE(desk.window->findChild<QQuickItem*>(u"editAddress"_s)->property("text").toString(),
+                         there.url());
+            }
+        }
+        QCOMPARE(onTheWall(desk, ids.at(0)).address, u"vncs://127.0.0.1:%1"_s.arg(itsPort));
+        const QQuickItem* yes = theOne(desk.window, u"reviewTrust"_s);
+        QTRY_VERIFY_WITH_TIMEOUT(yes->isEnabled(), 5000);
+        QCOMPARE(there.connections, 0);
+        clickOn(desk.window, yes);
+        QTRY_VERIFY(desk.editing.busy() || !desk.editing.savedAs().isEmpty() || !desk.editing.problem().isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!desk.editing.busy(), 40000);
+        QVERIFY2(desk.editing.problem().isEmpty(), qPrintable(desk.editing.problem()));
+        const core::OwnKvm now = onTheWall(desk, ids.at(0));
+        QCOMPARE(now.address, there.url());
+        QVERIFY(!now.knownByCertificate);
+        QVERIFY(now.certificate.isEmpty());
+        QVERIFY(there.connections >= 1);
+        QVERIFY(there.passwordTries >= 1);
+        QTRY_VERIFY(boxSaying(desk,
+                              u"This VNC server is spoken to unencrypted (vnc://): what is seen and typed there "
+                              "can be read on the way, and its password worked out from what goes."_s) != nullptr);
+        QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
+    }
+
+    void aVncsServersCertificateIsLookedAtAgainFromItsCardAndFromItsBox()
+    {
+        // Outside review c9a-2, M1: as a KVM's over HTTPS (the page's showsCertificate, https and vncs). A vncs://
+        // server whose certificate changed says so on its card, whose "Review certificate" opens the two side by
+        // side, and the yes has it known by the new one and online, nothing sent before it. And one taken from a file
+        // without a certificate (known by Windows' word, which does not trust a VNC server's own) has its box's
+        // "Review certificate", and is online after the yes: the promise its row in the file made is kept.
+        core::testing::VncByHand changed(tlsOf(u"second"_s));
+        core::testing::VncByHand imported(tlsOf(u"first"_s));
+        Desk desk;
+        const QStringList ids = desk.put({{changed.url(), u"Console"_s, 'c', u"secret"_s, u"vnc"_s}});
+        QVERIFY(!ids.contains(QString()));
+        const QString fromAFile = [&desk, &imported] {
+            core::LocalWall before(desk.settings, desk.secrets, quick().driver);
+            core::LocalWall::FromAFile one;
+            one.kvm.kind = u"vnc"_s;
+            one.kvm.address = imported.url();
+            one.kvm.name = u"Imported"_s;
+            one.password = u"secret"_s;
+            const QList<base::Result<QString>> came = before.takeFromAFile({one});
+            return came.size() == 1 && came.constFirst() ? came.constFirst().value() : QString();
+        }();
+        QVERIFY(!fromAFile.isEmpty());
+        QVERIFY(desk.load() != nullptr);
+        QVERIFY(wallSays(desk, ids.at(0), u"cert_mismatch"_s));
+        QVERIFY(wallSays(desk, fromAFile, u"cert_invalid"_s));
+        QCOMPARE(changed.passwordTries, 0);
+        QCOMPARE(imported.passwordTries, 0);
+
+        // The card's way (WallCards: "Review certificate" on cert_mismatch): the box for the two alone.
+        desk.editing.openFor(ids.at(0), true);
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QVERIFY(desk.editing.isForReview());
+        QTRY_VERIFY_WITH_TIMEOUT(desk.editing.isReviewed(), 20000);
+        QCOMPARE(desk.editing.remembered(), core::kvm::fingerprint(QByteArray(32, 'c')));
+        QCOMPARE(desk.editing.presented(), core::kvm::fingerprint(sha256Of(u"second"_s)));
+        QVERIFY(!desk.editing.isSame());
+        const QQuickItem* yes = theOne(desk.window, u"reviewTrust"_s);
+        QVERIFY(yes != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(yes->isEnabled(), 5000);
+        QCOMPARE(changed.passwordTries, 0);
+        clickOn(desk.window, yes);
+        QTRY_VERIFY_WITH_TIMEOUT(!desk.isOpen(u"editKvm"_s), 20000);
+        QCOMPARE(onTheWall(desk, ids.at(0)).certificate, sha256Of(u"second"_s));
+        QVERIFY(wallSays(desk, ids.at(0), u""_s));
+
+        // The box's way: its line says what it is known by, and its "Review certificate" reads what it shows.
+        QVERIFY(openSettings(desk));
+        QTRY_VERIFY(rowOfKvm(desk, fromAFile) != nullptr);
+        QVERIFY(clickInRow(desk, fromAFile, u"kvmEdit"_s));
+        QTRY_VERIFY(desk.isOpen(u"editKvm"_s));
+        QVERIFY(desk.editing.showsCertificate());
+        QTRY_VERIFY(theOne(desk.window, u"editCertificate"_s) != nullptr);
+        const QQuickItem* review = theOne(desk.window, u"editReview"_s);
+        QVERIFY(review != nullptr);
+        clickOn(desk.window, review);
+        QTRY_VERIFY_WITH_TIMEOUT(desk.editing.isReviewed(), 20000);
+        QCOMPARE(desk.editing.remembered(), QString());
+        QCOMPARE(desk.editing.presented(), core::kvm::fingerprint(sha256Of(u"first"_s)));
+        yes = theOne(desk.window, u"reviewTrust"_s);
+        QVERIFY(yes != nullptr);
+        QTRY_VERIFY_WITH_TIMEOUT(yes->isEnabled(), 5000);
+        QCOMPARE(imported.passwordTries, 0);
+        clickOn(desk.window, yes);
+        QTRY_VERIFY_WITH_TIMEOUT(!desk.isOpen(u"editKvm"_s), 20000);
+        QCOMPARE(onTheWall(desk, fromAFile).certificate, sha256Of(u"first"_s));
+        QVERIFY(onTheWall(desk, fromAFile).knownByCertificate);
+        QVERIFY(wallSays(desk, fromAFile, u""_s));
+        QVERIFY(imported.passwordTries >= 1);
         QVERIFY2(desk.complaints.isEmpty(), qPrintable(desk.complaints.join(u'\n')));
     }
 

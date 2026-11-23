@@ -21,7 +21,9 @@
 #include <QTimer>
 
 #include <qkvm/core/kvmd_answers.h>
+#include <qkvm/core/network_end.h>
 #include <qkvm/core/tls.h>
+#include <qkvm/core/vnc_device.h>
 
 using namespace Qt::StringLiterals;
 
@@ -331,8 +333,8 @@ public:
     {
         // Never somewhere else by itself, and straight to the address: a KVM is on the local network,
         // where the proxy this PC may use for the web is not.
-        m_network.setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
-        m_network.setProxy(QNetworkProxy::NoProxy);
+        m_network->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
+        m_network->setProxy(QNetworkProxy::NoProxy);
     }
 
     void begin()
@@ -368,6 +370,8 @@ private:
         bool turnedAway = false; // its line was refused as it called: nothing listens there
         QByteArray soFar;        // what has arrived of the answer
         QByteArray certificate;  // what the line it travelled on showed
+        // It was answered by sending it on to HTTPS at the same host (kvm::httpsInstead): there. Never followed.
+        std::optional<QUrl> sentOnTo;
     };
 
     void put(Which which, const QString& path)
@@ -399,7 +403,7 @@ private:
             // for every line that is made (as the KVM's driver has it).
             request.setSslConfiguration(kvm::knownByItsCertificateAlone(QSslConfiguration::defaultConfiguration()));
         }
-        QNetworkReply* reply = m_network.get(request);
+        QNetworkReply* reply = m_network->get(request);
 
         // An answer is not gathered by Qt beyond what is taken while the interface is busy elsewhere.
         reply->setReadBufferSize(kvm::largestProbeAnswerBytes + 1);
@@ -554,6 +558,7 @@ private:
             // a page of its own. In kvmd's own shape it is kvmd that speaks, and that is no
             // gateway's word.
             question.byAGateway = saysWhatIsBehindIsAway(status) && !kvmd::isKvmd(question.soFar);
+            question.sentOnTo = kvm::httpsInstead(m_address, status, reply->rawHeader("Location"_ba));
             switch (which) {
             case IsKvmd:
                 // In its own shape, whether it says "you are in" or "you are not".
@@ -624,6 +629,13 @@ private:
                 // somebody who speaks for themselves, and it stays what it is.
                 found.saidByAGatewayAlone = std::ranges::all_of(
                     m_questions, [](const Question& one) { return !one.answered || one.byAGateway; });
+                // Where a plain address sends a question on to HTTPS at the same host: there, kvmd's question's first
+                // (a web server before a kvmd may send its API on alone: the web's L4 of the outside review of 0.3.2).
+                for (const Which which : {IsKvmd, IsJetKvm, IsRedfish}) {
+                    if (!found.sentOnTo) {
+                        found.sentOnTo = m_questions[which].sentOnTo;
+                    }
+                }
             } else if (showed != m_questions.end()) {
                 by = &*showed;
             }
@@ -655,8 +667,8 @@ private:
     // A line showed what the KVM is not known by, and how: of an asking that is held.
     std::optional<kvm::Objected> m_refused;
     // Last, so that it goes first, and the questions with it, while what they are noted in is
-    // still there.
-    QNetworkAccessManager m_network;
+    // still there. (Its questions here, the rest of it off the interface thread: network_end.h.)
+    OwnNetwork m_network = ownNetwork();
 };
 
 } // namespace
@@ -669,6 +681,17 @@ base::Result<QUrl> addressFrom(const QString& typed)
     const auto refused = [&text] { return notUsable(text); };
     if (typed.size() > longestTypedAddress) {
         return refused();
+    }
+    // A VNC server's scheme written amiss is no KVM's address at a host called "vncs" or "vnc" either (as the server
+    // reads it): refused as a VNC server's address refuses it (vnc::schemeAmiss, outside review c9a-3, L1). In a
+    // sentence that names a KVM's way too: a KVM at a host of that name ("vnc:8443") is written with https:// before
+    // it, and told only to write vnc:// or vncs:// in full, it was added as a VNC server over TLS, whose sign-in went
+    // to its web port (outside review c9a-4, L2). (What was typed is not said back, as there.)
+    if (vnc::schemeAmiss(text)) {
+        return base::Error{"invalid",
+                           "This begins as a VNC server's address does, with vnc or vncs, but not with vnc:// "
+                           "or vncs://. Write a VNC server's in full, with both slashes, or a KVM's at a host "
+                           "of that name with https:// before it."};
     }
     // Nothing is taken out of the text before it is read. The server's reader of addresses drops
     // a tab and a line's end wherever they stand and reads on, so that "192.168.1.20", a line's
@@ -791,6 +814,67 @@ std::optional<QUrl> bothWaysOf(const QString& typed, const QUrl& address)
         return std::nullopt;
     }
     return plain.value();
+}
+
+std::optional<QUrl> httpsInstead(const QUrl& address, int status, const QByteArray& location)
+{
+    static constexpr std::array redirects{301, 302, 303, 307, 308};
+    if (std::ranges::find(redirects, status) == redirects.end() || address.scheme() != "http"_L1 ||
+        address.host().isEmpty()) {
+        return std::nullopt;
+    }
+    // Where it says to go, read strictly; of that only its scheme, its host and its port count.
+    const QUrl there(QString::fromLatin1(location.trimmed()), QUrl::StrictMode);
+    if (!there.isValid() || there.scheme().compare("https"_L1, Qt::CaseInsensitive) != 0 ||
+        there.host(QUrl::FullyEncoded).compare(address.host(QUrl::FullyEncoded), Qt::CaseInsensitive) != 0) {
+        return std::nullopt;
+    }
+    QUrl to;
+    to.setScheme(u"https"_s);
+    to.setHost(address.host(QUrl::FullyEncoded), QUrl::StrictMode);
+    if (there.port() != noPort && there.port() != portOfHttps) {
+        to.setPort(there.port());
+    }
+    // (Written as every address is: one that is none, port 0 among them, is no address to offer.)
+    const base::Result<QUrl> written = addressFrom(to.toString(QUrl::FullyEncoded));
+    if (!to.isValid() || !written || written.value().scheme() != "https"_L1) {
+        return std::nullopt;
+    }
+    return written.value();
+}
+
+namespace {
+
+// The two parts of the one sentence of "https_only", around the address it says twice.
+constexpr QLatin1StringView sentOnHead("This KVM answers on HTTPS: its plain address sends everybody to ");
+constexpr QLatin1StringView sentOnMiddle(". To use it there, type ");
+
+} // namespace
+
+base::Error httpsOnly(const QUrl& to)
+{
+    const QString at = to.toString(QUrl::FullyEncoded);
+    return {"https_only", (QString(sentOnHead) + at + sentOnMiddle + at).toStdString()};
+}
+
+std::optional<QUrl> httpsOffered(const base::Error& refusal)
+{
+    const QString said = QString::fromStdString(refusal.message);
+    if (refusal.code != "https_only" || !said.startsWith(sentOnHead)) {
+        return std::nullopt;
+    }
+    const qsizetype middle = said.indexOf(sentOnMiddle, sentOnHead.size());
+    if (middle < 0) {
+        return std::nullopt;
+    }
+    const QString first = said.mid(sentOnHead.size(), middle - sentOnHead.size());
+    const QString second = said.mid(middle + sentOnMiddle.size());
+    const base::Result<QUrl> address = addressFrom(first);
+    if (first != second || !address || address.value().scheme() != "https"_L1 ||
+        address.value().toString(QUrl::FullyEncoded) != first) {
+        return std::nullopt;
+    }
+    return address.value();
 }
 
 } // namespace kvm

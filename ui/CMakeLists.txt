@@ -55,7 +55,7 @@ qt_add_qml_module(qkvm_ui
         session_view.h session_view.cpp
         settings_view.h settings_view.cpp
         updates_view.h updates_view.cpp
-        source.h
+        source.h source.cpp
         tray.h tray_state.cpp
         tray_keeper.h tray_keeper.cpp
         video_host.h video_host.cpp
@@ -83,9 +83,11 @@ qt_add_qml_module(qkvm_ui
         win/keyboard_hook.h win/keyboard_hook.cpp
         win/pointer_capture.h win/pointer_capture.cpp
         win/quit_requests.h win/quit_requests.cpp
+        win/profile_lock.h win/profile_lock.cpp
         win/show_file.h win/show_file.cpp
         win/single_instance.h win/single_instance.cpp
         win/tray.cpp
+        win/unfinished_update.h win/unfinished_update.cpp
         window_keeper.h window_keeper.cpp
     QML_FILES
         qml/Main.qml
@@ -193,6 +195,14 @@ configure_file(win/brand.rc.in "${CMAKE_CURRENT_BINARY_DIR}/brand.rc" @ONLY)
 qt_add_executable(qkvm-desktop WIN32 main.cpp "${CMAKE_CURRENT_BINARY_DIR}/brand.rc")
 target_link_libraries(qkvm-desktop PRIVATE qkvm_build qkvm_ui qkvm_uiplugin)
 
+# qKVM Setup's update check (win/update_check.cpp): Windows' own calls and a static C runtime alone, so that it runs
+# where nothing else of qKVM is. The setup carries it (tools/build_setup.ps1 -UpdateCheck) and puts it at the program's
+# own name while the earlier version is set aside for a copy; it is never in the package, nor installed under its own
+# name. With the program's icon and version, as it stands in the program's place.
+add_executable(qkvm-update-check WIN32 win/update_check.cpp "${CMAKE_CURRENT_BINARY_DIR}/brand.rc")
+set_target_properties(qkvm-update-check PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+target_link_libraries(qkvm-update-check PRIVATE qkvm_build user32)
+
 # Uses only the Windows SDK and a static C runtime, so it can run outside the package
 # while Windows replaces the application. No Qt DLL stays open through deployment.
 set(QKVM_PACKAGE_NAME "qKVM.Desktop" CACHE STRING "Stable Windows package identity")
@@ -207,7 +217,7 @@ add_executable(qkvm-setup WIN32 installer/main.cpp installer/transaction.cpp
     win/cache_paths.cpp)
 set_target_properties(qkvm-setup PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 target_include_directories(qkvm-setup PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-target_link_libraries(qkvm-setup PRIVATE qkvm_build windowsapp shell32 shlwapi wintrust crypt32 ole32 advapi32)
+target_link_libraries(qkvm-setup PRIVATE qkvm_build qkvm_base windowsapp shell32 shlwapi wintrust crypt32 ole32 advapi32)
 qkvm_add_test(test_ui_install_transaction SOURCES tests/test_install_transaction.cpp installer/transaction.cpp
     LIBRARIES qkvm_ui)
 add_executable(test_installer_storage WIN32 installer/main.cpp installer/transaction.cpp
@@ -217,7 +227,7 @@ target_compile_definitions(test_installer_storage PRIVATE QKVM_INSTALLER_TEST)
 target_include_directories(test_installer_storage PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 set_target_properties(test_installer_storage PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # (It carries the C library in it, as the installer does: the quiet library built so.)
-target_link_libraries(test_installer_storage PRIVATE qkvm_build qkvm_test_quiet_static windowsapp shell32 shlwapi wintrust crypt32
+target_link_libraries(test_installer_storage PRIVATE qkvm_build qkvm_base qkvm_test_quiet_static windowsapp shell32 shlwapi wintrust crypt32
     ole32 advapi32)
 add_test(NAME test_installer_storage COMMAND test_installer_storage "${CMAKE_BINARY_DIR}/installer-storage-tests")
 qkvm_test_runs(test_installer_storage test_installer_storage)
@@ -230,10 +240,12 @@ qkvm_add_test(test_ui_cache_paths SOURCES tests/test_cache_paths.cpp LIBRARIES q
 add_executable(qkvm-crash-test-child tests/crash_child.cpp win/crash_report.cpp win/cache_paths.cpp)
 target_include_directories(qkvm-crash-test-child PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 target_compile_definitions(qkvm-crash-test-child PRIVATE QKVM_DESKTOP_VERSION="${PROJECT_VERSION}")
-target_link_libraries(qkvm-crash-test-child PRIVATE qkvm_build windowsapp shell32 ole32)
+target_link_libraries(qkvm-crash-test-child PRIVATE qkvm_build qkvm_base windowsapp shell32 ole32)
 qkvm_add_test(test_ui_crash_report SOURCES tests/test_crash_report.cpp LIBRARIES qkvm_ui TIMEOUT 90)
 add_dependencies(test_ui_crash_report qkvm-crash-test-child)
 qkvm_add_test(test_ui_app_lock SOURCES tests/test_app_lock.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
+# (And a VNC server by hand, for a typing that stops at Lock: 6.18.)
+target_include_directories(test_ui_app_lock PRIVATE ../rfb/tests)
 qkvm_add_test(test_ui_bulk_run SOURCES tests/test_bulk_run.cpp LIBRARIES qkvm_ui)
 # (And a JetKVM by hand on this PC's own address, for its pointer in the fitted view.)
 qkvm_add_test(test_ui_control SOURCES tests/test_control.cpp
@@ -264,11 +276,30 @@ qkvm_add_test(test_ui_own_files_view SOURCES tests/test_own_files_view.cpp tests
 target_compile_definitions(test_ui_own_files_view PRIVATE
     QKVM_EXPORT_EXAMPLES="${CMAKE_SOURCE_DIR}/core/tests/data/export"
     QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
-qkvm_add_test(test_ui_own_files_screens SOURCES tests/test_own_files_screens.cpp tests/wall_files_by_hand.h
-    LIBRARIES qkvm_ui qkvm_uiplugin qkvm_ui_pretend qkvm_core_stand_in TIMEOUT 600)
-target_compile_definitions(test_ui_own_files_screens PRIVATE
-    QKVM_EXPORT_EXAMPLES="${CMAKE_SOURCE_DIR}/core/tests/data/export"
-    QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# The screens of the two boxes, in four programs (one took 598 of its 600 s in Debug on the slow cores, and 492 in
+# gate 47; PERF, 2026-11-15): the boxes in use, the boxes holding still, their room at every size, and every state of
+# them in both looks. What they share is in tests/own_files_screens_test.h. Their limits: see below.
+foreach(part IN ITEMS use hold room looks)
+    qkvm_add_test(test_ui_own_files_screens_${part} SOURCES tests/test_own_files_screens_${part}.cpp
+        tests/own_files_screens_test.h tests/wall_files_by_hand.h
+        LIBRARIES qkvm_ui qkvm_uiplugin qkvm_ui_pretend qkvm_core_stand_in TIMEOUT 600)
+    target_compile_definitions(test_ui_own_files_screens_${part} PRIVATE
+        QKVM_EXPORT_EXAMPLES="${CMAKE_SOURCE_DIR}/core/tests/data/export"
+        QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+endforeach()
+# Measured limits, each about 57% above the worst of two Debug runs on the slow cores beside other builders (the one
+# program's run, by the cases of each, and the four side by side with the wall's and the console's screens): in use
+# 192.2 and 177.5 s: 300; holding still 178.0 and 173.5 s: 280; their room 170.2 and 171.8 s: 270; every state in both
+# looks 177.6 and 199.5 s: 320. The address sanitizer's have Debug's until a gate has measured them; Release: 600, as
+# the one program had. (tools/test_review_guards.ps1 holds each preset to these.)
+set_tests_properties(test_ui_own_files_screens_use PROPERTIES
+    TIMEOUT "$<IF:$<CONFIG:Debug>,300,$<IF:$<CONFIG:RelWithDebInfo>,300,600>>")
+set_tests_properties(test_ui_own_files_screens_hold PROPERTIES
+    TIMEOUT "$<IF:$<CONFIG:Debug>,280,$<IF:$<CONFIG:RelWithDebInfo>,280,600>>")
+set_tests_properties(test_ui_own_files_screens_room PROPERTIES
+    TIMEOUT "$<IF:$<CONFIG:Debug>,270,$<IF:$<CONFIG:RelWithDebInfo>,270,600>>")
+set_tests_properties(test_ui_own_files_screens_looks PROPERTIES
+    TIMEOUT "$<IF:$<CONFIG:Debug>,320,$<IF:$<CONFIG:RelWithDebInfo>,320,600>>")
 qkvm_add_test(test_ui_live_picture SOURCES tests/test_live_picture.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 qkvm_add_test(test_ui_look SOURCES tests/test_look.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_video_host SOURCES tests/test_video_host.cpp LIBRARIES qkvm_ui)
@@ -287,10 +318,17 @@ target_compile_definitions(test_ui_merged_wall PRIVATE QKVM_TESTDATA="${CMAKE_SO
 # had one case fail and wait out its checks: 420, about 63% above that.
 qkvm_add_test(test_ui_own_wall SOURCES tests/test_own_wall.cpp LIBRARIES qkvm_ui qkvm_core_stand_in TIMEOUT 420)
 target_compile_definitions(test_ui_own_wall PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# The box that adds Proxmox VE guests (wave 2): a token's guests listed to tick, the ticked ones added.
+qkvm_add_test(test_ui_own_wall_proxmox SOURCES tests/test_own_wall_proxmox.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
+target_compile_definitions(test_ui_own_wall_proxmox PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_ui_notices SOURCES tests/test_notices.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_pc_source SOURCES tests/test_pc_source.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 qkvm_add_test(test_ui_server_source SOURCES tests/test_server_source.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 qkvm_add_test(test_ui_single_instance SOURCES tests/test_single_instance.cpp LIBRARIES qkvm_ui)
+# What a start finds of an update that did not finish, in a folder of the test's own (the setup's staged install).
+qkvm_add_test(test_ui_unfinished_update SOURCES tests/test_unfinished_update.cpp LIBRARIES qkvm_ui)
+qkvm_add_test(test_ui_update_check SOURCES tests/test_update_check.cpp LIBRARIES qkvm_ui)
+add_dependencies(test_ui_update_check qkvm-update-check)
 # Setup's request to end an installed copy, under names of the test's own.
 qkvm_add_test(test_ui_quit_requests SOURCES tests/test_quit_requests.cpp LIBRARIES qkvm_ui)
 qkvm_add_test(test_ui_tray_keeper SOURCES tests/test_tray_keeper.cpp LIBRARIES qkvm_ui qkvm_ui_pretend)
@@ -325,15 +363,22 @@ add_dependencies(test_ui_updates_view qkvm-test-stand-in-setup qkvm-test-stuck-p
 # PC's own address where nothing answers.
 qkvm_add_test(test_ui_own_kvms_view SOURCES tests/test_own_kvms_view.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
 # And the settings box itself, in its sections, by the buttons and keys a person presses, over the same
-# kind of wall.
+# kind of wall. (Measured whole on the slow cores of a loaded PC, 2026-11-16, with the VNC servers by hand, 84
+# cases: 394.05 and 441.11 s in the debug preset, and 315.16 s under the address sanitizer, the asan preset's
+# one run. The larger, Debug's, is under half of 900: 900 in every preset. 600 was 72% of Debug's then.)
 qkvm_add_test(test_ui_settings_screens SOURCES tests/test_settings_screens.cpp
-    LIBRARIES qkvm_ui qkvm_uiplugin qkvm_ui_pretend qkvm_core_stand_in bcrypt TIMEOUT 600)
-target_include_directories(test_ui_settings_screens PRIVATE ../core/tests)
+    LIBRARIES qkvm_ui qkvm_uiplugin qkvm_ui_pretend qkvm_core_stand_in bcrypt TIMEOUT 900)
+# (And VNC servers by hand, over TLS with the tests' own certificates.)
+target_include_directories(test_ui_settings_screens PRIVATE ../core/tests ../rfb/tests)
+target_compile_definitions(test_ui_settings_screens PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 # (It speaks to stand-in servers through whole sessions, eighty times over: four minutes now, 238.52 to
 # 243.93 s in all three presets of 2026-10-26, which was 80% of the 300 it had: 420.)
 qkvm_add_test(test_ui_server_session SOURCES tests/test_server_session.cpp
     LIBRARIES qkvm_ui qkvm_core_stand_in TIMEOUT 420)
 target_compile_definitions(test_ui_server_session PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# (Five thousand lines and the made-up kvmd beside them, whose drive's read-backs a later case set: more sections than
+# an object file holds by default in Debug, C1128.)
+target_compile_options(test_ui_server_session PRIVATE /bigobj)
 # The screens, in four programs by area (one was the slowest program by far, and grew with every step):
 # the wall and its cards, the bar's room at every width, a machine shown large, and the boxes. Each opens
 # its windows one after another; what they share is in tests/screens_test.h. (The larger files hold more
@@ -419,6 +464,11 @@ qkvm_add_test(test_ui_alert_picture SOURCES tests/test_alert_picture.cpp LIBRARI
 # The box for a machine's virtual media through its qKVM: its looks, questions and answers, an upload among them,
 # each against a stand-in server; one waits out a look asked again five seconds later.
 qkvm_add_test(test_ui_media_view SOURCES tests/test_media_view.cpp LIBRARIES qkvm_ui qkvm_core_stand_in)
+# And that box for a JetKVM of this PC's own wall (A3): its drives, its words, a mount as a disk and an upload, against
+# the JetKVM by hand and its storage.
+qkvm_add_test(test_ui_jetkvm_media_box SOURCES tests/test_jetkvm_media_box.cpp
+    LIBRARIES qkvm_ui qkvm_core_stand_in qkvm_webrtc qkvm_clips TIMEOUT 300)
+target_compile_definitions(test_ui_jetkvm_media_box PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 
 qkvm_add_test(test_ui_startup_check SOURCES tests/test_startup_check.cpp
     installer/health_exchange.cpp installer/package_environment.cpp installer/setup_launch.cpp LIBRARIES ole32)
@@ -426,4 +476,4 @@ add_dependencies(test_ui_startup_check qkvm-setup)
 
 qkvm_add_test(test_ui_installer_backend SOURCES tests/test_installer_backend.cpp
     installer/native_health.cpp installer/health_exchange.cpp installer/transaction.cpp installer/setup_context.cpp installer/setup_launch.cpp
-    LIBRARIES ole32 windowsapp shell32 advapi32)
+    LIBRARIES qkvm_base ole32 windowsapp shell32 advapi32)

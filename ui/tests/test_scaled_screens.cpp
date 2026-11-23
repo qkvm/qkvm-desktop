@@ -1,5 +1,7 @@
 #include <cmath>
 
+#include <QScreen>
+
 #include "screens_test.h"
 
 // A machine shown large at a scale of its own pixels (b10), as a person sees it and points at it: the
@@ -36,9 +38,147 @@ class TestScaledScreens : public ScreensTest {
         return u"%1, %2 for %3, %4"_s.arg(said.x()).arg(said.y()).arg(wanted.x()).arg(wanted.y());
     }
 
+    // The screen at one of Windows' scales (main: 100, 125 and 150 %).
+    static QScreen* screenAt(int percent)
+    {
+        const QList<QScreen*> screens = QGuiApplication::screens();
+        const auto found = std::ranges::find_if(
+            screens, [&](const QScreen* one) { return qFuzzyCompare(one->devicePixelRatio(), percent / 100.0); });
+        return found != screens.end() ? *found : nullptr;
+    }
+
+    // One frame drawn.
+    static void aFrame(QQuickWindow* window)
+    {
+        QSignalSpy drawn(window, &QQuickWindow::frameSwapped);
+        window->update();
+        static_cast<void>(drawn.wait(2000));
+    }
+
+    // What is not so of the header's row as it stands, this wide: where the row has the room for all its tools, More
+    // is not there; where it is, it covers none of those in the row; and they stand packed at the right. Empty where
+    // all is so.
+    static QString whatIsWrongWithTheHeader(const QQuickWindow* window)
+    {
+        const QQuickItem* row = theOne(window, u"consoleHeaderRow"_s);
+        const QQuickItem* tools = theOne(window, u"consoleHeaderTools"_s);
+        const QQuickItem* identity = theOne(window, u"consoleIdentity"_s);
+        const QQuickItem* more = theOne(window, u"consoleMoreButton"_s);
+        if (row == nullptr || tools == nullptr || identity == nullptr || more == nullptr) {
+            return u"no header, no tools, no name or no More"_s;
+        }
+        // (The room as the header gives it them: all it leaves the machine's name at its narrowest.)
+        const qreal room = row->width() - identity->property("least").toReal() - row->property("spacing").toReal();
+        const qreal full = tools->property("full").toReal();
+        const QString stand = u" (room %1, all of them %2, given %3: %4)"_s.arg(room, 0, 'f', 3)
+                                  .arg(full, 0, 'f', 3)
+                                  .arg(tools->width(), 0, 'f', 3)
+                                  .arg(whereTheToolsStand(window).join(u", "_s));
+        if (isSeen(more) && room >= full) {
+            return u"More is there, and the row has the room for all"_s + stand;
+        }
+        if (isSeen(more)) {
+            const QRectF covers = more->mapRectToScene(QRectF(0, 0, more->width(), more->height()));
+            for (const QString& name : theHeadersTools()) {
+                const QQuickItem* item = theHeadersTool(window, name);
+                if (item == more || item == nullptr || !isSeen(item) || !row->isAncestorOf(item)) {
+                    continue;
+                }
+                const QRectF stands = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+                if (stands.intersected(covers).width() > 0.01) {
+                    return u"More covers %1"_s.arg(name) + stand;
+                }
+            }
+        }
+        if (!theToolsStandAtTheRight(window)) {
+            return u"the tools do not stand at the right"_s + stand;
+        }
+        return {};
+    }
+
 private slots:
     // After each test, when its windows are gone: what they were handed goes too.
     void cleanup() { forgetWhatTheWindowsWereHanded(); }
+
+    void theHeaderHasNoMoreWhereItsToolsFitAtWindowsScales_data()
+    {
+        QTest::addColumn<int>("percent");
+        QTest::newRow("100 %") << 100;
+        QTest::newRow("125 %") << 125;
+        QTest::newRow("150 %") << 150;
+    }
+
+    // At Windows' scales, where a pixel of the window is a fraction of the monitor's and the tools' words are as
+    // wide as they are there: the header of a machine shown large has no More where the row has the room for all its
+    // tools, as at 1280 px; and where More is there, it covers none of the tools in the row. At every width from the
+    // widest to the narrowest and back, a pixel at a time where More comes or goes.
+    void theHeaderHasNoMoreWhereItsToolsFitAtWindowsScales()
+    {
+        QFETCH(int, percent);
+        QScreen* screen = screenAt(percent);
+        QVERIFY2(screen != nullptr, "no screen at that scale");
+        qkvm::ui::AboutModel about;
+        qkvm::ui::WallView wall;
+        const auto tiles = qkvm::ui::pretendWall();
+        wall.machines()->setTiles(tiles);
+        qkvm::ui::SessionView session;
+        session.show(signedIn());
+        qkvm::ui::ActionsView actions;
+        actions.setAllowed(true);
+        QQmlApplicationEngine engine;
+        QQuickWindow* window = load(engine, about, session, wall, &actions);
+        QVERIFY(window != nullptr);
+        window->setScreen(screen);
+        window->setPosition(screen->geometry().topLeft() + QPoint(40, 40));
+        window->resize(1280, 500);
+        QVERIFY(bringUp(window));
+        QTRY_COMPARE(window->devicePixelRatio(), percent / 100.0);
+        QTRY_COMPARE(window->width(), 1280);
+        QVERIFY(tiles[1].openable);
+        wall.enlarge(tiles[1].key);
+        qkvm::ui::ControlView::Shown shown;
+        shown.possible = true;
+        m_control.show(shown);
+        QTRY_COMPARE(seenNamed(window, u"enlargedControl"_s), 1);
+        letTheWallComeToRest(window);
+        QVERIFY2(whatIsWrongWithTheHeader(window).isEmpty(), qPrintable(whatIsWrongWithTheHeader(window)));
+        QCOMPARE(seenNamed(window, u"consoleMoreButton"_s), 0);
+        const QQuickItem* tools = theOne(window, u"consoleHeaderTools"_s);
+        QStringList widths;
+        for (const QString& name : theHeadersTools()) {
+            const QQuickItem* item = theHeadersTool(window, name);
+            widths.append(u"%1 %2"_s.arg(name).arg(item != nullptr ? item->implicitWidth() : -1, 0, 'f', 3));
+        }
+        qInfo("at %d %%, 1280 px: all of them %.3f, given %.3f at %.3f; %s", percent, tools->property("full").toReal(),
+              tools->width(), tools->mapToScene(QPointF(0, 0)).x(), qPrintable(widths.join(u", "_s)));
+        QStringList wrong;
+        const auto lookAt = [&](int width) {
+            window->resize(width, 500);
+            static_cast<void>(QTest::qWaitFor([&] { return window->width() == width; }, 2000));
+            aFrame(window);
+            if (const QString said = whatIsWrongWithTheHeader(window); !said.isEmpty()) {
+                wrong.append(u"%1 px: %2"_s.arg(width).arg(said));
+            }
+            return isSeen(theOne(window, u"consoleMoreButton"_s));
+        };
+        for (const int step : {-5, 5}) {
+            bool before = lookAt(step < 0 ? 1280 : 640);
+            for (int width = step < 0 ? 1280 + step : 640 + step; width >= 640 && width <= 1280; width += step) {
+                const bool now = lookAt(width);
+                // (Where it came or went, each pixel between.)
+                if (now != before) {
+                    for (int between = width - step + (step < 0 ? -1 : 1); between != width;
+                         between += step < 0 ? -1 : 1) {
+                        static_cast<void>(lookAt(between));
+                    }
+                    static_cast<void>(lookAt(width));
+                }
+                before = now;
+            }
+        }
+        QVERIFY2(wrong.isEmpty(), qPrintable(wrong.mid(0, 12).join(u'\n')));
+        QVERIFY2(m_complaints.isEmpty(), qPrintable(m_complaints.join(u'\n')));
+    }
 
     // The picture the engine draws is the one that came: at a scale it is laid out by that, and the
     // pointer is mapped by it, never by the size the machine's status said last. A machine started into
@@ -233,7 +373,8 @@ private slots:
 
 int main(int argc, char* argv[])
 {
-    return runScreensTests<TestScaledScreens>(argc, argv);
+    // (Beside the one the windows open on, at 100 %: screens at 125 and 150 %.)
+    return runScreensTests<TestScaledScreens>(argc, argv, {125, 150});
 }
 
 #include "test_scaled_screens.moc"

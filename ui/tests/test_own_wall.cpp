@@ -9,6 +9,9 @@
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMetaProperty>
 #include <QSignalSpy>
 #include <QSslCertificate>
@@ -497,6 +500,73 @@ private slots:
             std::ranges::find_if(own.wall().kvms(), [&](const core::OwnKvm& one) { return one.id == thirdId; });
         QVERIFY(kept != own.wall().kvms().end());
         QVERIFY(kept->keptBesideItsTwin);
+    }
+
+    void aKvmWhosePlainAddressSendsEverybodyOnToHttpsIsOfferedThatAddressInEitherBox()
+    {
+        // (Web 0.3.2: a GL.iNet firmware's nginx answers the KVM's plain address with 301 to HTTPS at the same host.)
+        // Refused with the address it names, which either box offers ("Use ...") and never takes by itself: nothing
+        // goes there unasked, and the add's password does not go the plain way to be sent on.
+        const QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        MemorySecrets secrets;
+        ui::AddKvmView box;
+        ui::OwnWall own(settings, secrets, quick());
+        own.serve(box);
+        const MadeUpKvm secure(tls("first"));
+        const QString there = secure.address().toString(QUrl::FullyEncoded);
+        const QString said = QString::fromStdString(core::kvm::httpsOnly(secure.address()).message);
+        MadeUpKvm front;
+        front.httpsAt = there;
+        box.add(front.address().toString(), QString(), u"secret"_s, QString());
+        QTRY_VERIFY_WITH_TIMEOUT(!box.busy(), 20000);
+        QCOMPARE(box.problem(), said);
+        QCOMPARE(box.useInstead(), there);
+        QVERIFY(!box.mayKeepBoth());
+        QVERIFY(own.wall().kvms().isEmpty());
+        QCOMPARE(front.asked("/api/auth/login"_ba), 0);
+        QVERIFY(secure.stand->asked.isEmpty());
+        // A redirect elsewhere is offered nowhere.
+        MadeUpKvm elsewhere;
+        elsewhere.httpsAt = u"https://localhost:%1"_s.arg(secure.address().port());
+        box.add(elsewhere.address().toString(), QString(), u"secret"_s, QString());
+        QTRY_VERIFY_WITH_TIMEOUT(!box.busy(), 20000);
+        QVERIFY(!box.problem().isEmpty());
+        QVERIFY(box.useInstead().isEmpty());
+        // Taken: added there, over HTTPS.
+        box.add(there, QString(), u"secret"_s, QString());
+        QTRY_VERIFY_WITH_TIMEOUT(!box.busy(), 20000);
+        QVERIFY2(box.problem().isEmpty(), qPrintable(box.problem()));
+        QVERIFY(box.useInstead().isEmpty());
+        QCOMPARE(own.wall().kvms().size(), 1);
+        QCOMPARE(own.wall().kvms().constFirst().address, there);
+
+        // The change box, of a KVM of the wall over plain HTTP whose plain address sends everybody on to HTTPS since.
+        MadeUpKvm plain;
+        core::OwnKvm kvm;
+        kvm.address = plain.address().toString();
+        kvm.kind = u"kvmd"_s;
+        kvm.name = u"Comet"_s;
+        const QString id = own.wall().add(kvm, u"secret"_s).value();
+        plain.httpsAt = there;
+        ui::EditKvmView edit;
+        own.serve(edit);
+        edit.openFor(id, false);
+        // Its name alone is saved, asking nothing (as the web saves it unchecked: its review of 0.3.2, L1).
+        edit.save(u"Comet (old rack)"_s, edit.address(), edit.user(), QString(), edit.group());
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.busy(), 20000);
+        QVERIFY2(edit.problem().isEmpty(), qPrintable(edit.problem()));
+        // Its password typed at that address: said, with the address offered, and nothing changed.
+        edit.openFor(id, false);
+        edit.save(edit.name(), edit.address(), edit.user(), u"secret"_s, edit.group());
+        QTRY_VERIFY_WITH_TIMEOUT(!edit.busy(), 20000);
+        QCOMPARE(edit.problem(), said);
+        QCOMPARE(edit.useInstead(), there);
+        const auto kept =
+            std::ranges::find_if(own.wall().kvms(), [&](const core::OwnKvm& one) { return one.id == id; });
+        QVERIFY(kept != own.wall().kvms().end());
+        QCOMPARE(kept->address, plain.address().toString());
+        QCOMPARE(kept->name, u"Comet (old rack)"_s);
     }
 
     void whatTheBoxAsksForIsAddedAndTheBoxIsTold()
@@ -1030,6 +1100,89 @@ private slots:
         QVERIFY(second.problem().isEmpty());
         QCOMPARE(doneInTheOther.count(), 0);
         QCOMPARE(held.own.wall().kvms().size(), 1);
+    }
+
+    void theBoxOfAGuestShowsTheBootOrderOnlyItsCardRemembers()
+    {
+        // 6.4: what the remove question says of a guest started from an image is the guest's own record, as its card
+        // keeps it; and nothing of one for a guest that has none.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const auto guest = [](const QString& id, qint64 vmid) {
+            return QJsonObject{{u"id"_s, id},
+                               {u"kind"_s, u"proxmox"_s},
+                               {u"name"_s, u"web"_s},
+                               {u"address"_s, u"https://127.0.0.1:9"_s},
+                               {u"node"_s, u"pve1"_s},
+                               {u"vmid"_s, vmid},
+                               {u"user"_s, u"qkvm@pve!wall"_s}};
+        };
+        QJsonObject started = guest(u"0a0b0c0d"_s, 100);
+        started.insert(u"boot_order_was"_s, QJsonObject{{u"order"_s, u"scsi0;net0"_s},
+                                                        {u"written"_s, u"ide2;scsi0;net0"_s},
+                                                        {u"vmid"_s, 100},
+                                                        {u"machine"_s, QString()}});
+        {
+            QFile written(file);
+            QVERIFY(written.open(QIODevice::WriteOnly));
+            written.write(
+                QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{started, guest(u"0e0f0a0b"_s, 101)}}}).toJson());
+        }
+        core::Settings settings(file);
+        MemorySecrets secrets;
+        ui::OwnWall own(settings, secrets, quick());
+        QCOMPARE(own.wall().kvms().size(), 2);
+        ui::EditKvmView box;
+        own.serve(box);
+        box.openToRemove(u"0a0b0c0d"_s);
+        QCOMPARE(box.machine(), u"0a0b0c0d"_s);
+        QCOMPARE(box.bootOrderWas(), u"scsi0;net0"_s);
+        QCOMPARE(box.bootOrderWritten(), u"ide2;scsi0;net0"_s);
+        box.closed();
+        box.openToRemove(u"0e0f0a0b"_s);
+        QCOMPARE(box.machine(), u"0e0f0a0b"_s);
+        QVERIFY(box.bootOrderWas().isEmpty() && box.bootOrderWritten().isEmpty());
+        box.closed();
+    }
+
+    void aRemoveQuestionOverABootOrderThatChangedSinceIsAskedAgain()
+    {
+        // Review cx6-1, L1: the remove question said the boot order the box was filled with. Where the guest was
+        // started from an image since (or the image taken out) in a KVM window, the card went with an order the
+        // question had not named. Asked again over what stands now, and nothing is taken off until then.
+        const QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        const QJsonObject guest{{u"id"_s, u"0a0b0c0d"_s},       {u"kind"_s, u"proxmox"_s},
+                                {u"name"_s, u"web"_s},          {u"address"_s, u"https://127.0.0.1:9"_s},
+                                {u"node"_s, u"pve1"_s},         {u"vmid"_s, 100},
+                                {u"user"_s, u"qkvm@pve!wall"_s}};
+        {
+            QFile written(file);
+            QVERIFY(written.open(QIODevice::WriteOnly));
+            written.write(QJsonDocument(QJsonObject{{u"kvms"_s, QJsonArray{guest}}}).toJson());
+        }
+        core::Settings settings(file);
+        MemorySecrets secrets;
+        ui::OwnWall own(settings, secrets, quick());
+        QCOMPARE(own.wall().kvms().size(), 1);
+        ui::EditKvmView box;
+        own.serve(box);
+        box.openToRemove(u"0a0b0c0d"_s);
+        QVERIFY(box.bootOrderWas().isEmpty());
+        // Started from an image meanwhile: its order from before written down with its card, as the wall writes it.
+        core::Remembered with = settings.remembered();
+        with.kvms[0].bootOrderWas = core::BootOrderWas{u"scsi0;net0"_s, u"ide2;scsi0;net0"_s, 100, QString()};
+        QVERIFY(static_cast<bool>(settings.remember(with)));
+        box.remove();
+        QCOMPARE(own.wall().kvms().size(), 1);
+        QCOMPARE(box.bootOrderWas(), u"scsi0;net0"_s);
+        QCOMPARE(box.bootOrderWritten(), u"ide2;scsi0;net0"_s);
+        QVERIFY(!box.problem().isEmpty());
+        QVERIFY(!box.busy());
+        // Asked again, it goes.
+        box.remove();
+        QCOMPARE(own.wall().kvms().size(), 0);
+        box.closed();
     }
 
     void aBoxIsOpenedForTheQuestionBeforeAKvmIsTakenOffAndForThatAlone()
@@ -3208,6 +3361,9 @@ private slots:
         added.model.clear();
         added.overPlainHttp = true;
         QCOMPARE(ui::OwnWall::saidOf(added, called), u"\"Build server\" added (over plain HTTP)"_s);
+        // A VNC server over vnc:// in its family's words: no HTTP is spoken to it (outside review c9a-2, L4).
+        added.model = u"stand-in VNC"_s;
+        QCOMPARE(ui::OwnWall::saidOf(added, u"\"Guest\""_s, true), u"\"Guest\" added (stand-in VNC, unencrypted)"_s);
     }
 
     // --- what a KVM is called in a sentence of the screens ---------------------------------------
@@ -3275,6 +3431,8 @@ private slots:
         held.own.openFor(box, twin, true);
         QTRY_VERIFY_WITH_TIMEOUT(box.isReviewed(), 20000);
         QCOMPARE(box.presentedIsCalled(), setOff);
+        // (Proven, two KVMs over HTTPS: not by what a VNC server's certificate says. Review cx6-2, L2.)
+        QVERIFY(!box.presentedSaysSo());
         box.closed();
 
         // And one that was added: named so in what its box says. It is called what it calls

@@ -110,6 +110,12 @@ private slots:
         const qkvm::ui::WallTile card = qkvm::ui::cardFor(machine, nullptr, 0, false);
         QCOMPARE(card.name, u"192.168.1.22"_s);
         QCOMPARE(card.host, u"http://192.168.1.22"_s);
+        // A VNC server spoken to in the clear says vnc:// before where it is, and not http://, which would read as a
+        // web address to open (outside review c9a-2, L4).
+        machine.kind = u"vnc"_s;
+        machine.host = u"192.168.1.22:5901"_s;
+        machine.name = u"Guest"_s;
+        QCOMPARE(qkvm::ui::cardFor(machine, nullptr, 0, false).host, u"vnc://192.168.1.22:5901"_s);
     }
 
     void aMachineThatWasToldToRestartSaysSoWhileItIsAway()
@@ -303,6 +309,15 @@ private slots:
         QCOMPARE(ui::cardFor(own, &otherOne, 7, false).action, u"Update login"_s);
         QCOMPARE(ui::cardWayOf(own, &otherOne), ui::CardWay::UpdateLogin);
         QCOMPARE(ui::cardWayOf(kvm(), &otherOne), ui::CardWay::None); // (a server's own card: its page offers it)
+        // A server's card that asks whether the computer at its place, which gives a number of its own now, is its
+        // server (the owner's decision of 2026-11-22): the way to that question, Yes or No.
+        core::Status asking = otherOne;
+        asking.errorMessage = u"The server at this address gives a number of its own now"_s;
+        asking.asksItsServer = true;
+        QCOMPARE(ui::cardFor(own, &asking, 7, false).action, u"Is it this server?"_s);
+        QCOMPARE(ui::cardFor(own, &asking, 7, false).text, asking.errorMessage);
+        QCOMPARE(ui::cardWayOf(own, &asking), ui::CardWay::ConfirmServer);
+        QCOMPARE(ui::cardWayOf(kvm(), &asking), ui::CardWay::None);
 
         // Any other trouble has no button, and neither has a KVM that is simply there, or one
         // that was not spoken of yet.
@@ -361,6 +376,44 @@ private slots:
         status.width = 0;
         status.height = 0;
         QCOMPARE(ui::cardFor(kvm(), &status, 7, false).meta, u"Power off"_s);
+    }
+
+    void aPowerThatIsNoWitnessIsSaidToBeUnknownAndWhyInItsDetails()
+    {
+        // (Web 0.3.2, app.js machineText and powerNote.) Off beside a picture where the wall can say why (its board's
+        // note), or on a KVM with several inputs, whose board may be another computer's: "Power unknown", the why
+        // whole in its Details. Without either, nothing, as before.
+        const QString unwired = u"The KVM's board says the power light is off while the screen shows a picture: its "
+                                "power-LED wires are probably not connected."_s;
+        core::Status status = live();
+        status.powerIsKnown = true;
+        status.power = false;
+        status.powerNoteCode = u"power_led_unwired"_s;
+        status.powerNote = unwired;
+        WallTile card = ui::cardFor(kvm(), &status, 7, false);
+        QCOMPARE(card.meta, u"1920×1080 · Power unknown"_s);
+        QCOMPARE(card.powerNote, unwired);
+        // Several inputs: unknown, with no why.
+        status.powerNoteCode.clear();
+        status.powerNote.clear();
+        status.ports = {core::Port{u"PC"_s, false}, core::Port{u"Server"_s, false}};
+        status.shownPort = 0;
+        card = ui::cardFor(kvm(), &status, 7, false);
+        QVERIFY2(card.meta.endsWith(u" · Power unknown"_s), qPrintable(card.meta));
+        QVERIFY(card.powerNote.isEmpty());
+        // Its picture gone, the board is believed: off, and nothing more.
+        status.ports.clear();
+        status.shownPort = -1;
+        status.powerNote = unwired;
+        status.signal = false;
+        status.width = 0;
+        status.height = 0;
+        QCOMPARE(ui::cardFor(kvm(), &status, 7, false).meta, u"Power off"_s);
+        // A server's panel says its own power: no note of a KVM's wires there.
+        core::Machine server = kvm();
+        server.hasPicture = false;
+        status.hasPicture = false;
+        QVERIFY(ui::cardFor(server, &status, 0, false).powerNote.isEmpty());
     }
 
     void aFingerbotIsSaidAndItsBatteryWhereThatIsLow()

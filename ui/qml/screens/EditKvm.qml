@@ -33,12 +33,16 @@ Dialog {
     readonly property bool offersAYes: ((editing.reviewed && !editing.same) || differing) && !isAnothers
     // What is said under the two, by what stands there: whose the second is; what a yes means
     // where it is Windows' word that the KVM would be known by, or where it is known by none
-    // yet; and otherwise the page's warning.
-    readonly property string saidOfTheTwo: isAnothers ? Words.showsTheCertificateOf.arg(editing.presentedIsCalled) : editing.onWindowsWord ? (editing.remembered !== "" ? Words.yesMeansWindowsWordNotItsCertificate : Words.yesMeansWindowsWord) : differing && editing.remembered === "" ? (editing.https ? Words.knownByWindowsWordSoNoneToCompareWith : Words.noCertificateToCompareWith) : Words.aNewCertificateOrAnotherDevice
+    // yet (a VNC server's in its family's words: outside review c9a-3, L2, and c9a-4, L3); and
+    // otherwise the page's warning, which the page says of every device.
+    readonly property string saidOfTheTwo: isAnothers ? (editing.presentedSaysSo ? Words.showsTheCertificateItSaysOf : Words.showsTheCertificateOf).arg(editing.presentedIsCalled) : editing.onWindowsWord ? (editing.family === "vnc" ? (editing.remembered !== "" ? Words.vncYesMeansWindowsWordNotItsCertificate : Words.vncYesMeansWindowsWord) : editing.remembered !== "" ? Words.yesMeansWindowsWordNotItsCertificate : Words.yesMeansWindowsWord) : differing && editing.remembered === "" ? (editing.family === "vnc" ? (editing.showsCertificate ? Words.vncKnownByWindowsWordSoNoneToCompareWith : Words.vncNoCertificateToCompareWith) : editing.showsCertificate ? Words.knownByWindowsWordSoNoneToCompareWith : Words.noCertificateToCompareWith) : Words.aNewCertificateOrAnotherDevice
     // And what is said in its place where what is shown is another than a yes was given to.
     // Where that yes was to Windows' word, no certificate stood there that this one could be
     // "another than": it is said what Windows makes of what is shown now.
     readonly property string saidOfAnother: editing.yesWasOnWindowsWord ? (editing.onWindowsWord ? Words.afterWindowsWordAnotherTrusted + " " + saidOfTheTwo : Words.afterWindowsWordNotTrusted) : editing.onWindowsWord ? Words.shownAnotherThanSaidYesTo + " " + saidOfTheTwo : Words.shownAnotherThanSaidYesTo
+    // What is said of its being spoken to in the clear: over plain HTTP, or a VNC server's vnc://, in its family's
+    // words (outside review c9a-2, L4).
+    readonly property string saidOfTheClear: editing.family === "vnc" ? Words.vncSpokenToInTheClear : Words.spokenToOverPlainHttp
     // The yes to what is shown at a new address is a saving, with what stands in the lines.
     readonly property bool trusting: editing.asked === "trusting" || (differing && editing.asked === "saving")
     // What was asked last was asked from what is shown now: why it was not done is said there,
@@ -196,6 +200,15 @@ Dialog {
             editing.saveKeepingBoth(name.text, address.text, user.text, password.text, group.text);
         }
     }
+    // Its plain address sends everybody on to HTTPS: the address it named goes into the address line, as on the page,
+    // and its password is to be typed there (none goes along by itself from a plain address). Saved only when the
+    // person saves.
+    function useInstead() {
+        if (editing.busy || editing.useInstead === "")
+            return;
+        address.text = editing.useInstead;
+        password.takeFocus();
+    }
 
     // The line the keyboard has come to is in sight.
     function bringIntoSight(line) {
@@ -302,8 +315,9 @@ Dialog {
         enabled: !box.editing.busy && box.editing.mayTrust && !box.gone
         focusPolicy: Qt.NoFocus
         // (Where Windows vouches there, no certificate is shown to say yes to: its word is. And
-        // where that address is plain HTTP, nothing is shown: the yes is to speaking to it so.)
-        says: box.editing.plainHttpThere ? Words.usePlainHttp : box.editing.onWindowsWord ? Words.trustWindowsWord : Words.trustThisCertificate
+        // where that address is plain HTTP, nothing is shown: the yes is to speaking to it so. A
+        // VNC server's vnc:// in its family's words.)
+        says: box.editing.plainHttpThere ? (box.editing.family === "vnc" ? Words.useVncUnencrypted : Words.usePlainHttp) : box.editing.onWindowsWord ? Words.trustWindowsWord : Words.trustThisCertificate
         underWay: box.editing.busy && box.trusting
         Keys.onPressed: event => event.accepted = true
         Keys.onReleased: event => event.accepted = true
@@ -375,7 +389,7 @@ Dialog {
         // it is spoken to in the clear.
         function onDoneAsItClosed(what: string, called: string, known: bool, certificate: string, plain: bool) {
             const done = what === "trusted" ? Words.certificateTrusted.arg(called) : Words.savedNamed.arg(called);
-            const knownBy = plain ? Words.spokenToOverPlainHttp : certificate !== "" ? Words.rememberedSha256.arg(certificate) : Words.noCertificateRememberedYet;
+            const knownBy = plain ? box.saidOfTheClear : certificate !== "" ? Words.rememberedSha256.arg(certificate) : Words.noCertificateRememberedYet;
             // (The second into its place first, and each as it is: a KVM may be called "%2".)
             box.actions.tellWhenSeen(known ? Words.oneThenAnother.replace("%2", () => knownBy).replace("%1", () => done) : done, true);
         }
@@ -454,19 +468,19 @@ Dialog {
                         Text {
                             textFormat: Text.PlainText
                             width: parent.width
-                            text: box.editing.family === "jetkvm" ? Words.typeOfAJetKvm : box.editing.family === "redfish" ? Words.typeOfAServer : Words.typeOfAKvm
+                            text: box.editing.family === "jetkvm" ? Words.typeOfAJetKvm : box.editing.family === "redfish" ? Words.typeOfAServer : box.editing.family === "vnc" ? Words.typeOfAVncServer : box.editing.family === "proxmox" ? Words.typeOfAGuest : Words.typeOfAKvm
                             color: Theme.muted
                             font.pixelSize: Theme.smallSize
                             wrapMode: Text.WordWrap
                         }
-                        // (A JetKVM has one password and no user name: what stands here for it is kept
-                        // as it is, and not shown.)
+                        // (A JetKVM has one password and no user name, a VNC server one password or none:
+                        // what stands here for either is kept as it is, and not shown, as on the page.)
                         Field {
                             id: user
 
                             objectName: "editUser"
                             width: parent.width
-                            visible: box.editing.family !== "jetkvm"
+                            visible: box.editing.family !== "jetkvm" && box.editing.family !== "vnc"
                             enabled: !box.editing.busy && !box.gone
                             label: Words.userName
                             placeholder: "admin"
@@ -551,12 +565,13 @@ Dialog {
                         }
                         // What it is known by: its certificate, or nothing at all where it is spoken
                         // to in the clear, which is said as what it is. (After a saving that changed
-                        // either, it is said under the lines, where it is in sight, and once.)
+                        // either, it is said under the lines, where it is in sight, and once.) Over
+                        // HTTPS, and a VNC server's over vncs://, as the page's showsCertificate.
                         Text {
                             textFormat: Text.PlainText
                             objectName: "editCertificate"
                             width: parent.width
-                            visible: box.editing.https && !said.saved
+                            visible: box.editing.showsCertificate && !said.saved
                             text: box.editing.certificate !== "" ? Words.rememberedSha256.arg(box.editing.certificate) : Words.noCertificateRememberedYet
                             color: Theme.muted
                             font.pixelSize: Theme.smallSize
@@ -567,7 +582,7 @@ Dialog {
                             objectName: "editPlain"
                             width: parent.width
                             visible: box.editing.overPlainHttp && !said.saved
-                            text: Words.spokenToOverPlainHttp
+                            text: box.saidOfTheClear
                             color: Theme.warn
                             font.pixelSize: Theme.smallSize
                             wrapMode: Text.WordWrap
@@ -584,6 +599,18 @@ Dialog {
                         color: Theme.text
                         font.pixelSize: Theme.textSize
                         wrapMode: Text.WordWrap
+                    }
+                    // And of a Proxmox guest started from an image: the boot order qKVM put in place stays, and the
+                    // one it replaced, which only this card remembers, is forgotten with it.
+                    Text {
+                        textFormat: Text.PlainText
+                        objectName: "removeBootOrder"
+                        width: parent.width
+                        visible: box.removing && !box.comparing && !box.goneShown && box.editing.bootOrderWas !== ""
+                        text: Words.removingLeavesTheBootOrder.arg(box.editing.bootOrderWritten).arg(box.editing.bootOrderWas)
+                        color: Theme.warn
+                        font.pixelSize: Theme.textSize
+                        wrapMode: Text.Wrap
                     }
                     Text {
                         textFormat: Text.PlainText
@@ -624,7 +651,7 @@ Dialog {
                                 // is known by Windows' word: said as that where it is to be
                                 // given up, for plain HTTP or for a certificate shown elsewhere.)
                                 written: box.editing.reviewed || box.differing ? box.editing.remembered : box.editing.certificate
-                                instead: box.editing.plainHttpThere || (box.differing && box.editing.https) ? Words.windowsWordForItsCertificate : Words.noneYet
+                                instead: box.editing.plainHttpThere || (box.differing && box.editing.showsCertificate) ? Words.windowsWordForItsCertificate : Words.noneYet
                             }
                             Fingerprint {
                                 objectName: "certificatePresented"
@@ -636,10 +663,11 @@ Dialog {
                                 // Windows trusts what is shown there, the KVM would be known by
                                 // that word and by no certificate: said in the place of one.
                                 // Where that address is plain HTTP nothing is presented at all:
-                                // what stands there is what is given up, and it says where.)
+                                // what stands there is what is given up, and it says where; a VNC
+                                // server's vnc:// in its family's words.)
                                 label: box.editing.plainHttpThere ? "" : box.differing ? Words.presentedAtTheNewAddress.arg(box.editing.newAddress) : Words.presentedRightNow
                                 written: box.editing.onWindowsWord || box.editing.plainHttpThere ? "" : box.editing.presented
-                                instead: box.editing.plainHttpThere ? Words.plainHttpThereShowsNothing.arg(box.editing.newAddress) : box.editing.onWindowsWord ? Words.windowsTrustsWhatIsShownThere : Words.checking
+                                instead: box.editing.plainHttpThere ? (box.editing.family === "vnc" ? Words.vncUnencryptedThereShowsNothing : Words.plainHttpThereShowsNothing).arg(box.editing.newAddress) : box.editing.onWindowsWord ? Words.windowsTrustsWhatIsShownThere : Words.checking
                                 grave: box.editing.plainHttpThere
                                 // (It is another than the one a yes was given to.)
                                 marked: box.editing.yesWasToAnother
@@ -739,6 +767,14 @@ Dialog {
                 text: Words.keepBoth
                 onClicked: box.keepBoth()
             }
+            // Its plain address sends everybody on to HTTPS: that address is offered, as on the page (web 0.3.2), until
+            // the address line holds it.
+            Button {
+                objectName: "editUseInstead"
+                visible: said.refused && box.editing.useInstead !== "" && address.text !== box.editing.useInstead && !box.editing.busy
+                text: Words.useInstead.arg(box.editing.useInstead)
+                onClicked: box.useInstead()
+            }
             Text {
                 textFormat: Text.PlainText
                 objectName: "editSaved"
@@ -755,7 +791,7 @@ Dialog {
                 width: parent.width
                 topPadding: 4
                 visible: said.saved && box.editing.overPlainHttp
-                text: Words.spokenToOverPlainHttp
+                text: box.saidOfTheClear
                 color: Theme.warn
                 font.pixelSize: Theme.smallSize
                 wrapMode: Text.WordWrap
@@ -776,7 +812,7 @@ Dialog {
                 objectName: "editSavedCertificate"
                 width: parent.width
                 topPadding: 4
-                visible: said.saved && box.editing.https
+                visible: said.saved && box.editing.showsCertificate
                 text: box.editing.certificate !== "" ? Words.rememberedSha256.arg(box.editing.certificate) : Words.noCertificateRememberedYet
                 color: Theme.muted
                 font.pixelSize: Theme.smallSize
@@ -803,7 +839,7 @@ Dialog {
                 // Under the lines.
                 Asking {
                     objectName: "editReview"
-                    visible: box.typing && box.editing.https
+                    visible: box.typing && box.editing.showsCertificate
                     enabled: !box.editing.busy && !box.gone
                     says: Words.reviewCertificate
                     underWay: box.editing.busy && box.editing.asked === "looking"

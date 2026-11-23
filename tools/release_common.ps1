@@ -27,6 +27,44 @@ function Get-PortableProgramVersion {
     }
 }
 
+# The kind of Windows a program is for, by its PE header's machine, read from its bytes (never run): 'x64' (0x8664),
+# 'arm64' (0xAA64), or what else it says ('machine 0x....', or 'no Windows program').
+function Get-PeArchitecture([byte[]] $Bytes) {
+    if ($null -eq $Bytes -or $Bytes.Length -lt 0x40 -or $Bytes[0] -ne 0x4D -or $Bytes[1] -ne 0x5A) { return 'no Windows program' }
+    $at = [BitConverter]::ToInt32($Bytes, 0x3C)
+    if ($at -lt 0 -or $at + 6 -gt $Bytes.Length -or $Bytes[$at] -ne 0x50 -or $Bytes[$at + 1] -ne 0x45 -or
+        $Bytes[$at + 2] -ne 0 -or $Bytes[$at + 3] -ne 0) { return 'no Windows program' }
+    $machine = [BitConverter]::ToUInt16($Bytes, $at + 4)
+    switch ($machine) {
+        0x8664 { return 'x64' }
+        0xAA64 { return 'arm64' }
+    }
+    return 'machine 0x{0:X4}' -f $machine
+}
+
+# The kind of Windows a portable ZIP's one qkvm-desktop.exe is for (Get-PeArchitecture), read from that one entry's
+# bytes in the ZIP: nothing is unpacked or run.
+function Get-PortableProgramArchitecture {
+    param([Parameter(Mandatory)][string] $Zip)
+    try {
+        $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Zip).Path)
+    } catch {
+        throw 'The package is not a ZIP that can be read.'
+    }
+    try {
+        $programs = @($archive.Entries | Where-Object { $_.FullName -cmatch '\A([^/\\]+[/\\])?qkvm-desktop\.exe\z' })
+        if ($programs.Count -ne 1 -or $programs[0].Length -gt 256MB) {
+            throw 'A portable ZIP holds exactly one qkvm-desktop.exe, at its top or in its one folder.'
+        }
+        $stream = $programs[0].Open()
+        try {
+            $read = [IO.MemoryStream]::new()
+            $stream.CopyTo($read)
+            return Get-PeArchitecture $read.ToArray()
+        } finally { $stream.Dispose() }
+    } finally { $archive.Dispose() }
+}
+
 # --- The release key, and what is signed with it: run by the owner only (release_key.ps1, sign_release.ps1,
 # refresh_feed.ps1). The key is made, held and used here and nowhere else; tests use throwaway keys only. ---
 
@@ -215,18 +253,28 @@ function Get-ReleaseSignature([Security.Cryptography.ECDsa] $Signer, [byte[]] $D
 
 $UpdatePayloadFields = @('schema', 'product', 'platform', 'channel', 'version', 'published', 'expires', 'package',
     'bytes', 'sha256', 'notes')
-# Each kind of release (its platform, as the program compares it, letter for letter) and what its package's name ends
-# in: a portable ZIP (stable.json), an MSIX, and qKVM's own setup (stable-setup.json).
+# Each kind of release (its platform, as the program compares it, letter for letter: windows-<x64 or arm64>-<kind>)
+# and what its package's name ends in: a portable ZIP (stable.json, stable-arm64.json), an MSIX, and qKVM's own setup
+# (stable-setup.json, stable-arm64-setup.json). The setup is one for both kinds of Windows: it installs the PC's own.
 $UpdatePackageEndings = [ordered]@{
     'windows-x64-portable' = '.zip'
     'windows-x64-msix' = '.msix'
     'windows-x64-setup' = '-setup.exe'
+    'windows-arm64-portable' = '.zip'
+    'windows-arm64-msix' = '.msix'
+    'windows-arm64-setup' = '-setup.exe'
 }
+# The kinds of Windows a release is for, by the names its platforms and files say them.
+$ReleaseArchitectures = @('x64', 'arm64')
 
-# The name of the feed a kind of release is served as, in the folder of the one the program has built in: a copy that
-# qKVM's setup installed reads stable-setup.json, every other copy stable.json (beta 1's portable copies among them).
+# The name of the feed a kind of release is served as, in the folder of the one the program has built in, as the
+# program reads it (core/src/update_release.cpp, feedFor): on x64 a copy that qKVM's setup installed reads
+# stable-setup.json, every other copy stable.json (0.1.0 to 0.1.2 among them); on Windows on Arm stable-arm64-setup.json
+# and stable-arm64.json.
 function Get-FeedName([string] $Platform) {
     if ($Platform -ceq 'windows-x64-setup') { return 'stable-setup.json' }
+    if ($Platform -ceq 'windows-arm64-setup') { return 'stable-arm64-setup.json' }
+    if ($Platform -ceq 'windows-arm64-portable' -or $Platform -ceq 'windows-arm64-msix') { return 'stable-arm64.json' }
     return 'stable.json'
 }
 
@@ -372,6 +420,57 @@ function Invoke-SignRelease {
     return $target
 }
 
+# Several files to be signed at once (the owner, 2026-11-19: one passphrase for a release's files): each read once by
+# Get-SignableFile, in the order given, and each a release payload or a SHA256SUMS file; none named twice. Where any one
+# is not, nothing is: the file and why are said. What is shown is then what is signed, file for file.
+function Get-SignableFiles([string[]] $Files) {
+    if (-not $Files -or -not @($Files).Count) { throw 'Name the files to sign. Nothing was signed.' }
+    $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $read = @()
+    foreach ($file in @($Files)) {
+        $full = [IO.Path]::GetFullPath($file)
+        if (-not $seen.Add($full)) { throw "$full is named twice. Nothing was signed." }
+        try { $what = Get-SignableFile $full } catch { throw "${full}: $($_.Exception.Message) Nothing was signed." }
+        $read += [pscustomobject]@{ File = $full; Name = Split-Path -Leaf $full; Bytes = $what.Bytes; Said = $what.Said; Sha256 = $what.Sha256 }
+    }
+    return , $read
+}
+
+# Signs each of several files that Get-SignableFiles read (-What), with one opening of the release key: each signature
+# made and checked against the pinned key, all of them, before the first is written, each to a new file of its own
+# (-Outputs, in the same order, none twice and none one of the files signed). Where any one cannot be made or written,
+# none is left: what this call wrote is taken away again. The names of what was written.
+function Invoke-SignReleaseFiles {
+    param([Parameter(Mandatory)][string] $Key, [Parameter(Mandatory)][string] $PublicKey,
+        [Parameter(Mandatory)][object[]] $What, [Parameter(Mandatory)][string[]] $Outputs,
+        [Parameter(Mandatory)][Security.SecureString] $Passphrase)
+    if (@($What).Count -lt 1 -or @($What).Count -ne @($Outputs).Count) { throw 'Each file signed has one signature file of its own. Nothing was signed.' }
+    $places = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($one in @($What)) { [void] $places.Add([IO.Path]::GetFullPath($one.File)) }
+    $targets = @()
+    foreach ($output in @($Outputs)) {
+        $target = Assert-NewPlace $output
+        if (-not $places.Add($target)) { throw "$target is named twice, or is one of the files signed. Nothing was signed." }
+        $targets += $target
+    }
+    $signer = Open-ReleaseKey -Key $Key -Passphrase $Passphrase -PublicKey $PublicKey
+    $signatures = [Collections.Generic.List[byte[]]]::new()
+    try {
+        foreach ($one in @($What)) { $signatures.Add([byte[]] (Get-ReleaseSignature -Signer $signer -Data $one.Bytes -PublicKey $PublicKey)) }
+    } finally { $signer.Dispose() }
+    $written = @()
+    try {
+        for ($at = 0; $at -lt $targets.Count; $at++) {
+            Write-NewFile $targets[$at] $signatures[$at]
+            $written += $targets[$at]
+        }
+    } catch {
+        foreach ($made in $written) { Remove-Item -LiteralPath $made -Force -ErrorAction SilentlyContinue }
+        throw "A signature could not be written ($($_.Exception.Message)). None was left."
+    }
+    return , $written
+}
+
 # A feed as assemble_update_feed.ps1 writes it, signed by the pinned key: its payload's bytes.
 function Read-SignedFeed([string] $Feed, [string] $PublicKey) {
     $item = Get-Item -LiteralPath $Feed
@@ -403,29 +502,126 @@ function Read-SignedFeed([string] $Feed, [string] $PublicKey) {
     return , $payload
 }
 
-# The feed signed again with new dates (published now, expiring in $ValidDays), every other field as it was: a new
-# feed file, its signature checked against the pinned key before it is written. What the new feed says.
+# How long before it is made (and so before it is signed) a payload says it was published: a PC whose clock is a
+# little behind takes it all the same, where the program refuses one published more than its own 300 s ahead of its
+# clock (core/src/update_release.cpp), which stays as it is (i020). Its expiry is counted from the making, as before.
+$PublishedBeforeMaking = [TimeSpan]::FromMinutes(10)
+
+# A feed to be signed again with new dates (published $PublishedBeforeMaking before $Now, expiring $ValidDays after it),
+# every other field as it was: read and checked (signed by the pinned key, a release payload, expired or not), and the
+# exact payload bytes that are then signed made now, so that what is shown before the passphrase is asked for (the
+# feed's name, what it is, and the SHA-256 of those bytes) is what is signed. Nothing is signed or written here.
+function Get-RefreshedPayload {
+    param([Parameter(Mandatory)][string] $Feed, [Parameter(Mandatory)][string] $PublicKey,
+        [Parameter(Mandatory)][ValidateRange(1, 30)][int] $ValidDays, [DateTime] $Now = [DateTime]::UtcNow)
+    $full = [IO.Path]::GetFullPath($Feed)
+    $fields = Read-RefreshableFeed -Feed $full -PublicKey $PublicKey
+    $expired = $fields.expires
+    $fields.published = Write-UtcDate ($Now - $PublishedBeforeMaking)
+    $fields.expires = Write-UtcDate $Now.AddDays($ValidDays)
+    $payload = [Text.UTF8Encoding]::new($false).GetBytes(($fields | ConvertTo-Json -Compress))
+    $null = Test-UpdatePayload -Bytes $payload -Now $Now
+    return [pscustomobject]@{
+        File = $full; Name = Split-Path -Leaf $full; Fields = $fields; Expired = $expired; Bytes = $payload
+        Sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($payload)).ToLowerInvariant()
+    }
+}
+
+# Several feeds signed again at once (the owner, 2026-11-19: one passphrase), from what Get-RefreshedPayload made of
+# each (-What): one opening of the release key, each new payload signed and the signature checked against the pinned
+# key, every new feed made in memory before the first is written, each to a new file (-Outputs, in the same order, none
+# twice and none one of the feeds read). Where any one cannot be made or written, none is left. The names written.
+function Invoke-RefreshFeeds {
+    param([Parameter(Mandatory)][string] $Key, [Parameter(Mandatory)][string] $PublicKey,
+        [Parameter(Mandatory)][object[]] $What, [Parameter(Mandatory)][string[]] $Outputs,
+        [Parameter(Mandatory)][Security.SecureString] $Passphrase)
+    if (@($What).Count -lt 1 -or @($What).Count -ne @($Outputs).Count) { throw 'Each feed signed again has one new file of its own. Nothing was signed.' }
+    $places = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($one in @($What)) {
+        if (-not $places.Add([IO.Path]::GetFullPath($one.File))) { throw "$($one.File) is named twice. Nothing was signed." }
+    }
+    $targets = @()
+    foreach ($output in @($Outputs)) {
+        $target = Assert-NewPlace $output
+        if (-not $places.Add($target)) { throw "$target is named twice, or is one of the feeds read. Nothing was signed." }
+        $targets += $target
+    }
+    $feeds = [Collections.Generic.List[byte[]]]::new()
+    $signer = Open-ReleaseKey -Key $Key -Passphrase $Passphrase -PublicKey $PublicKey
+    try {
+        foreach ($one in @($What)) {
+            $signature = Get-ReleaseSignature -Signer $signer -Data $one.Bytes -PublicKey $PublicKey
+            $envelope = [ordered]@{
+                payload = [Convert]::ToBase64String($one.Bytes)
+                signature = [Convert]::ToBase64String($signature)
+            } | ConvertTo-Json -Compress
+            $encoded = [Text.UTF8Encoding]::new($false).GetBytes($envelope)
+            if ($encoded.Length -gt 96KB) { throw "The signed update feed $($one.Name) exceeds the desktop size limit. Nothing was written." }
+            $feeds.Add($encoded)
+        }
+    } finally { $signer.Dispose() }
+    $written = @()
+    try {
+        for ($at = 0; $at -lt $targets.Count; $at++) {
+            Write-NewFile $targets[$at] $feeds[$at]
+            $written += $targets[$at]
+        }
+    } catch {
+        foreach ($made in $written) { Remove-Item -LiteralPath $made -Force -ErrorAction SilentlyContinue }
+        throw "A refreshed feed could not be written ($($_.Exception.Message)). None was left."
+    }
+    return , $written
+}
+
+# The platforms of the feeds a release serves (0.2.0 on): x64's portable and installed copies', and Windows on Arm's.
+$ReleaseFeedPlatforms = @('windows-x64-portable', 'windows-x64-setup', 'windows-arm64-portable', 'windows-arm64-setup')
+
+# Why the feeds to be signed again (-What, from Get-RefreshedPayload) are not the set a release serves: none when they
+# are (review armp-1 L6). Each names its own kind: one read from a file of a served name holds that name's own platform
+# (a feed uploaded under the other kind's name is refused by every copy that reads it); none of a platform no release
+# serves, and none twice; one version for all; and the four are all there, unless -Partial says that fewer are signed
+# again on purpose (0.1.x's two, say), when the ones left out come back named (Missing): each runs out on its own date.
+function Get-FeedSetRefusals {
+    param([Parameter(Mandatory)][object[]] $What, [switch] $Partial)
+    $refusals = @()
+    $served = @($ReleaseFeedPlatforms | ForEach-Object { Get-FeedName $_ })
+    $seen = @()
+    foreach ($one in @($What)) {
+        $platform = [string] $one.Fields.platform
+        if ($ReleaseFeedPlatforms -cnotcontains $platform) { $refusals += "$($one.Name): $platform is no feed a release serves"; continue }
+        if ($served -ccontains [string] $one.Name -and [string] $one.Name -cne (Get-FeedName $platform)) {
+            $refusals += "$($one.Name) holds $platform, which is served as $(Get-FeedName $platform)"
+        }
+        if ($seen -ccontains $platform) { $refusals += "$platform is there twice" }
+        $seen += $platform
+    }
+    $versions = @(@($What) | ForEach-Object { [string] $_.Fields.version } | Sort-Object -Unique)
+    if ($versions.Count -gt 1) { $refusals += "the feeds offer more than one version ($($versions -join ', '))" }
+    $missing = @($ReleaseFeedPlatforms | Where-Object { $seen -cnotcontains $_ } | ForEach-Object { Get-FeedName $_ })
+    if ($missing.Count -and -not $Partial) {
+        $refusals += "not the whole set: $($missing -join ', ') $(if ($missing.Count -eq 1) { 'is' } else { 'are' }) not among them (a release serves four feeds, each of which runs out on its own date; -Partial signs fewer on purpose)"
+    }
+    return [pscustomobject]@{ Refusals = @($refusals); Missing = @($missing) }
+}
+
+# The commands that upload each feed signed again (-Written, in the order of -What) to the bucket behind
+# download.qkvm.com, under the name it is served at, never cached: as release_commands.ps1 says them.
+function Get-FeedUploadLines {
+    param([Parameter(Mandatory)][object[]] $What, [Parameter(Mandatory)][string[]] $Written, [Parameter(Mandatory)][string] $Bucket)
+    for ($at = 0; $at -lt @($What).Count; $at++) {
+        "npx --yes wrangler@4.152.0 r2 object put `"$Bucket/desktop/$(Get-FeedName $What[$at].Fields.platform)`" --file `"$($Written[$at])`" --content-type `"application/json`" --cache-control `"no-cache`" --remote"
+    }
+}
+
+# One feed signed again (Get-RefreshedPayload, then Invoke-RefreshFeeds). What the new feed says.
 function Invoke-RefreshFeed {
     param([Parameter(Mandatory)][string] $Feed, [Parameter(Mandatory)][string] $Key,
         [Parameter(Mandatory)][string] $PublicKey, [Parameter(Mandatory)][string] $Output,
         [Parameter(Mandatory)][ValidateRange(1, 30)][int] $ValidDays,
         [Parameter(Mandatory)][Security.SecureString] $Passphrase, [DateTime] $Now = [DateTime]::UtcNow)
-    $fields = Read-RefreshableFeed -Feed $Feed -PublicKey $PublicKey
-    $target = Assert-NewPlace $Output
-    $fields.published = Write-UtcDate $Now
-    $fields.expires = Write-UtcDate $Now.AddDays($ValidDays)
-    $payload = [Text.UTF8Encoding]::new($false).GetBytes(($fields | ConvertTo-Json -Compress))
-    $null = Test-UpdatePayload -Bytes $payload -Now $Now
-    $signer = Open-ReleaseKey -Key $Key -Passphrase $Passphrase -PublicKey $PublicKey
-    try { $signature = Get-ReleaseSignature -Signer $signer -Data $payload -PublicKey $PublicKey } finally { $signer.Dispose() }
-    $envelope = [ordered]@{
-        payload = [Convert]::ToBase64String($payload)
-        signature = [Convert]::ToBase64String($signature)
-    } | ConvertTo-Json -Compress
-    $encoded = [Text.UTF8Encoding]::new($false).GetBytes($envelope)
-    if ($encoded.Length -gt 96KB) { throw 'The signed update feed exceeds the desktop size limit.' }
-    Write-NewFile $target $encoded
-    return $fields
+    $what = Get-RefreshedPayload -Feed $Feed -PublicKey $PublicKey -ValidDays $ValidDays -Now $Now
+    $null = Invoke-RefreshFeeds -Key $Key -PublicKey $PublicKey -What @($what) -Outputs @($Output) -Passphrase $Passphrase
+    return $what.Fields
 }
 
 # The fields of a feed that is to be signed again: signed by the pinned key, and a release payload (expired or not).

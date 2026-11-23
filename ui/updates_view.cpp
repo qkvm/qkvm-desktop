@@ -27,20 +27,21 @@ QString UpdatesView::status() const
     case State::Current:
         return tr("You have the latest available version.");
     case State::Available:
-        return tr("qKVM %1 is available.").arg(version());
+        // (An x64 copy on Windows on Arm: what it offers is the program for Windows on Arm, of its own version too.)
+        return forThePcsOwnKind() ? tr("qKVM %1 for Windows on Arm is available.").arg(version())
+                                  : tr("qKVM %1 is available.").arg(version());
     case State::Downloading:
         return tr("Downloading update: %1 of %2")
             .arg(QLocale().formattedDataSize(m_updates.received()),
                  QLocale().formattedDataSize(release ? release->bytes : 0));
     case State::Ready:
         if (showsFile()) {
-            return m_shownFile ? tr("The verified file is shown in its folder.")
-                               : tr("qKVM %1 is downloaded and verified.").arg(version());
+            return m_shownFile ? tr("The verified file is shown in its folder.") : downloaded();
         }
         if (restarts()) {
             return m_handedOver ? tr("qKVM Setup has started. qKVM closes now, and starts again once the update is "
                                      "installed.")
-                                : tr("qKVM %1 is downloaded and verified.").arg(version());
+                                : downloaded();
         }
         return m_openedInstaller ? tr("Continue in qKVM Setup. qKVM has not been closed.")
                                  : tr("The update is verified and ready to install.");
@@ -48,6 +49,12 @@ QString UpdatesView::status() const
         return tr("The update could not be completed.");
     }
     return {};
+}
+
+QString UpdatesView::downloaded() const
+{
+    return forThePcsOwnKind() ? tr("qKVM %1 for Windows on Arm is downloaded and verified.").arg(version())
+                              : tr("qKVM %1 is downloaded and verified.").arg(version());
 }
 
 QString UpdatesView::lastChecked() const

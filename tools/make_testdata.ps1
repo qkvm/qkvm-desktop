@@ -307,5 +307,65 @@ if (-not ((Test-Path -LiteralPath $certificate) -and (Test-Path -LiteralPath $ke
     }
 }
 
+# And, for each stall case of the tests, one whose signer is in no store and says where it is to be fetched: three
+# ports of this PC's own address that are that case's alone, where it listens and never answers this program
+# (core/tests/signer_far_away.h, whose table of names and ports is this one: why each case has its own is said there).
+# The file holds the signer after it, for the server, which does not send a root. Windows, judging a line that shows
+# it, fetches the signer there and waits, on the thread that judges the line, as it waits for a real signer's address
+# on a PC without internet. The signer's key is thrown away: nothing is signed by it again.
+# (The asker's case had 47391-47393 until 2026-11-21, which the profile fixtures' stand-in servers take too: it has ports
+# of its own now, and a certificate of a new name, so that every PC makes it anew.)
+$stalls = [ordered] @{ 'asker-own' = 47448, 47449, 47450; 'probe' = 47394, 47395, 47396; 'client' = 47397, 47398, 47399
+    'client-address' = 47400, 47401, 47402; 'client-certificate' = 47403, 47404, 47405
+    'vnc-certificate' = 47406, 47407, 47408; 'vnc-session' = 47409, 47410, 47411
+    'line-awake' = 47412, 47413, 47414; 'line-console' = 47415, 47416, 47417; 'line-janus' = 47418, 47419, 47420
+    'line-jetkvm' = 47421, 47422, 47423; 'line-live' = 47424, 47425, 47426; 'line-openbmc' = 47427, 47428, 47429
+    'line-proxmox' = 47430, 47431, 47432; 'line-ami' = 47433, 47434, 47435; 'line-rfb' = 47436, 47437, 47438
+    'line-quit' = 47439, 47440, 47441; 'vnc-quit' = 47442, 47443, 47444; 'line-again' = 47445, 47446, 47447 }
+$serial = 0
+foreach ($of in $stalls.Keys) {
+    $serial += 1
+    $certificate = Join-Path $folder "stalls-$of.crt"
+    $key = Join-Path $folder "stalls-$of.key"
+    if ((Test-Path -LiteralPath $certificate) -and (Test-Path -LiteralPath $key) -and -not $Again) { continue }
+    Write-Host "  tls\stalls-$of.crt, tls\stalls-$of.key"
+    $sha256 = [System.Security.Cryptography.HashAlgorithmName]::SHA256
+    $padding = [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+    $from = [DateTimeOffset]::UtcNow.AddDays(-1)
+    $makerKey = [System.Security.Cryptography.RSA]::Create(2048)
+    $rsa = [System.Security.Cryptography.RSA]::Create(2048)
+    try {
+        $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+            'CN=QKVM test signer far away', $makerKey, $sha256, $padding)
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new($true, $false, 0, $true))
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign, $true))
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension]::new($request.PublicKey, $false))
+        $maker = $request.CreateSelfSigned($from, [DateTimeOffset]::UtcNow.AddYears(20))
+        $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new("CN=QKVM test stalls ($of)", $rsa, $sha256, $padding)
+        $names = [System.Security.Cryptography.X509Certificates.SubjectAlternativeNameBuilder]::new()
+        $names.AddIpAddress([System.Net.IPAddress]::Loopback)
+        $names.AddDnsName('localhost')
+        $request.CertificateExtensions.Add($names.Build())
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509AuthorityKeyIdentifierExtension]::CreateFromCertificate($maker, $true, $false))
+        $where = [string[]] @($stalls[$of] | ForEach-Object { "http://127.0.0.1:$_/stalls-$of/signer.crt" })
+        $request.CertificateExtensions.Add(
+            [System.Security.Cryptography.X509Certificates.X509AuthorityInformationAccessExtension]::new($null, $where, $false))
+        $made = $request.Create($maker, $from.AddMinutes(2), [DateTimeOffset]::UtcNow.AddYears(19), [byte[]](0, 0, 0, 0, 0, 0, 9, $serial))
+        Set-Content -LiteralPath $certificate -NoNewline -Value (
+            (ConvertTo-Pem 'CERTIFICATE' $made.RawData) + (ConvertTo-Pem 'CERTIFICATE' $maker.RawData))
+        Set-Content -LiteralPath $key -Value (ConvertTo-Pem 'RSA PRIVATE KEY' $rsa.ExportRSAPrivateKey()) -NoNewline
+        $made.Dispose()
+        $maker.Dispose()
+    } finally {
+        $rsa.Dispose()
+        $makerKey.Dispose()
+    }
+}
+
 $files = Get-ChildItem -LiteralPath $Out -Recurse -File
 Write-Host ("Test pictures are in {0}: {1} files, {2:N0} MB." -f $Out, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB))

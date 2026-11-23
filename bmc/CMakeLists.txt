@@ -30,32 +30,20 @@ qkvm_add_test(test_bmc_ami_console_fuzz
     SOURCES tests/test_ami_console_fuzz.cpp tests/aspeed_frames.h tests/allocations.h tests/chance.h
     LIBRARIES qkvm_bmc)
 
-# libFuzzer's targets, outside the ordinary build and its tests: a build of their own, on the address
-# sanitizer's preset, run by hand for as long as one likes.
-#     cmake --preset asan -B build/fuzz -DQKVM_FUZZ=ON
-#     cmake --build build/fuzz --target fuzz_bmc_aspeed fuzz_bmc_ami_console fuzz_bmc_seeds
-#     build\fuzz\bin\fuzz_bmc_seeds <corpus> <console corpus>
-#     build\fuzz\bin\fuzz_bmc_aspeed <corpus> -max_len=262144 -malloc_limit_mb=16 -timeout=10 -max_total_time=1200
-#     build\fuzz\bin\fuzz_bmc_ami_console <console corpus> (the same)
-option(QKVM_FUZZ "Build libFuzzer's targets of what a management controller sends" OFF)
+# libFuzzer's targets (the fuzz preset, which the gate runs: CMakeLists.txt, qkvm_add_fuzzer), each with the readers
+# compiled into it again; their seeds from bmc_seeds.h, by the seed maker (core/fuzz). By hand, for as long as one
+# likes:
+#     cmake --preset fuzz; cmake --build --preset fuzz
+#     build\fuzz\bin\fuzz_bmc_aspeed <corpus> build\fuzz\fuzz\seeds\bmc_aspeed -max_len=262144 -malloc_limit_mb=16
 if(QKVM_FUZZ)
-    if(NOT QKVM_ASAN)
-        message(FATAL_ERROR "libFuzzer's targets are built with the address sanitizer: configure the asan preset.")
-    endif()
-    # The readers are compiled into each target again, so that libFuzzer sees which of their branches an input
-    # takes.
-    add_executable(fuzz_bmc_aspeed fuzz/fuzz_aspeed.cpp fuzz/fuzz_input.h src/aspeed.cpp)
-    add_executable(fuzz_bmc_ami_console fuzz/fuzz_ami_console.cpp src/ami_console.cpp src/aspeed.cpp)
-    foreach(target fuzz_bmc_aspeed fuzz_bmc_ami_console)
-        target_include_directories(${target} PRIVATE include)
-        target_compile_options(${target} PRIVATE /fsanitize=fuzzer)
-        # As the program has them, and a check that fails ends in abort(), which libFuzzer hears and keeps the input
-        # of (the library's own way out ends a program past anybody's hearing).
-        target_compile_definitions(${target} PRIVATE _MSVC_STL_HARDENING=1 _MSVC_STL_USE_ABORT_AS_DOOM_FUNCTION=1)
-        target_link_libraries(${target} PRIVATE qkvm_build qkvm_base)
-    endforeach()
-    add_executable(fuzz_bmc_seeds fuzz/make_seeds.cpp fuzz/fuzz_input.h tests/aspeed_frames.h)
-    target_link_libraries(fuzz_bmc_seeds PRIVATE qkvm_build qkvm_bmc)
-    set_target_properties(fuzz_bmc_aspeed fuzz_bmc_ami_console fuzz_bmc_seeds
-        PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    qkvm_add_fuzzer(fuzz_bmc_aspeed SOURCES fuzz/fuzz_aspeed.cpp fuzz/fuzz_aspeed.h fuzz/fuzz_input.h src/aspeed.cpp
+        INCLUDES include MAX_LEN 262144 MALLOC_MB 16 SEEDS bmc_aspeed)
+    qkvm_add_fuzzer(fuzz_bmc_ami_console
+        SOURCES fuzz/fuzz_ami_console.cpp fuzz/fuzz_ami_console.h src/ami_console.cpp src/aspeed.cpp
+        INCLUDES include MAX_LEN 262144 MALLOC_MB 16 SEEDS bmc_ami_console)
+else()
+    # (Compiled, not linked, in the other presets: the gate's clang-tidy reads them with the flags they are built with.)
+    add_library(qkvm_bmc_fuzz_ways_in OBJECT fuzz/fuzz_aspeed.cpp fuzz/fuzz_ami_console.cpp)
+    target_link_libraries(qkvm_bmc_fuzz_ways_in PRIVATE qkvm_build qkvm_base qkvm_bmc)
+    set_target_properties(qkvm_bmc_fuzz_ways_in PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 endif()

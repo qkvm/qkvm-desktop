@@ -235,6 +235,9 @@ private:
     // A machine's picture is drawn in this window from now on; and none is any more.
     static void addStream(Screen& screen, const QString& key, quint32 number, engine::Codec codec);
     void dropStreams(Screen& screen);
+    // Each stream of this window's wall is told whether it is a card (engine::Stream::shownAsACard): all but the
+    // machine shown large there.
+    void tellCards(const WallView& wall);
     // This source's cards are made anew from what its feed says (build), and all of them are put
     // together in every window (join), its streams with them; both (fill). Its cards say what is
     // so of the source now (stamp): whether it is away, and whether whoever sits here may act.

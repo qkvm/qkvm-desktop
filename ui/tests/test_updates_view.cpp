@@ -279,6 +279,54 @@ private slots:
         QCOMPARE(shown, 0);
     }
 
+    // An x64 copy on Windows on Arm says that what it offers is for Windows on Arm, its own version too; a copy of the
+    // PC's own kind says only the version, as ever.
+    void aCopyThatIsNotOfThePcsKindSaysItsUpdateIsForWindowsOnArm_data()
+    {
+        QTest::addColumn<base::Architecture>("copy");
+        QTest::addColumn<base::Architecture>("pc");
+        QTest::addColumn<QString>("version");
+        QTest::addColumn<QString>("said");
+        const auto x64 = base::Architecture::X64;
+        const auto arm64 = base::Architecture::Arm64;
+        QTest::newRow("x64 on Arm, its own version")
+            << x64 << arm64 << u"0.1.0"_s << u"qKVM 0.1.0 for Windows on Arm is available."_s;
+        QTest::newRow("x64 on Arm, a later one")
+            << x64 << arm64 << u"0.2.0"_s << u"qKVM 0.2.0 for Windows on Arm is available."_s;
+        QTest::newRow("arm64 on Arm") << arm64 << arm64 << u"0.2.0"_s << u"qKVM 0.2.0 is available."_s;
+        QTest::newRow("x64 on x64") << x64 << x64 << u"0.2.0"_s << u"qKVM 0.2.0 is available."_s;
+    }
+
+    void aCopyThatIsNotOfThePcsKindSaysItsUpdateIsForWindowsOnArm()
+    {
+        QFETCH(base::Architecture, copy);
+        QFETCH(base::Architecture, pc);
+        QFETCH(QString, version);
+        QFETCH(QString, said);
+        QTemporaryDir folder;
+        core::Settings settings(folder.filePath(u"settings.json"_s));
+        UpdateNetwork network;
+        ReleaseSigner signer;
+        const QByteArray package("made-up zip");
+        core::Updates updates({QUrl(u"https://updates.example.test/stable.json"_s),
+                               signer.publicKey(),
+                               u"0.1.0"_s,
+                               core::UpdateKind::Portable,
+                               {},
+                               {},
+                               pc,
+                               copy},
+                              settings, network, folder.path());
+        ui::UpdatesView view(updates);
+        auto release = releaseFor(package, QDateTime::currentDateTimeUtc(), core::UpdateKind::Portable, pc);
+        release[u"version"_s] = version;
+        network.next = {signer.seal(release)};
+        view.check();
+        QTRY_VERIFY(view.canDownload());
+        QCOMPARE(view.status(), said);
+        QCOMPARE(view.forThePcsOwnKind(), copy != pc);
+    }
+
     // A portable copy: "Show the verified file", never an installer; the file is the one that was downloaded.
     void aPortableCopyShowsTheVerifiedFileAndNeverInstalls()
     {

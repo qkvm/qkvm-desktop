@@ -46,8 +46,8 @@ public:
     explicit AmiConsoleByHand(const std::optional<Tls>& tls = {})
         : m_server(QStringLiteral("AMI console stand-in"), QWebSocketServer::NonSecureMode)
     {
-        const auto answer = [](const Asked& asked) {
-            return asked.path.startsWith("/kvm") ? Answered(401, R"({"error":"sign in first"})")
+        const auto answer = [this](const Asked& asked) {
+            return asked.path.startsWith("/kvm") ? Answered(refusesWith, R"({"error":"sign in first"})")
                                                  : Answered(404, R"({"error":"no such thing"})");
         };
         stand = tls ? std::make_unique<StandIn>(answer, *tls) : std::make_unique<StandIn>(answer);
@@ -91,6 +91,7 @@ public:
     std::function<bool(std::size_t)> sendsFrameWhen;
     bool beginsWithNothing = false; // to a console opened again: "nothing changed" first, the screen when asked
     int seats = 2;
+    int refusesWith = 401;        // what a console asked for without its web page's session is answered (or 403)
     int sessionLastsMs = 0;       // it ends a session after this long, its time being up; 0: never
     QByteArray heldBy;            // somebody had the console first: whoever comes is told to wait
     bool shutOut = false;         // ...or that nobody else comes in
@@ -174,10 +175,52 @@ public:
             }
         }
     }
+    // Takes no more than `bytes` off its lines every 20 milliseconds: a board that is slow, and well. (What comes
+    // faster waits, with Windows and then with whoever says it.) readAgain() ends it.
+    void readSlowly(int bytes)
+    {
+        stall();
+        for (const QPointer<QTcpSocket>& under : m_handed) {
+            if (under != nullptr) {
+                under->setReadBufferSize(bytes);
+            }
+        }
+        m_slowly.disconnect();
+        connect(&m_slowly, &QTimer::timeout, this, [this, bytes, odd = false]() mutable {
+            odd = !odd;
+            for (const QPointer<QTcpSocket>& under : m_handed) {
+                if (under == nullptr) {
+                    continue;
+                }
+                // (A socket that filled its buffer takes nothing more from Windows until its buffer's size is set
+                // again, and a message read in part is left in it: set again every time, to what it was or one more.)
+                under->setReadBufferSize(bytes + (odd ? 1 : 0));
+                if (under->bytesAvailable() > 0) {
+                    under->blockSignals(false);
+                    emit under->readyRead();
+                    if (under != nullptr) {
+                        under->blockSignals(true);
+                    }
+                }
+            }
+        });
+        m_slowly.start(20);
+    }
+    // Stalled (stall()), takes `bytes` more off its lines, what waited first, as Windows hands them over, and then
+    // nothing again: they are taken off the line, not read as messages, until readAgain().
+    void readSome(int bytes)
+    {
+        for (const QPointer<QTcpSocket>& under : m_handed) {
+            if (under != nullptr) {
+                under->setReadBufferSize(under->bytesAvailable() + bytes);
+            }
+        }
+    }
     // ...and takes it again, what waited first. (A line that fell meanwhile said so to nobody: it is closed here, and
     // its seat ends with it.)
     void readAgain()
     {
+        m_slowly.stop();
         for (const QPointer<QTcpSocket>& under : m_handed) {
             if (under != nullptr) {
                 under->setReadBufferSize(0);
@@ -623,6 +666,7 @@ private:
 
     QWebSocketServer m_server;
     QList<QPointer<QTcpSocket>> m_handed;
+    QTimer m_slowly; // readSlowly()
     // Of a console served at another stand-in too (servesAt): whom it lets in, and which passes it takes.
     std::function<bool(const QByteArray&)> m_admits;
     std::function<bool(const QByteArray&)> m_takesPass;

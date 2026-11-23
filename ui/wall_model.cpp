@@ -241,6 +241,8 @@ QVariant WallModel::data(const QModelIndex& index, int role) const
         return tile.amtView;
     case PictureSizeRole:
         return tile.pictureSize;
+    case PowerNoteRole:
+        return tile.powerNote;
     default:
         return {};
     }
@@ -249,17 +251,29 @@ QVariant WallModel::data(const QModelIndex& index, int role) const
 QHash<int, QByteArray> WallModel::roleNames() const
 {
     return {
-        {StreamRole, "stream"_ba},   {NameRole, "name"_ba},
-        {HostRole, "host"_ba},       {StateRole, "status"_ba},
-        {TitleRole, "title"_ba},     {TextRole, "text"_ba},
-        {ActionRole, "action"_ba},   {MetaRole, "meta"_ba},
-        {PortsRole, "ports"_ba},     {ServerRole, "server"_ba},
-        {KeyRole, "key"_ba},         {LabelRole, "label"_ba},
-        {GroupRole, "group"_ba},     {OpenableRole, "openable"_ba},
-        {PickedRole, "picked"_ba},   {SourceRole, "source"_ba},
-        {AwayRole, "away"_ba},       {ActableRole, "actable"_ba},
-        {NoteRole, "note"_ba},       {LargeMetaRole, "largeMeta"_ba},
-        {AmtViewRole, "amtView"_ba}, {PictureSizeRole, "pictureSize"_ba},
+        {StreamRole, "stream"_ba},
+        {NameRole, "name"_ba},
+        {HostRole, "host"_ba},
+        {StateRole, "status"_ba},
+        {TitleRole, "title"_ba},
+        {TextRole, "text"_ba},
+        {ActionRole, "action"_ba},
+        {MetaRole, "meta"_ba},
+        {PortsRole, "ports"_ba},
+        {ServerRole, "server"_ba},
+        {KeyRole, "key"_ba},
+        {LabelRole, "label"_ba},
+        {GroupRole, "group"_ba},
+        {OpenableRole, "openable"_ba},
+        {PickedRole, "picked"_ba},
+        {SourceRole, "source"_ba},
+        {AwayRole, "away"_ba},
+        {ActableRole, "actable"_ba},
+        {NoteRole, "note"_ba},
+        {LargeMetaRole, "largeMeta"_ba},
+        {AmtViewRole, "amtView"_ba},
+        {PictureSizeRole, "pictureSize"_ba},
+        {PowerNoteRole, "powerNote"_ba},
     };
 }
 

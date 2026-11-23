@@ -9,6 +9,8 @@
 #include <QFileInfo>
 #include <QVariantMap>
 
+#include <qkvm/core/vnc_device.h>
+
 using namespace Qt::StringLiterals;
 
 namespace qkvm::ui {
@@ -235,6 +237,8 @@ QVariant LaidOutList::data(const QModelIndex& index, int role) const
         return device.open;
     case HasTextRole:
         return device.offered.hasText;
+    case OfAVncServerRole:
+        return core::vnc::namesOne(device.offered.address);
     default:
         return {};
     }
@@ -254,7 +258,8 @@ QHash<int, QByteArray> LaidOutList::roleNames() const
             {CanBeTakenRole, "canBeTaken"},
             {TickedRole, "ticked"},
             {OpenRole, "open"},
-            {HasTextRole, "hasText"}};
+            {HasTextRole, "hasText"},
+            {OfAVncServerRole, "ofAVncServer"}};
 }
 
 bool LaidOutList::tickedToBeginWith(const core::WallExchange::Offered& device)
@@ -290,7 +295,11 @@ QString LaidOutList::inShort(const core::WallExchange::Offered& device, bool say
         // Every reason it is not ticked to begin with, each in a few words: none of them is
         // left for what stands behind the row.
         if (device.passwordInTheClear) {
-            said.append(words("Plain HTTP: its password goes in the clear"));
+            // (A VNC server's vnc:// is no HTTP, and VNC sends no password: said in its family's words, as its row in
+            // the settings says "Unencrypted (vnc)". Outside review c9a-4, L3.)
+            said.append(core::vnc::namesOne(device.address)
+                            ? words("Unencrypted (vnc): what is seen and typed goes in the clear")
+                            : words("Plain HTTP: its password goes in the clear"));
         }
         if (device.nameInXnForm) {
             said.append(words("Its address is a name in xn-- form: compare it sign for sign"));

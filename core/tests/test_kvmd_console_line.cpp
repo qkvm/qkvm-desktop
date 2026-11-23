@@ -265,6 +265,15 @@ void takeBare(qintptr line, Bare& into)
     }
 }
 
+// Whether the line stands, by Windows' own word, taking nothing off it: a far end that read here would let the line's
+// socket's thread hand on what waits, which goes on whatever the test's own thread does (outside review 2.2).
+bool standsBare(qintptr line)
+{
+    char one = 0;
+    const int came = ::recv(static_cast<SOCKET>(line), &one, 1, MSG_PEEK);
+    return came > 0 || (came < 0 && ::WSAGetLastError() == WSAEWOULDBLOCK);
+}
+
 } // namespace
 
 // The line to a KVM that the program speaks itself (DeviceLine), the two that are made of it: the
@@ -544,6 +553,8 @@ private slots:
         const std::unique_ptr<KvmByHand> kvm = kvmOver(encrypted);
         DeviceLine::Limits limits = roomy();
         limits.mostUnsentBytes = 65'536;
+        // (Answers that wait past lateAfterMs end the line sooner, as late: here what ends it is how much waits.)
+        limits.lateAfterMs = 600'000;
         DeviceLine line(lineTo(*kvm), limits);
         AwakeLine held(lineTo(*kvm), 2000);
         const QSignalSpy ended(&line, &DeviceLine::ended);
@@ -836,6 +847,113 @@ private slots:
         QVERIFY2(came.bytes + 1024 < said * onTheLine, QByteArray::number(came.bytes).constData());
     }
 
+    void aQuietLineWhoseSaidHasWaitedTooLongEndsByItself_data()
+    {
+        QTest::addColumn<bool>("busy");
+        QTest::newRow("while this program waits") << false;
+        // (Found late by the line's socket's thread alone, which resets the socket there: outside review 2.2. The
+        // socket's end that comes of that is heard here before the word that it was late, and is not taken for a fall.)
+        QTest::newRow("while this program is busy past it") << true;
+    }
+
+    void aQuietLineWhoseSaidHasWaitedTooLongEndsByItself()
+    {
+        // Outside review 2.6: what was said and has waited to leave for longer than lateAfterMs ends the line there
+        // and then, whether or not anything is said after it. A line that stalled with keys in this program's buffer
+        // and stayed quiet would otherwise press them when the way came back (Qt hands on what waits as soon as it
+        // can, by itself). Reset, as every line found late: what waited is thrown away.
+        QFETCH(bool, busy);
+        KvmByHand kvm;
+        DeviceLine::Limits limits = roomy();
+        limits.lateAfterMs = 300;
+        limits.mostUnsentBytes = qint64{64} * 1024 * 1024;
+        DeviceLine line(lineTo(kvm), limits);
+        const QSignalSpy ended(&line, &DeviceLine::ended);
+        line.open();
+        QTRY_VERIFY(line.isIn());
+        kvm.stopReading();
+        const qintptr farEnd = kvm.descriptor();
+        // Half a megabyte in one go, far more than Windows holds for a line that nobody reads: some of it waits here.
+        qint64 said = 0;
+        for (int one = 0; one < 5; ++one) {
+            QVERIFY(line.say(QByteArray(100'000, 'k')));
+            said += 100'000 + 8;
+        }
+        QElapsedTimer since;
+        since.start();
+        Bare came;
+        if (busy) {
+            QThread::msleep(static_cast<unsigned long>(limits.lateAfterMs) + 300);
+            // (Looked at before this thread's loop turns again: the made-up KVM, on it, would hear of the reset there
+            // and let go of its end of the line.)
+            takeBare(farEnd, came);
+            // What the socket's thread handed here meanwhile, before any timer of this thread's (the line's own watch
+            // would find it late too): the socket's end, which the reset there brought about, then that it was late.
+            QCoreApplication::sendPostedEvents();
+        }
+        QTRY_COMPARE_WITH_TIMEOUT(ended.count(), 1, 3000);
+        QVERIFY2(since.elapsed() < limits.lateAfterMs + 1000, QByteArray::number(since.elapsed()).constData());
+        QCOMPARE(ended.at(0).at(0).value<DeviceLine::End>(), DeviceLine::End::Late);
+        QVERIFY(!line.isIn());
+        QTRY_VERIFY_WITH_TIMEOUT((takeBare(farEnd, came), !came.end.isEmpty()), 5000);
+        QCOMPARE(came.end, "reset"_ba);
+        QVERIFY2(came.bytes + 1024 < said, QByteArray::number(came.bytes).constData());
+    }
+
+    void whatHasWaitedTooLongIsNotHandedOnWhenTheWayComesBack()
+    {
+        // ...and where something is said once the way has come back, before the line was looked at (this program
+        // busy past lateAfterMs), what waited is not offered to Windows first and so handed on: the line ends, and of
+        // what waited here nothing arrives, only what Windows had taken for the line before (a few kilobytes).
+        KvmByHand kvm;
+        DeviceLine::Limits limits = roomy();
+        limits.lateAfterMs = 300;
+        limits.mostUnsentBytes = qint64{64} * 1024 * 1024;
+        DeviceLine line(lineTo(kvm), limits);
+        const QSignalSpy ended(&line, &DeviceLine::ended);
+        line.open();
+        QTRY_VERIFY(line.isIn());
+        kvm.stopReading();
+        const qintptr farEnd = kvm.descriptor();
+        for (int one = 0; one < 5; ++one) {
+            QVERIFY(line.say(QByteArray(100'000, 'k')));
+        }
+        QThread::msleep(static_cast<unsigned long>(limits.lateAfterMs) + 300);
+        // The way comes back: the far end takes all there is for it, and Windows may send again.
+        Bare came;
+        takeBare(farEnd, came);
+        const qint64 before = came.bytes;
+        // (The line's socket is on a thread of its own, which found what waited late at lateAfterMs while this program
+        // was busy, and reset the line then: outside review 2.2. Its end is said here, at the first look.)
+        QVERIFY2(came.end.isEmpty() || came.end == "reset"_ba, came.end.constData());
+        QVERIFY(!line.say("x"_ba));
+        QCOMPARE(ended.count(), 1);
+        QCOMPARE(ended.at(0).at(0).value<DeviceLine::End>(), DeviceLine::End::Late);
+        QTRY_VERIFY_WITH_TIMEOUT((takeBare(farEnd, came), !came.end.isEmpty()), 5000);
+        QCOMPARE(came.end, "reset"_ba);
+        QVERIFY2(came.bytes - before <= 16384,
+                 QByteArray::number(came.bytes - before).append(" bytes came after the way came back").constData());
+    }
+
+    void aHealthyLineOverTlsIsNotFoundLateAfterThisProgramWasBusy()
+    {
+        // (And what left at once is not taken for what waits, also over TLS, whose count of what left goes on a turn
+        // of the loop later: a line on which nothing waits is not ended for this program's own busy while.)
+        KvmByHand kvm(tlsOf("first"));
+        DeviceLine::Limits limits = roomy();
+        limits.lateAfterMs = 300;
+        DeviceLine line(lineTo(kvm), limits);
+        const QSignalSpy ended(&line, &DeviceLine::ended);
+        line.open();
+        QTRY_VERIFY(line.isIn());
+        QVERIFY(line.say("one"_ba));
+        QThread::msleep(static_cast<unsigned long>(limits.lateAfterMs) + 300);
+        QVERIFY(line.say("two"_ba));
+        QTest::qWait(limits.lateAfterMs + 300);
+        QCOMPARE(ended.count(), 0);
+        QTRY_COMPARE(kvm.messagesOf(text).size(), 2);
+    }
+
     // A line that is closed from here, and what becomes of it after the goodbye.
 
     void aLineThatWasClosedSaysOnceThatItHasGoneWhenTheKvmHasEndedIt()
@@ -938,12 +1056,12 @@ private slots:
         since.start();
         line.close();
         QCOMPARE(gone.count(), 0);
-        // Not before its time is up: the line stands, and nothing is said of it.
+        // Not before its time is up: the line stands, and nothing is said of it. (Looked at without taking anything
+        // off it: the KVM still reads nothing.)
         QTest::qWait(limits.goodbyeWithinMs - 400);
         QCOMPARE(gone.count(), 0);
+        QVERIFY(standsBare(farEnd));
         Bare came;
-        takeBare(farEnd, came);
-        QCOMPARE(came.end, QByteArray());
         QTRY_COMPARE_WITH_TIMEOUT(gone.count(), 1, 4000);
         QVERIFY2(since.elapsed() >= limits.goodbyeWithinMs - 50, QByteArray::number(since.elapsed()).constData());
         QTRY_VERIFY_WITH_TIMEOUT((takeBare(farEnd, came), !came.end.isEmpty()), 5000);
@@ -1021,14 +1139,15 @@ private slots:
         if (letIn) {
             QTRY_VERIFY(line.isIn());
             // The KVM keeps the line and reads nothing; half a megabyte is said in one go, far
-            // more than Windows holds for such a line, so some of it waits here. Nothing is said
-            // after it, so the line does not end by itself over what waits.
+            // more than Windows holds for such a line, so some of it waits here. This program is
+            // busy past lateAfterMs, so the line has not ended by itself over what waits yet (it
+            // would, at lateAfterMs, where the loop ran: aQuietLineWhoseSaidHasWaitedTooLongEndsByItself).
             kvm.stopReading();
             farEnd = kvm.descriptor();
             for (int one = 0; one < 5; ++one) {
                 QVERIFY(line.say(QByteArray(100'000, 'k')));
             }
-            QTest::qWait(limits.lateAfterMs + 300);
+            QThread::msleep(static_cast<unsigned long>(limits.lateAfterMs) + 300);
         } else {
             QTRY_VERIFY(kvm.wasAsked());
         }
@@ -1037,11 +1156,18 @@ private slots:
         since.start();
         line.close();
         QCOMPARE(gone.count(), 0);
+        // What the far end's Windows says of the line, asked at once, before this program's loop runs: the made-up
+        // KVM lets go of its end once it hears of the reset, and what is left of it is no socket then (10038).
+        Bare came;
+        for (int round = 0; letIn && round < 400 && came.end.isEmpty(); ++round) {
+            takeBare(farEnd, came);
+            if (came.end.isEmpty()) {
+                QThread::msleep(5);
+            }
+        }
         QTRY_COMPARE(gone.count(), 1);
         QVERIFY2(since.elapsed() < 1500, QByteArray::number(since.elapsed()).constData());
         if (letIn) {
-            Bare came;
-            QTRY_VERIFY_WITH_TIMEOUT((takeBare(farEnd, came), !came.end.isEmpty()), 2000);
             QCOMPARE(came.end, "reset"_ba);
         } else {
             QTRY_VERIFY_WITH_TIMEOUT(!kvm.isOn(), 2000);
@@ -1682,7 +1808,11 @@ private slots:
             // Room for a key going down, and none for the same key going up (a byte longer).
             pace.mostUnsentBytes = core::kvmd::keyWord(keyA, true).value_or(QByteArray()).size() + aroundAShortMessage;
         } else if (how == u"reset"_s) {
-            pace.lateAfterMs = 1500;
+            // (Long enough for the 6000 pointers below to be said within it, also under the address sanitizer on a
+            // busy PC: each is handed to the line's socket's thread, which wakes it, outside review 2.2. Measured on
+            // the build box under the sanitizer, 0.9 s alone and 2.3 to 2.8 s beside other builders' work, the line's
+            // socket on the line's thread before 1.3 s; in release 26 ms either way.)
+            pace.lateAfterMs = 5000;
             pace.mostUnsentBytes = qint64{64} * 1024 * 1024;
         }
         Console console(whereOf(kvm), pace);
@@ -1713,7 +1843,9 @@ private slots:
                 console.line.pointerAt(one, 7);
             }
             QCOMPARE(console.closed.count(), 0);
-            QTest::qWait(pace.lateAfterMs + 300);
+            // (This program busy past lateAfterMs: where its loop ran, the line would have ended by itself then, its
+            // watch on what waits: aQuietLineWhoseSaidHasWaitedTooLongEndsByItself.)
+            QThread::msleep(static_cast<unsigned long>(pace.lateAfterMs) + 300);
             QCOMPARE(console.closed.count(), 0);
         } else if (how == u"ended"_s) {
             kvm.fallOver();
@@ -2165,6 +2297,10 @@ private slots:
         // then, and more than a thousand messages arrived after it had ended. On this PC the far
         // end is Windows too, and throws away with a line that is reset what its program has not
         // taken. A KVM's own system may not: what it has taken is its own, DeviceLine says.)
+        // The reset is the line's socket's thread's, a moment after the line ended (outside review 2.2): it is let
+        // reach the made-up KVM first, as it reaches a KVM a moment later. Read again in that moment, in a release
+        // build, the made-up KVM once took what its Windows still held for it as well: over TLS, 116 messages.
+        QTest::qWait(300);
         kvm->readAgain();
         QTRY_VERIFY_WITH_TIMEOUT(!kvm->isOn(), 10'000);
         const QList<KvmByHand::Message> arrived = kvm->messages();
@@ -2336,10 +2472,14 @@ private slots:
         // Far more than Windows keeps for a line that nobody reads, and never as much in one
         // turn of the loop as may wait: what ends the line is the KVM, not the hand.
         int said = 0;
+        // (And between the turns, a moment for the line's socket's thread to hand on what was said, outside review 2.2:
+        // said in one loop of thousands a millisecond, far faster than any hand, it outran that thread, and on a slow
+        // PC counted as waiting the whole room before Windows had taken its share.)
         for (; said < 400'000 && console.closed.count() == 0; ++said) {
             console.line.pointerAt(said % 32768, 5);
             if (said % 200 == 199) {
                 QCoreApplication::processEvents();
+                QThread::msleep(10);
             }
         }
         QCOMPARE(console.closed.count(), 1);

@@ -34,8 +34,10 @@ inline constexpr qsizetype mostCharacters = 2000;
 // names, each a capital and one to fifteen letters and digits: the rule kvmd::callFor holds them to), where a name
 // is not in the table ("<whose> has no <name> key"), and where more than six are not modifiers. The table is the
 // web's: the eight modifiers, the letters and digits, Enter to Slash, Caps Lock, F1 to F12, the keys above the
-// arrows, the arrows, the number block and the menu key.
-base::Result<Report> combination(const QString& keys, const QString& whose);
+// arrows, the arrows, the number block and the menu key. `noSuchKey`, where it is given, is said for a name not in the
+// table instead, its %1 the name (a VNC server's words, the web's key_events: "There is no %1 key to send to a VNC
+// server").
+base::Result<Report> combination(const QString& keys, const QString& whose, const QString& noSuchKey = {});
 
 // What types `text` on a computer set to the US layout, character by character: each pressed with Shift where it
 // needs it (a capital, "!" and the like), "\n" as Enter and "\t" as Tab, a "\r\n" as one Enter. Refused ("invalid")

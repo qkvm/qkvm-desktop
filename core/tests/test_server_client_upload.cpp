@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -13,8 +14,12 @@
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkReply>
+#include <QSemaphore>
+#include <QStringList>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
 #include <QTimer>
 
 #ifndef NOMINMAX
@@ -24,9 +29,11 @@
 
 #include <psapi.h>
 
+#include <qkvm/core/read_ahead.h>
 #include <qkvm/core/server_client.h>
 
 #include "far_away_file.h"
+#include "heard_of_threads.h"
 #include "media_by_hand.h"
 
 using namespace Qt::StringLiterals;
@@ -120,6 +127,9 @@ class TestServerClientUpload : public QObject {
     Q_OBJECT
 
 private:
+    // A server 0.3.2's mark of the machine a list was made of (server.py, media_listed).
+    static constexpr const char* aMark = "5d41402abc4b2a76b9719d911017c592";
+
     QTemporaryDir m_folder{QCoreApplication::applicationDirPath() + u"/upload-test-XXXXXX"_s};
 
     // A file of this many bytes, of a pattern; its SHA-256.
@@ -160,11 +170,12 @@ private:
     // nap between two looks, as QTest::qWaitFor does (the file is read as the line takes it, on this thread: a nap
     // after every few pieces would be the test's slowness, not the program's).
     static base::Result<core::MediaUploaded> upload(core::ServerClient& client, std::unique_ptr<QIODevice> image,
-                                                    const QString& name = u"debian 13+.iso"_s, int withinMs = 60000)
+                                                    const QString& name = u"debian 13+.iso"_s, int withinMs = 60000,
+                                                    const QString& listed = QString())
     {
         Heard<core::MediaUploaded> answer;
         QEventLoop waiting;
-        client.uploadMedia(u"kvm"_s, name, u"Build server"_s, std::move(image),
+        client.uploadMedia(u"kvm"_s, name, u"Build server"_s, listed, std::move(image),
                            [&](const base::Result<core::MediaUploaded>& done) {
                                answer.taker()(done);
                                waiting.quit();
@@ -189,9 +200,55 @@ private slots:
         QCOMPARE(server.received(), qint64{8'000'001});
         QCOMPARE(server.sha256(), sha);
         QCOMPARE(done.value().sha256, QString::fromLatin1(sha));
+        // (A server before 0.3.2 listed no mark: none is named, and the address is as it was.)
         QCOMPARE(server.asked().first(),
                  QByteArray("POST /api/v1/devices/kvm/media/upload?name=debian%2013%2B.iso&machine=Build%20server "
                             "HTTP/1.1"));
+    }
+
+    void theImageGoesWithTheMarkOfTheListItWasPickedFrom()
+    {
+        // (0.3.2) A server that knows its machine by the mark the list was made with takes it.
+        UploadByHand::Way way;
+        way.listed = aMark;
+        UploadByHand server(way);
+        core::ServerClient client;
+        sessionFor(client, server);
+        QString path;
+        const QByteArray sha = fileOf(u"marked.iso"_s, 3'000'000, path);
+        const base::Result<core::MediaUploaded> done =
+            upload(client, opened(path), u"marked.iso"_s, 60000, QString::fromLatin1(aMark));
+        QVERIFY2(done.ok(), done.ok() ? "" : done.error().message.c_str());
+        QCOMPARE(server.sha256(), sha);
+        QCOMPARE(server.asked().first(), "POST /api/v1/devices/kvm/media/upload?name=marked.iso&machine=Build%20server"
+                                         "&listed=" +
+                                             QByteArray(aMark) + " HTTP/1.1");
+    }
+
+    void anUploadPickedFromAListOfAnotherMachineIsRefusedAndNothingOfItIsTaken()
+    {
+        // (0.3.2) The tile was edited to another KVM since its list: the server refuses at once, before a byte of the
+        // image is read (409 moved), and closes the line under what is still being sent, so its answer may be lost on
+        // the way (as any refusal of an upload at once: whatTheServerRefusesIsSaidInItsWords). Nothing of it is taken.
+        UploadByHand::Way way;
+        way.listed = "00000000000000000000000000000000";
+        UploadByHand server(way);
+        core::ServerClient client;
+        sessionFor(client, server);
+        QString path;
+        fileOf(u"elsewhere.iso"_s, 8'000'000, path);
+        const base::Result<core::MediaUploaded> done =
+            upload(client, opened(path), u"elsewhere.iso"_s, 60000, QString::fromLatin1(aMark));
+        QVERIFY(!done.ok());
+        const QByteArray code = QByteArray::fromStdString(done.error().code);
+        QVERIFY2(code == "moved" || code == core::ServerClient::unreachable, code.constData());
+        if (code == "moved") {
+            QVERIFY(done.error().message.starts_with("Build server is not the machine its images were listed for"));
+        }
+        QTest::qWait(300);
+        QCOMPARE(server.uploads(), 0);
+        QCOMPARE(server.received(), qint64{0});
+        QCOMPARE(server.asked().size(), 1);
     }
 
     void itIsNeverHeldWholeInThisProgram()
@@ -352,7 +409,7 @@ private slots:
         fileOf(u"stop.iso"_s, 6'000'000, path);
         Heard<core::MediaUploaded> answer;
         const std::function<void()> stop =
-            client.uploadMedia(u"kvm"_s, u"stop.iso"_s, u"Build server"_s, opened(path), answer.taker());
+            client.uploadMedia(u"kvm"_s, u"stop.iso"_s, u"Build server"_s, QString(), opened(path), answer.taker());
         QVERIFY(QTest::qWaitFor([&] { return server.received() > 100'000; }, 10000));
         stop();
         QVERIFY(QTest::qWaitFor([&] { return answer.came; }, 5000));
@@ -367,6 +424,56 @@ private slots:
         client.askUpload(u"kvm"_s, now.taker());
         QVERIFY(QTest::qWaitFor([&] { return now.came; }, 5000));
         QVERIFY2(now.what.ok(), now.what.ok() ? "" : now.what.error().message.c_str());
+    }
+
+    // (kept_with.h, as test_core_server_client has it of a call.) The file of an upload under way is its reply's, and
+    // ends on this thread wherever Qt lets go of what listens to the reply: played by another thread inside a signal of
+    // the reply, which holds its connections while the client ends with the upload under way; Qt lets go of them
+    // there, as the signal ends.
+    void anUploadsFileEndsOnThisThreadWhereverQtLetsGoOfItsReply()
+    {
+        UploadByHand server(paced());
+        auto client = std::make_unique<core::ServerClient>();
+        sessionFor(*client, server);
+        QString path;
+        fileOf(u"kept.iso"_s, 6'000'000, path);
+        std::unique_ptr<core::ReadAhead> image = core::ReadAhead::of(opened(path));
+        QVERIFY(image != nullptr);
+        std::atomic<QThread*> fileEndedOn{nullptr};
+        QObject::connect(
+            image.get(), &QObject::destroyed, image.get(), [&fileEndedOn] { fileEndedOn = QThread::currentThread(); },
+            Qt::DirectConnection);
+        Heard<core::MediaUploaded> answer;
+        client->uploadMedia(u"kvm"_s, u"kept.iso"_s, u"Build server"_s, QString(), std::move(image), answer.taker());
+        QVERIFY(QTest::qWaitFor([&] { return server.received() > 100'000; }, 10000));
+        QNetworkReply* const reply = client->findChild<QNetworkReply*>();
+        QVERIFY(reply != nullptr);
+        const core::testing::HeardOfThreads heard;
+        QSemaphore inside;
+        QSemaphore ended;
+        std::thread elsewhere([reply, &inside, &ended] {
+            const QObject here; // (of this thread)
+            QObject::connect(
+                reply, &QIODevice::channelBytesWritten, &here,
+                [&inside, &ended] {
+                    inside.release();
+                    ended.acquire();
+                },
+                Qt::DirectConnection);
+            emit reply->channelBytesWritten(0, 0);
+        });
+        if (!inside.tryAcquire(1, 10'000)) {
+            ended.release();
+            elsewhere.join();
+            QFAIL("The other thread never came inside the reply's signal.");
+        }
+        client.reset();
+        ended.release();
+        elsewhere.join();
+        QVERIFY(!answer.came);
+        QVERIFY2(fileEndedOn.load() == QThread::currentThread(), "The file ended on another thread.");
+        const QStringList said = core::testing::HeardOfThreads::said();
+        QVERIFY2(said.isEmpty(), qPrintable(said.join(u" | "_s)));
     }
 
     void whatTheServerRefusesIsSaidInItsWords_data()
@@ -422,23 +529,37 @@ private slots:
     void anUploadUnderWayGoesOnWhereContactIsLostByAnotherCall()
     {
         // While an image is on its way, another call finds nothing answering (a look at how the machines are, on a
-        // line that falls): what had begun to go with the session is not taken back for it (ServerClient::
-        // lostContact), and the image goes whole.
+        // line that falls): contact is lost (ServerClient::lostContact), what had begun to go with the session is not
+        // taken back for it, and the image goes whole.
         UploadByHand server(paced());
         core::ServerClient client;
         sessionFor(client, server);
         QString path;
-        fileOf(u"on.iso"_s, 4'000'000, path);
+        fileOf(u"on.iso"_s, 8'000'000, path);
         Heard<core::MediaUploaded> answer;
-        client.uploadMedia(u"kvm"_s, u"on.iso"_s, u"Build server"_s, opened(path), answer.taker());
+        client.uploadMedia(u"kvm"_s, u"on.iso"_s, u"Build server"_s, QString(), opened(path), answer.taker());
         QVERIFY(QTest::qWaitFor([&] { return server.received() > 200'000; }, 10000));
         Heard<QHash<QString, core::Status>> status;
         client.askStatus(status.taker());
         QVERIFY(QTest::qWaitFor([&] { return status.came; }, 10000));
         QVERIFY(!status.what.ok());
+        // (Under way still, well before its end, when contact was lost.)
+        const qint64 atTheLoss = server.received();
+        // Lost, and not refused: the next call asks first what answers there now. (Outside review 4.9: the line for
+        // the status was answered once with a refusal in a server's words, and contact was never lost.)
+        const auto healthAsked = [&server] {
+            return std::ranges::count_if(server.asked(),
+                                         [](const QByteArray& first) { return first.startsWith("GET /healthz"); });
+        };
+        const qsizetype before = healthAsked();
+        Heard<QHash<QString, core::Status>> again;
+        client.askStatus(again.taker());
+        QVERIFY(QTest::qWaitFor([&] { return again.came; }, 10000));
+        QCOMPARE(healthAsked(), before + 1);
         QVERIFY(QTest::qWaitFor([&] { return answer.came; }, 30000));
         QVERIFY2(answer.what.ok(), answer.what.ok() ? "" : answer.what.error().message.c_str());
-        QCOMPARE(server.received(), qint64{4'000'000});
+        QCOMPARE(server.received(), qint64{8'000'000});
+        QVERIFY2(atTheLoss < 6'000'000, qPrintable(QString::number(atTheLoss)));
     }
 
     void anImageIsRefusedHereWhereTheServerWouldRefuseIt()
@@ -464,7 +585,7 @@ private slots:
         QVERIFY(server.asked().isEmpty());
         // Sixteen gigabytes, exactly, go.
         Heard<core::MediaUploaded> answer;
-        const std::function<void()> stop = client.uploadMedia(u"kvm"_s, u"sixteen.img"_s, u"Build server"_s,
+        const std::function<void()> stop = client.uploadMedia(u"kvm"_s, u"sixteen.img"_s, u"Build server"_s, QString(),
                                                               std::make_unique<Zeros>(16'000'000'000), answer.taker());
         QVERIFY(QTest::qWaitFor([&] { return server.received() > 0; }, 10000));
         stop();

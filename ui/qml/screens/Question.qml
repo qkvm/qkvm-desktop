@@ -5,7 +5,11 @@ import Qkvm
 
 // Asked before something is done that cannot be taken back, or that does harm where it lands by a
 // slip: what, to which machine, and what is to be known before saying yes. As the page asks it.
-// Esc, the cross and a click beside it are a no; the keyboard starts at Cancel.
+// Esc, the cross and a click beside it are a no; the keyboard starts at Cancel, and at neither answer where the no
+// says itself and sends something (a card's No, which makes it refuse until its password is typed, and whose Yes takes
+// a computer for the card): no key sends either by a slip, and Tab reaches them. So every time such a question opens,
+// whatever an earlier question in this window did: the box, a focus scope, would give the keyboard back to the answer
+// that had it last (a Yes clicked: review cx2-4, M1).
 //
 // About several machines it names them, each with how it is; asks for a tick as well where what is
 // done can lose somebody's work, and the yes is not to be had before; and asks how to go about it:
@@ -25,6 +29,9 @@ Dialog {
     // As high as the window lets the box be, and what the box needs beside the list of the machines:
     // the list takes what is left of the one after the other, and scrolls.
     readonly property real room: (parent ? parent.height : 600) - 24
+    // A question whose no says itself and sends something (a card's): neither answer takes the keyboard by a press, a
+    // press slid off before its release too, only by Tab (review cx2-5, L1).
+    readonly property int answersFocus: asked.no !== undefined ? Qt.TabFocus : Qt.StrongFocus
     readonly property real beside: implicitHeaderHeight + topPadding + bottomPadding + said.height + buttons.height + 2 * 14 + (detail.text !== "" ? detail.height + 14 : 0) + (warning.text !== "" ? warning.height + 14 : 0) + (toTick !== "" ? ticked.height + 14 : 0) + (paces.length > 0 ? paceRow.height + 14 : 0)
 
     title: asked.title ?? ""
@@ -41,7 +48,12 @@ Dialog {
         ticked.checked = false;
         pace = -1;
     }
-    onOpened: no.forceActiveFocus()
+    onOpened: {
+        if (box.asked.no !== undefined)
+            keyless.forceActiveFocus();
+        else
+            no.forceActiveFocus();
+    }
     onClosed: {
         if (there)
             actions.answer(false);
@@ -203,6 +215,14 @@ Dialog {
             width: parent.width
             height: Theme.controlHeight
 
+            // Where the keyboard is as a question whose no says itself opens: it takes no key, so Space and Enter say
+            // nothing, and Esc reaches the box.
+            Item {
+                id: keyless
+
+                objectName: "questionKeyless"
+            }
+
             Row {
                 anchors.right: parent.right
                 spacing: 8
@@ -211,8 +231,17 @@ Dialog {
                     id: no
 
                     objectName: "questionNo"
-                    text: Words.cancel
-                    onClicked: box.actions.answer(false)
+                    focusPolicy: box.answersFocus
+                    // (A question of Yes or No says its no: a card's, whether the computer at its place is its server.)
+                    text: box.asked.no ?? Words.cancel
+                    // (A no that says itself may send something: answerNo. Esc, the cross and a click beside the box
+                    // send nothing.)
+                    onClicked: {
+                        if (box.asked.no !== undefined)
+                            box.actions.answerNo();
+                        else
+                            box.actions.answer(false);
+                    }
                 }
                 // Made for the question that is asked: a button that turned from blue to red as
                 // the box opened would be seen to do it.
@@ -224,6 +253,7 @@ Dialog {
 
                     Button {
                         objectName: "questionYes"
+                        focusPolicy: box.answersFocus
                         primary: true
                         // Not to be had before what is to be ticked is ticked.
                         enabled: box.toTick === "" || ticked.checked
@@ -236,6 +266,7 @@ Dialog {
 
                     Button {
                         objectName: "questionYes"
+                        focusPolicy: box.answersFocus
                         danger: true
                         enabled: box.toTick === "" || ticked.checked
                         text: box.asked.yes ?? box.asked.title ?? ""

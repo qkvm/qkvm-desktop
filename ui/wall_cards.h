@@ -57,9 +57,11 @@ engine::Codec cardCodecOf(const core::Machine& machine);
 // changes it, where the KVM refused the sign-in; and to that box's look at its certificate, where
 // it shows another one than it is known by. For any machine that is in use elsewhere ("busy"): to
 // taking its picture back, asked first (MachineActions::cardAction); the same for a JetKVM of this PC's
-// wall whose video does not come through ("not_through"). Nowhere for any other machine,
-// and for one that is neither: such a card has no button.
-enum class CardWay { None, UpdateLogin, ReviewCertificate, ShowHere };
+// wall whose video does not come through ("not_through"). For a server's card of this PC's wall that asks whether
+// the computer at its place, which gives a number of its own now, is the server it was added for
+// (Status::asksItsServer): to that question, Yes or No (the owner's decision of 2026-11-22). Nowhere for any other
+// machine, and for one that is neither: such a card has no button.
+enum class CardWay { None, UpdateLogin, ReviewCertificate, ShowHere, ConfirmServer };
 CardWay cardWayOf(const core::Machine& machine, const core::Status* status);
 
 // How long ago, as the page writes it: "just now", "45 s ago", "12 min ago", "2 h ago", "3 d ago".

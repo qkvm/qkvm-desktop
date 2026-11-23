@@ -2,10 +2,12 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <utility>
 
+#include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPointer>
@@ -13,6 +15,7 @@
 #include <QWebSocket>
 #include <QWebSocketServer>
 
+#include "jetkvm_storage_by_hand.h"
 #include "stand_in.h"
 
 namespace qkvm::core::testing {
@@ -20,14 +23,15 @@ namespace qkvm::core::testing {
 // A JetKVM by hand, as a real one answered: what it is asked over
 // HTTP on a StandIn, and its signalling line, a WebSocket on the same port, on a WebSocket server of Qt's.
 //
-// * POST /auth/login-local with {"password": ...}: 200 and the cookie authToken, a new one each time, which
-//   is from then on its one session (the one before is no longer taken); 401 for another password; 400
-//   where it runs without one ("no password" refuses a sign-in).
+// * POST /auth/login-local with {"password": ...}: 200 and the cookie authToken, a new one each time, taken from
+//   its making and its one session once the answer goes (the one before is no longer taken then, unless a test says
+//   `keepsEverySession`); 401 for another password; 400 where it runs without one ("no password" refuses a sign-in).
 // * GET /device/status: {"isSetup": ...} and nothing else, to anybody.
 // * GET /device: {"deviceId": ...}, to whoever holds its session (anybody where it runs without a password).
 // * /webrtc/signaling/client: let in with its session (anybody where it runs without a password), 401
 //   otherwise; once in, its first word there is `device-metadata` with its version (its `otaState` is said
 //   on a data channel, as the real one's). A JetKVM never set up lets nobody in (401) until it is.
+// * POST /storage/upload?uploadId=, where it is given its storage (`storage`): to whoever holds its session.
 class JetKvmByHand : public QObject {
 public:
     // (At a port of the test's choosing where it is to take the place of another: StandIn.)
@@ -91,19 +95,36 @@ public:
     bool linesSayNothing = false; // its signalling line is taken and never answered
     int statusAfterMs = 0;        // its status answered only after this long
     int signInAfterMs = 0;        // its sign-ins answered only after this long, a yes and a no alike
+    int switchesLateMs = 0;       // and the one before a yes ended so much later than the yes goes
     // What it answers a sign-in instead, where set (a 429 with this Retry-After, or a 500).
     std::optional<Answered> signInInstead;
     // So many askings for its signalling line are refused 401 though they hold its session.
     int refuseLines = 0;
+    // What a refused asking for its signalling line is answered: 401, or 403 (the session may not have one).
+    int lineRefusedWith = 401;
     // Its own number not handed out this once: GET /device answered 500.
     bool deviceFails = false;
+    // The first GET /device asked under its session is answered only after this long, once: whoever asked it asks for
+    // its signalling line that much later (a driver held up on a loaded PC).
+    int firstNumberAfterMs = 0;
+    // Every session it gave is taken from then on, not only the newest, as a kvmd's are: for a case of how the
+    // sign-ins of several drivers are paced, where whether one of them asked under its session before the next one's
+    // yes replaced it is a matter of the PC's load (a driver whose session was replaced signs in once more, by right).
+    bool keepsEverySession = false;
     // An older one, which has no GET /device: answered 404, and gives no number.
     bool hasNoDevicePage = false;
     // Each asking for its signalling line that is refused, in turn, is answered so many milliseconds late.
     QList<int> lineRefusedAfterMs;
+    // Its own image storage (jetkvm_storage_by_hand.h), which takes POST /storage/upload; none: it has no such route.
+    // And how many uploads were open there each time GET /device was asked.
+    JetKvmStorageByHand* storage = nullptr;
+    QList<int> deviceAskedWithUploadsOpen;
 
     // What it was asked.
     int signIns = 0;
+    // The least time between two sign-ins coming, by its own clock: one that goes only once the answer to the one
+    // before was heard comes at least signInAfterMs after it.
+    qint64 leastMsBetweenSignIns = std::numeric_limits<qint64>::max();
     QList<QByteArray> signInBodies;
     int lineAskings = 0;
     int linesIn = 0;
@@ -222,7 +243,11 @@ private:
         state->more = moreAddresses;
         auto* every = new QTimer(line); // NOLINT(cppcoreguidelines-owning-memory): the line's, or its own once over
         every->setInterval(10);
-        connect(every, &QTimer::timeout, line, [this, line, every, state, then] {
+        // (This one's: a line is no child of the server that took it (QWebSocketServer owns none), and may outlive this
+        // stand-in by seconds, its timer with it; heard there, its turns read and wrote this one after it had gone,
+        // and called what its `addresses` had been: test_core_jetkvm_live crashed so in a gate. And no turn after the
+        // line: the timer is the line's.)
+        connect(every, &QTimer::timeout, this, [this, line, every, state, then] {
             QByteArray next;
             const bool first = !state->first.isEmpty();
             if (first) {
@@ -281,7 +306,18 @@ private:
     }
     bool holdsTheSession(const QByteArray& cookie) const
     {
-        return isSetup && (password.isEmpty() || (!m_session.isEmpty() && cookie == "authToken=" + m_session));
+        const auto carries = [&cookie](const QByteArray& session) {
+            return !session.isEmpty() && cookie == "authToken=" + session;
+        };
+        return isSetup &&
+               (password.isEmpty() || carries(m_session) || std::any_of(m_coming.begin(), m_coming.end(), carries) ||
+                (keepsEverySession && std::any_of(m_given.begin(), m_given.end(), carries)));
+    }
+    void give(const QByteArray& session)
+    {
+        m_coming.removeOne(session);
+        m_session = session;
+        m_given.append(session);
     }
 
     Answered signIn(const Asked& asked)
@@ -298,12 +334,17 @@ private:
         if (QJsonDocument::fromJson(asked.body).object().value(QStringLiteral("password")).toString() != password) {
             return {401, R"({"error":"Invalid password"})"};
         }
-        // (Its session is the new one from when it answers: a slow sign-in ends the one before only then.)
+        // Its session is taken from when it is made, before its answer goes, as a real one's is: nobody can carry it
+        // sooner. The one before ends as the answer goes (a slow sign-in ends it only then), by a timer of this
+        // stand-in's beside the answer's own. Qt does not keep two such timers in the order they were started: in a
+        // whole run of test_core_jetkvm_device the answer's ran 31 ms before this one, and a driver that had heard its
+        // yes was refused the session it carried, and signed in once more.
         const QByteArray made = "jet." + QByteArray::number(++m_sessions);
-        if (signInAfterMs > 0) {
-            QTimer::singleShot(signInAfterMs, this, [this, made] { m_session = made; });
+        m_coming.append(made);
+        if (const int switchMs = signInAfterMs + switchesLateMs; switchMs > 0) {
+            QTimer::singleShot(switchMs, this, [this, made] { give(made); });
         } else {
-            m_session = made;
+            give(made);
         }
         Answered in(200, R"({"message":"Login successful"})");
         in.more = {"Set-Cookie: authToken=" + made + "; Path=/; HttpOnly"};
@@ -315,9 +356,20 @@ private:
         if (asked.path == "/auth/login-local" && asked.method == "POST") {
             ++signIns;
             signInBodies.append(asked.body);
+            const qint64 now = m_clock.elapsed();
+            if (m_lastSignInAtMs >= 0) {
+                leastMsBetweenSignIns = std::min(leastMsBetweenSignIns, now - m_lastSignInAtMs);
+            }
+            m_lastSignInAtMs = now;
             Answered said = signIn(asked);
             said.afterMs = std::max(said.afterMs, signInAfterMs);
             return said;
+        }
+        if (storage != nullptr && asked.method == "POST" && asked.path.startsWith("/storage/upload?")) {
+            return storage->upload(asked, holdsTheSession(asked.headers.value("cookie")));
+        }
+        if (storage != nullptr && asked.path == "/device") {
+            deviceAskedWithUploadsOpen.append(storage->openUploads());
         }
         if (asked.path == "/device/status") {
             Answered status(
@@ -332,11 +384,18 @@ private:
             return {404, R"({"error":"Not Found"})"};
         }
         if (asked.path == "/device" && holdsTheSession(asked.headers.value("cookie"))) {
-            return {200,
-                    QJsonDocument(QJsonObject{{QStringLiteral("deviceId"), deviceId}}).toJson(QJsonDocument::Compact)};
+            Answered number(
+                200, QJsonDocument(QJsonObject{{QStringLiteral("deviceId"), deviceId}}).toJson(QJsonDocument::Compact));
+            if (!password.isEmpty() && !std::exchange(m_numberHeldUp, true)) {
+                number.afterMs = firstNumberAfterMs;
+            }
+            return number;
         }
         Answered refused(401, R"({"error":"Unauthorized"})");
         if (asked.path.startsWith("/webrtc/signaling/client")) {
+            if (lineRefusedWith == 403) {
+                refused = {403, R"({"error":"Forbidden"})"};
+            }
             refused.afterMs = std::exchange(m_refusalAfterMs, 0);
         }
         return refused;
@@ -344,7 +403,16 @@ private:
 
     QWebSocketServer m_server;
     QByteArray m_session;
+    QList<QByteArray> m_coming; // made, and taken, but not yet the one (the answer's way)
+    QList<QByteArray> m_given;  // every session it gave (keepsEverySession)
     int m_sessions = 0;
+    QElapsedTimer m_clock = [] {
+        QElapsedTimer started;
+        started.start();
+        return started;
+    }();
+    qint64 m_lastSignInAtMs = -1; // leastMsBetweenSignIns
+    bool m_numberHeldUp = false;  // firstNumberAfterMs was given
     int m_refusalAfterMs = 0;
     QList<QPointer<QWebSocket>> m_lines;
 };

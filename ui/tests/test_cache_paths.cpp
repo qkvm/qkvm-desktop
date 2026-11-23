@@ -1,8 +1,16 @@
+#include <array>
+
 #include <QtTest>
 
 #include <QFile>
 #include <QProcess>
 #include <QTemporaryDir>
+
+#include <qkvm/base/machine.h>
+
+#include <windows.h>
+
+#include <appmodel.h>
 
 #include "../win/cache_paths.h"
 
@@ -28,6 +36,27 @@ private slots:
         const auto settings = base / L"qKVM" / L"settings.json";
         QVERIFY(settings.parent_path() != owned);
         QVERIFY(cachePath(base, {}, Area::Diagnostics).parent_path() == base / L"qKVM" / L"Cache");
+    }
+    // A package's family has no kind of Windows in it: what this build derives is the family of the package of either
+    // kind (x64 or ARM64), and it is derived as this build's own kind.
+    void theFamilyIsThatOfThePackageOfEitherKindOfWindows()
+    {
+        std::wstring name = L"qKVM.Desktop.Development";
+        std::wstring publisher = L"CN=qKVM Development";
+        const auto family = familyFor(name, publisher);
+        for (const UINT32 architecture : {UINT32{PROCESSOR_ARCHITECTURE_AMD64}, UINT32{PROCESSOR_ARCHITECTURE_ARM64}}) {
+            PACKAGE_ID id{};
+            id.name = name.data();
+            id.publisher = publisher.data();
+            id.processorArchitecture = architecture;
+            std::array<wchar_t, PACKAGE_FAMILY_NAME_MAX_LENGTH + 1> made{};
+            UINT32 count = static_cast<UINT32>(made.size());
+            QCOMPARE(PackageFamilyNameFromId(&id, &count, made.data()), LONG{ERROR_SUCCESS});
+            QCOMPARE(std::wstring(made.data()), family);
+        }
+        QCOMPARE(familyArchitecture(), UINT32{qkvm::base::programArchitecture() == qkvm::base::Architecture::Arm64
+                                                  ? PROCESSOR_ARCHITECTURE_ARM64
+                                                  : PROCESSOR_ARCHITECTURE_AMD64});
     }
     void invalidFamiliesAndRedirectedFoldersAreRefused()
     {

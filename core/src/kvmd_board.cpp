@@ -1,4 +1,5 @@
 #include <qkvm/core/kvmd_device.h>
+#include <qkvm/core/kvmd_media.h>
 
 #include <chrono>
 #include <memory>
@@ -130,6 +131,14 @@ void KvmdDevice::pressBoard(const QString& kind, Ask click, std::function<void(b
                            boards().heldBy(board)));
             return;
         }
+        // A board that says "off" just now beside a picture is no witness of the power, its light unwired or, on a KVM
+        // of several inputs, its board perhaps another computer's (noWitnessOfThePower), and its short press is
+        // refused, with nothing pressed (the owner's rule of 2026-11-19; act refuses it at once where the last look
+        // found it so).
+        if (kind == "atx_power"_L1 && noWitnessOfThePower(on)) {
+            over(powerUnknown());
+            return;
+        }
         // A light that says "off" beside a picture is not wired up: it is no witness of what a press does.
         std::optional<bool> before = on;
         if (before == std::optional<bool>(false) && (!m_status || m_status->signal != std::optional<bool>(false))) {
@@ -247,6 +256,13 @@ std::optional<QJsonObject> KvmdDevice::boardOnTheLine() const
 
 void KvmdDevice::heardOnTheLine(const QByteArray& message)
 {
+    // The state of its drive, whole as the line opens and what changed of it after (kvmd_media.cpp).
+    if (const std::optional<QJsonObject> drive = kvmd::msdHeard(message)) {
+        if (std::optional<QJsonObject> merged = kvmd::msdMerged(m_msd, *drive)) {
+            driveSaid(std::move(*merged), true);
+        }
+        return;
+    }
     // A Fingerbot paired with the KVM, or none: said on every line to its events (kvmd_fingerbot.cpp).
     if (const std::optional<bool> paired = kvmd::fingerbotHeard(message)) {
         fingerbotHeard(*paired);

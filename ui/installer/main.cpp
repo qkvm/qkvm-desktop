@@ -1,6 +1,7 @@
 #include "error_code.h"
 #include "health_exchange.h"
 #include "native_health.h"
+#include "package_architecture.h"
 #include "setup_context.h"
 #include "setup_launch.h"
 #include "transaction.h"
@@ -208,7 +209,8 @@ Package inspect(const fs::path& file, bool trust)
             "This installer is not configured for that qKVM publisher and product.");
     APPX_PACKAGE_ARCHITECTURE architecture{};
     winrt::check_hresult(identity->GetArchitecture(&architecture));
-    require(architecture == APPX_PACKAGE_ARCHITECTURE_X64, "This installer requires the Windows x64 package.");
+    require(packageFitsThePc(architecture, qkvm::base::machineArchitecture()),
+            "This installer requires the Windows package of this PC's own kind (x64, or ARM64 on Windows on Arm).");
     UINT64 version = 0;
     winrt::check_hresult(identity->GetVersion(&version));
     ComPtr<IAppxFile> schemaFile;

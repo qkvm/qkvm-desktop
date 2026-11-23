@@ -14,6 +14,7 @@
 #include <QTimer>
 
 #include <qkvm/core/board_holds.h>
+#include <qkvm/core/kvmd_answers.h>
 #include <qkvm/core/kvmd_device.h>
 #include <qkvm/core/sign_in_pacing.h>
 
@@ -99,14 +100,16 @@ private:
         return device.status();
     }
     // Has the driver hold the KVM's line for events, as it does while somebody watches its picture (the line that
-    // keeps its video awake: /api/ws?stream=1), and waits until that line is in and a picture has come.
+    // keeps its video awake: /api/ws?stream=1), and waits until that line is the driver's own and in (made_up_kvm.h's
+    // heldAwake: asked once, the case's words on the line went nowhere where the first picture woke nothing, as on the
+    // loaded build box). What was seen is said where it is not.
     static bool heldAwake(KvmdDevice& device, MadeUpKvm& kvm)
     {
-        kvm.restsUntilWatched = true;
-        std::optional<base::Result<core::Snapshot>> first;
-        device.askSnapshot(400, [&first](base::Result<core::Snapshot> came) { first = std::move(came); });
-        return QTest::qWaitFor([&first] { return first.has_value(); }, 10000) &&
-               QTest::qWaitFor([&] { return kvm.stand->live.isConnected() && device.isKeptAwake(); }, 10000);
+        const core::testing::Waited held = core::testing::heldAwake(device, kvm, quick().connectWithinMs);
+        if (!held) {
+            qWarning("%s", qPrintable(held.why()));
+        }
+        return static_cast<bool>(held);
     }
     // What a power board says of itself on that line, as kvmd's /api/ws says it: the whole of it, at every change.
     static QString atxEvent(const QString& word, bool enabled = true, bool busy = false)
@@ -153,6 +156,246 @@ private slots:
         // Stock kvmd says no word: the light.
         kvm.powerWord.reset();
         QCOMPARE(lookedAt(device).power, std::optional<bool>(true));
+    }
+
+    void aPowerLightThatSaysOffBesideAPictureIsSaidToBeProbablyNotWired_data()
+    {
+        QTest::addColumn<bool>("glkvm");
+        QTest::newRow("stock kvmd's light") << false;
+        QTest::newRow("GLKVM's word") << true;
+    }
+
+    void aPowerLightThatSaysOffBesideAPictureIsSaidToBeProbablyNotWired()
+    {
+        // (Web 0.3.2: a stock kvmd KVM whose power-LED wires were not connected.) Its card says neither on nor off
+        // then; why is said in the wall's words, for its Details, and only then.
+        QFETCH(bool, glkvm);
+        const QString unwired = u"The KVM's board says the power light is off while the screen shows a picture: its "
+                                "power-LED wires are probably not connected."_s;
+        MadeUpKvm kvm;
+        kvm.atx = true;
+        if (glkvm) {
+            kvm.powerWord = u"off"_s;
+        } else {
+            kvm.powerLight = false;
+        }
+        kvm.signal = true;
+        KvmdDevice device(kvm.where(), u"secret"_s, quick());
+        core::Status status = lookedAt(device);
+        QCOMPARE(status.state, u"online"_s);
+        QCOMPARE(status.power, std::optional<bool>(false));
+        QCOMPARE(status.powerNoteCode, u"power_led_unwired"_s);
+        QCOMPARE(status.powerNote, unwired);
+        // Its picture gone, a board that says off is a computer that is off: nothing more is said.
+        kvm.signal = false;
+        status = lookedAt(device);
+        QCOMPARE(status.power, std::optional<bool>(false));
+        QVERIFY(status.powerNoteCode.isEmpty() && status.powerNote.isEmpty());
+        // On, it is the computer's power, said as ever.
+        kvm.signal = true;
+        if (glkvm) {
+            kvm.powerWord = u"on"_s;
+        } else {
+            kvm.powerLight = true;
+        }
+        status = lookedAt(device);
+        QCOMPARE(status.power, std::optional<bool>(true));
+        QVERIFY(status.powerNoteCode.isEmpty() && status.powerNote.isEmpty());
+    }
+
+    void aKvmThatHasShownSeveralInputsSaysNothingOfTheWires()
+    {
+        // (Web 0.3.2's reviews.) On a KVM that switches between computers, the board may be wired to one computer while
+        // the screen is another's: nothing of its wires is said, also where its switch did not answer a look since (one
+        // that was no yes has it taken for a KVM of one input for a while), and for a driver of the same KVM made anew
+        // (another password): never for one at another address or under another certificate, which may be another KVM.
+        MadeUpKvm kvm;
+        kvm.atx = true;
+        kvm.powerLight = false;
+        kvm.signal = true;
+        kvm.ports = {true, true};
+        auto kept = std::make_shared<core::KvmdKept>();
+        {
+            KvmdDevice device(kvm.where(), u"secret"_s, quick());
+            device.keepWith(kept);
+            core::Status status = lookedAt(device);
+            QCOMPARE(status.ports.size(), 2);
+            QCOMPARE(status.power, std::optional<bool>(false));
+            QVERIFY(status.powerNote.isEmpty());
+            kvm.instead.insert("/api/switch"_ba, Answered{502, "<html>502 Bad Gateway</html>"_ba, "text/html"_ba});
+            for (int look = 0; look < 3; ++look) {
+                status = lookedAt(device);
+                QVERIFY(status.ports.isEmpty());
+                QVERIFY2(status.powerNote.isEmpty(), qPrintable(status.powerNote));
+            }
+        }
+        // The next driver of the same KVM, its switch still failing.
+        KvmdDevice anew(kvm.where(), u"secret"_s, quick());
+        anew.keepWith(kept);
+        QVERIFY(lookedAt(anew).powerNote.isEmpty());
+        // One of another KVM's, though handed what was kept: a KVM of one input with its wires out.
+        MadeUpKvm other;
+        other.atx = true;
+        other.powerLight = false;
+        other.signal = true;
+        KvmdDevice elsewhere(other.where(), u"secret"_s, quick());
+        elsewhere.keepWith(kept);
+        QCOMPARE(lookedAt(elsewhere).powerNoteCode, u"power_led_unwired"_s);
+        // And a driver of no wall, handed nothing: by what it saw itself.
+        KvmdDevice alone(kvm.where(), u"secret"_s, quick());
+        QCOMPARE(lookedAt(alone).powerNoteCode, u"power_led_unwired"_s);
+    }
+
+    void aLitDiskLightIsAMachineThatIsOn()
+    {
+        // (The owner's rule of 2026-11-19, as a JetKVM's two lights are read: review cx4-2 L5.) Stock kvmd's board says
+        // two lights; a power light whose lead is not connected always reads off, and a lit disk light is a machine
+        // that is on: its card says so, nothing of its wires is said, and a restart for an image resets it.
+        MadeUpKvm kvm;
+        kvm.atx = true;
+        kvm.powerLight = false;
+        kvm.diskLight = true;
+        kvm.signal = true;
+        KvmdDevice device(kvm.where(), u"secret"_s, quick());
+        core::Status status = lookedAt(device);
+        QVERIFY(status.powerIsKnown);
+        QCOMPARE(status.power, std::optional<bool>(true));
+        QVERIFY(status.powerNoteCode.isEmpty());
+        // Its short press goes as ever (a running machine is asked to shut down): it is no press to switch it on.
+        QVERIFY2(doneBy(device, u"atx_power"_s), "a short press of a running machine");
+        QVERIFY(kvm.did.contains("atx power"));
+        // GLKVM's word decides where there is one, whatever the lights say.
+        kvm.powerWord = u"off"_s;
+        kvm.signal = false;
+        QTest::qWait(quick().pressHeldMs + 100);
+        QCOMPARE(lookedAt(device).power, std::optional<bool>(false));
+        // A dark disk light says nothing: the power light it is.
+        kvm.powerWord.reset();
+        kvm.diskLight = false;
+        kvm.powerLight = true;
+        QCOMPARE(lookedAt(device).power, std::optional<bool>(true));
+        // And as its line for events says it: both lights kept.
+        const std::optional<QJsonObject> heard = core::kvmd::boardHeard(
+            R"({"event_type": "atx", "event": {"enabled": true, "busy": false, "leds": {"power": false, "hdd": true}}})");
+        QVERIFY(heard.has_value());
+        QCOMPARE(core::kvmd::powerSaid(*heard), std::optional<bool>(true));
+    }
+
+    void aShortPressIsRefusedWhereThePowerLightIsProbablyNotWired()
+    {
+        // (The owner's rule of 2026-11-19, stricter than the web.) Where the card says Power unknown because the board
+        // says off beside a picture, a short press of the power button, which was to switch the machine on and may shut
+        // a running one down, is refused, in words that say why, with nothing pressed: by its board, by its Fingerbot,
+        // and for a restart after a mount. A hold and a reset go as before.
+        MadeUpKvm kvm;
+        kvm.atx = true;
+        kvm.powerLight = false;
+        kvm.signal = true;
+        kvm.fingerbot = true;
+        KvmdDevice device(kvm.where(), u"secret"_s, quick());
+        QCOMPARE(lookedAt(device).powerNoteCode, u"power_led_unwired"_s);
+        const std::string why =
+            "Nothing was pressed: whether this machine is on is not known. Its KVM's board says the "
+            "power light is off while the screen shows a picture, so its power-LED wires are "
+            "probably not connected, and a press of the power button could shut a running machine "
+            "down.";
+        for (const char* kind : {"atx_power", "fingerbot_power"}) {
+            const base::Result<core::Done> refused = doneBy(device, QString::fromLatin1(kind));
+            QVERIFY2(!refused, kind);
+            QCOMPARE(refused.error().code, std::string("power_unknown"));
+            QCOMPARE(refused.error().message, why);
+        }
+        QVERIFY2(kvm.did.isEmpty(), kvm.did.join(", ").constData());
+        QCOMPARE(kvm.asked("/api/atx/click"_ba), 0);
+        // Where the board says it so at the press itself (the look before it found the light lit): refused there.
+        MadeUpKvm turned;
+        turned.atx = true;
+        turned.signal = true;
+        KvmdDevice later(turned.where(), u"secret"_s, quick());
+        QCOMPARE(lookedAt(later).power, std::optional<bool>(true));
+        turned.powerLight = false;
+        const base::Result<core::Done> atThePress = doneBy(later, u"atx_power"_s);
+        QVERIFY(!atThePress);
+        QCOMPARE(atThePress.error().code, std::string("power_unknown"));
+        QCOMPARE(turned.asked("/api/atx/click"_ba), 0);
+        // A hold and a reset are no such press: they go.
+        QVERIFY2(doneBy(device, u"atx_reset"_s), "a reset");
+        QTest::qWait(quick().pressHeldMs + 100);
+        QVERIFY2(doneBy(device, u"atx_power_long"_s), "a hold");
+        QCOMPARE(kvm.did, (QList<QByteArray>{"atx reset", "atx power_long"}));
+        // Its picture gone, a board that says off is a machine that is off: switched on as ever.
+        kvm.signal = false;
+        QTest::qWait(quick().longPressHeldMs + 100);
+        QVERIFY(lookedAt(device).powerNoteCode.isEmpty());
+        QVERIFY2(doneBy(device, u"atx_power"_s), "a press of a machine that is off");
+        QCOMPARE(kvm.did.constLast(), QByteArray("atx power"));
+    }
+
+    void aShortPressIsRefusedOnAKvmOfSeveralInputsWhoseBoardSaysOffBesideAPicture()
+    {
+        // (The owner's rule of 2026-11-19: the merged review of 0.2.0, A-M1.) On a KVM that has shown several inputs
+        // the board may be another computer's than the one on screen, and its card says Power unknown alone: no more
+        // a witness of the power than an unwired light. Its short press is refused all the same, with nothing pressed
+        // and the reason said, by its board and by its Fingerbot; also where its switch did not answer the last look
+        // (its card says nothing of the power then), and where the board says off at the press itself. A hold and a
+        // reset go as before, and with its picture gone it is switched on as ever.
+        MadeUpKvm kvm;
+        kvm.atx = true;
+        kvm.powerLight = false;
+        kvm.signal = true;
+        kvm.ports = {true, true};
+        kvm.fingerbot = true;
+        KvmdDevice device(kvm.where(), u"secret"_s, quick());
+        core::Status status = lookedAt(device);
+        QCOMPARE(status.ports.size(), 2);
+        QCOMPARE(status.power, std::optional<bool>(false));
+        QVERIFY(status.powerNoteCode.isEmpty());
+        const std::string why = "Nothing was pressed: whether this machine is on is not known. Its KVM's board says "
+                                "the power light is off while the screen shows a picture, and on a KVM with several "
+                                "inputs the board may be wired to another computer than the one on screen, so a press "
+                                "of the power button could shut a running machine down. A hold of the power button "
+                                "still goes; to switch on the computer the board is wired to, show its input first "
+                                "and press again.";
+        for (const char* kind : {"atx_power", "fingerbot_power"}) {
+            const base::Result<core::Done> refused = doneBy(device, QString::fromLatin1(kind));
+            QVERIFY2(!refused, kind);
+            QCOMPARE(refused.error().code, std::string("power_unknown"));
+            QCOMPARE(refused.error().message, why);
+        }
+        // Its switch fails a look since: no inputs said, and refused still.
+        kvm.instead.insert("/api/switch"_ba, Answered{502, "<html>502 Bad Gateway</html>"_ba, "text/html"_ba});
+        status = lookedAt(device);
+        QVERIFY(status.ports.isEmpty());
+        QCOMPARE(status.power, std::optional<bool>(false));
+        const base::Result<core::Done> unsaid = doneBy(device, u"atx_power"_s);
+        QVERIFY(!unsaid);
+        QCOMPARE(unsaid.error().code, std::string("power_unknown"));
+        QCOMPARE(unsaid.error().message, why);
+        QVERIFY2(kvm.did.isEmpty(), kvm.did.join(", ").constData());
+        QCOMPARE(kvm.asked("/api/atx/click"_ba), 0);
+        // Where the board says it so at the press itself (the look before it found the light lit): refused there.
+        MadeUpKvm turned;
+        turned.atx = true;
+        turned.signal = true;
+        turned.ports = {true, true};
+        KvmdDevice later(turned.where(), u"secret"_s, quick());
+        QCOMPARE(lookedAt(later).power, std::optional<bool>(true));
+        turned.powerLight = false;
+        const base::Result<core::Done> atThePress = doneBy(later, u"atx_power"_s);
+        QVERIFY(!atThePress);
+        QCOMPARE(atThePress.error().code, std::string("power_unknown"));
+        QCOMPARE(turned.asked("/api/atx/click"_ba), 0);
+        // A hold and a reset are no such press: they go.
+        QVERIFY2(doneBy(device, u"atx_reset"_s), "a reset");
+        QTest::qWait(quick().pressHeldMs + 100);
+        QVERIFY2(doneBy(device, u"atx_power_long"_s), "a hold");
+        QCOMPARE(kvm.did, (QList<QByteArray>{"atx reset", "atx power_long"}));
+        // Its picture gone, a board that says off is a machine that is off: switched on as ever.
+        kvm.signal = false;
+        QTest::qWait(quick().longPressHeldMs + 100);
+        static_cast<void>(lookedAt(device));
+        QVERIFY2(doneBy(device, u"atx_power"_s), "a press of a machine that is off");
+        QCOMPARE(kvm.did.constLast(), QByteArray("atx power"));
     }
 
     void aBoardThatSaysOnceItIsNotThereIsNotTakenAway()
@@ -462,15 +705,17 @@ private slots:
         done = doneBy(device, u"atx_power_long"_s);
         QCOMPARE(note(done), u"held, but the computer is still on"_s);
         // A light that says "off" beside a picture is not wired up: no witness of what a press does, and nothing is
-        // waited for.
+        // waited for. Its short press is refused since the owner's rule of 2026-11-19
+        // (aShortPressIsRefusedWhereThePowerLightIsProbablyNotWired); its long press goes, and is not waited for.
         kvm.powerWord.reset();
         kvm.powerLight = false;
         kvm.signal = true;
         QCOMPARE(lookedAt(device).power, std::optional<bool>(false));
+        QCOMPARE(code(doneBy(device, u"atx_power"_s)), std::string("power_unknown"));
         took.restart();
-        done = doneBy(device, u"atx_power"_s);
+        done = doneBy(device, u"atx_power_long"_s);
         QCOMPARE(note(done), QString());
-        QVERIFY(took.elapsed() < pace.pressHeldMs + pace.seenWithinMs / 2);
+        QVERIFY(took.elapsed() < pace.longPressHeldMs + pace.seenWithinMs / 2);
     }
 
     void whatSaysNeitherYesNorNoHoldsTheBoard_data()

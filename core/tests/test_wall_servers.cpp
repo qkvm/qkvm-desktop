@@ -17,6 +17,7 @@
 #include <qkvm/core/kvm_adding.h>
 #include <qkvm/core/kvm_editing.h>
 #include <qkvm/core/local_wall.h>
+#include <qkvm/core/redfish_answers.h>
 #include <qkvm/core/redfish_device.h>
 #include <qkvm/core/wall_exchange.h>
 
@@ -533,16 +534,23 @@ private slots:
         QCOMPARE(cameTo(own.wall, id.value(), u"online"_s).state, u"online"_s);
         QTRY_COMPARE_WITH_TIMEOUT(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).machine, bothOf(bmc), 10000);
         QTRY_COMPARE_WITH_TIMEOUT(core::Settings(own.file).remembered().kvms.value(0).machine, bothOf(bmc), 10000);
+        // ...and where its computer is with it, alone (outside review of 0.2.0's Redfish fixes, M1).
+        const core::ServerPlace at{bmc.system(), false};
+        QTRY_VERIFY_WITH_TIMEOUT(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).serverPlace == at, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(core::Settings(own.file).remembered().kvms.value(0).serverPlace == at, 10000);
         typed.name = u"db-01, renamed"_s;
         KvmEditing editing(own.wall, own.boxes());
         const KvmEditing::Outcome renamed = changedBy(editing, id.value(), typed);
         QVERIFY2(renamed.result.ok(), renamed.result.ok() ? "" : renamed.result.error().message.c_str());
         QCOMPARE(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).machine, bothOf(bmc));
-        // And no change sets a mark of its own where no password was typed for it.
+        QVERIFY(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).serverPlace == at);
+        // And no change sets a mark of its own where no password was typed for it, nor a place.
         OwnKvm altered = kvmOf(own.wall, id.value()).value_or(OwnKvm{});
         altered.machine = u"server:0123456789abcdef0123456789abcdef"_s;
+        altered.serverPlace = core::ServerPlace{u"/redfish/v1/Systems/Elsewhere"_s, false};
         QVERIFY(own.wall.change(id.value(), altered, std::nullopt).ok());
         QCOMPARE(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).machine, bothOf(bmc));
+        QVERIFY(kvmOf(own.wall, id.value()).value_or(OwnKvm{}).serverPlace == at);
     }
 
     void anotherServerAtItsAddressIsSentNothing()
@@ -602,6 +610,290 @@ private slots:
         QCOMPARE(cameTo(next.wall, id, u"error"_s).errorCode, u"another_machine"_s);
         QCOMPARE(bmc.logins, logins);
         QVERIFY(signsOnToNothing(bmc));
+    }
+
+    void whereItsComputerIsGoesWithItsCardAndHoldsTheNextRun()
+    {
+        // The triage's scenario of the outside review of 0.2.0, 5.2, across a start of the program (outside review of
+        // its Redfish fixes, M1): added where its controller lists two computers, the card's found by its number; the
+        // wall keeps where its computer is, and that its controller lists several, with the card, from one run to the
+        // next. In the next run its node is pulled, and the other, off and giving no number, is the only one listed:
+        // nothing is pressed there (before: the next run's driver knew nothing of where it was, and pressed it).
+        QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        bmc.others = {{u"Node2"_s, QJsonValue(), u"Off"_s}};
+        const core::ServerPlace at{bmc.system(), true};
+        QString id;
+        QHash<QString, QByteArray> kept;
+        {
+            OwnWall own(file);
+            KvmAdding adding(own.wall, own.boxes());
+            const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+            QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+            id = added.value().id;
+            QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == at);
+            QCOMPARE(cameTo(own.wall, id, u"online"_s).state, u"online"_s);
+            QTRY_VERIFY_WITH_TIMEOUT(core::Settings(file).remembered().kvms.value(0).serverPlace == at, 10000);
+            kept = own.secrets.all;
+        }
+        bmc.ownListed = false;
+        OwnWall next(file, kept);
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { next.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+        QCOMPARE(codeOf(pressed), std::string("another_machine"));
+        QVERIFY(bmc.actions.isEmpty());
+        QVERIFY(signsOnToNothing(bmc));
+    }
+
+    void theChangeBoxHoldsItsSignInToWhereItsComputerIs()
+    {
+        // The change box's sign-in with the kept password (another user name typed) is held to where the card's
+        // computer is, as the wall's own driver is (outside review of 0.2.0's Redfish fixes, M1): its node pulled, and
+        // another, giving no number, the only one listed at another place, it is "another_machine", and nothing of the
+        // change is saved.
+        OwnWall own;
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        KvmAdding adding(own.wall, own.boxes());
+        const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+        QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+        const QString id = added.value().id;
+        QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == (core::ServerPlace{bmc.system(), false}));
+        bmc.ownListed = false;
+        bmc.others = {{u"Node2"_s, QJsonValue(), u"Off"_s}};
+        bmc.user = u"operator"_s; // (so that the sign-in itself is let in, and only which server answers is asked)
+        KvmEditing editing(own.wall, own.boxes());
+        KvmEditing::Typed typed = asItIs(own.wall, id);
+        typed.user = u"operator"_s;
+        QCOMPARE(codeOf(changedBy(editing, id, typed).result), std::string("another_machine"));
+        QCOMPARE(kvmOf(own.wall, id).value_or(OwnKvm{}).user, u"admin"_s);
+        QVERIFY(bmc.actions.isEmpty());
+    }
+
+    void aSingleBoardOffAndGivingNoNumberIsPressedTheNextRunAsBefore()
+    {
+        // The owner's boards, one computer each: added (where it is kept with the card, alone), and in the next run off
+        // and giving no number for itself, as a controller that learns it from the server's firmware may. Power On goes
+        // to it, as before (outside review of 0.2.0's Redfish fixes, M1: the usual way no harder).
+        QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        QString id;
+        QHash<QString, QByteArray> kept;
+        {
+            OwnWall own(file);
+            KvmAdding adding(own.wall, own.boxes());
+            const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+            QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+            id = added.value().id;
+            QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == (core::ServerPlace{bmc.system(), false}));
+            kept = own.secrets.all;
+        }
+        QVERIFY(core::Settings(file).remembered().kvms.value(0).serverPlace ==
+                (core::ServerPlace{bmc.system(), false}));
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        OwnWall next(file, kept);
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { next.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+        QVERIFY2(pressed.ok(), pressed.ok() ? "" : pressed.error().message.c_str());
+        QCOMPARE(bmc.actions, QStringList{u"system On"_s});
+    }
+
+    void aCardAddedWhileItsServerWasOffAsksOnceWhetherItIsItsServer()
+    {
+        // (The owner's decision of 2026-11-22.) Added while its server was off and gave no number: known by its
+        // controller alone. In the next run the server is on and gives its number: its card asks whether that is the
+        // server it was added for, and nothing but looks goes to it. A Yes (with no password typed) takes that number
+        // for the card, written into the settings, and its buttons go to that server, in this run and the next.
+        QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        QString id;
+        QHash<QString, QByteArray> kept;
+        {
+            OwnWall own(file);
+            KvmAdding adding(own.wall, own.boxes());
+            const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+            QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+            id = added.value().id;
+            kept = own.secrets.all;
+        }
+        const QString controllerAlone = core::Settings(file).remembered().kvms.value(0).machine;
+        QVERIFY2(controllerAlone.startsWith(core::redfish::saidNone), qPrintable(controllerAlone));
+        bmc.uuid = RedfishByHand::fresh();
+        bmc.power = u"On"_s;
+        {
+            OwnWall next(file, kept);
+            const core::Status asking = cameTo(next.wall, id, u"error"_s);
+            QVERIFY(asking.asksItsServer);
+            const base::Result<core::Done> refused = answerTo<core::Done>(
+                [&](auto done) { next.wall.act(id, core::Action::plain(u"power_off"_s), std::move(done)); });
+            QCOMPARE(codeOf(refused), std::string("another_machine"));
+            QVERIFY(bmc.actions.isEmpty());
+            core::Action yesItIs = core::Action::plain(u"its_server"_s);
+            yesItIs.text = asking.askedAbout;
+            const base::Result<core::Done> yes =
+                answerTo<core::Done>([&](auto done) { next.wall.act(id, yesItIs, std::move(done)); });
+            QVERIFY2(yes.ok(), yes.ok() ? "" : yes.error().message.c_str());
+            QTRY_VERIFY_WITH_TIMEOUT(core::Settings(file).remembered().kvms.value(0).machine == bothOf(bmc), 10000);
+            QCOMPARE(cameTo(next.wall, id, u"online"_s).state, u"online"_s);
+        }
+        OwnWall after(file, kept);
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { after.wall.act(id, core::Action::plain(u"power_off"_s), std::move(done)); });
+        QVERIFY2(pressed.ok(), pressed.ok() ? "" : pressed.error().message.c_str());
+        QCOMPARE(bmc.actions, QStringList{u"system GracefulShutdown"_s});
+    }
+
+    void aNoOnTheCardKeepsItRefusingThatComputerUntilItsPasswordIsTyped()
+    {
+        // (The owner's decision of 2026-11-22, "No keeps refusing"; review cx2-2 of outside review 2, M2.) The card
+        // asks about the computer that gives a number at its place, and is told No. The wall keeps it (its server's
+        // place, as among several), and from then on the card refuses that computer, also off and giving no number, in
+        // the next run too; changed with its password typed while the server gives its number, it takes that server and
+        // presses.
+        QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        QString id;
+        QHash<QString, QByteArray> kept;
+        {
+            OwnWall own(file);
+            KvmAdding adding(own.wall, own.boxes());
+            const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+            QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+            id = added.value().id;
+            kept = own.secrets.all;
+        }
+        bmc.uuid = RedfishByHand::fresh();
+        bmc.power = u"On"_s;
+        {
+            OwnWall next(file, kept);
+            const core::Status asking = cameTo(next.wall, id, u"error"_s);
+            QVERIFY(asking.asksItsServer);
+            core::Action no = core::Action::plain(u"not_its_server"_s);
+            no.text = asking.askedAbout;
+            const base::Result<core::Done> said =
+                answerTo<core::Done>([&](auto done) { next.wall.act(id, no, std::move(done)); });
+            QVERIFY2(said.ok(), said.ok() ? "" : said.error().message.c_str());
+            QTRY_VERIFY_WITH_TIMEOUT(core::Settings(file).remembered().kvms.value(0).serverPlace.amongSeveral, 10000);
+        }
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        {
+            OwnWall after(file, kept);
+            const base::Result<core::Done> refused = answerTo<core::Done>(
+                [&](auto done) { after.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+            QCOMPARE(codeOf(refused), std::string("another_machine"));
+            QVERIFY(bmc.actions.isEmpty());
+        }
+        bmc.uuid = RedfishByHand::fresh();
+        OwnWall changed(file, kept);
+        KvmEditing editing(changed.wall, changed.boxes());
+        KvmEditing::Typed typed = asItIs(changed.wall, id);
+        typed.password = u"secret"_s;
+        const KvmEditing::Outcome typedIn = changedBy(editing, id, typed);
+        QVERIFY2(typedIn.result.ok(), typedIn.result.ok() ? "" : typedIn.result.error().message.c_str());
+        QCOMPARE(kvmOf(changed.wall, id).value_or(OwnKvm{}).machine, bothOf(bmc));
+        QVERIFY(!kvmOf(changed.wall, id).value_or(OwnKvm{}).serverPlace.amongSeveral);
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { changed.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+        QVERIFY2(pressed.ok(), pressed.ok() ? "" : pressed.error().message.c_str());
+        QCOMPARE(bmc.actions, QStringList{u"system On"_s});
+    }
+
+    void aCardThatKeepsNoPlacePressesNoNodeOfNoNumberUntilItsComputerGivesItsNumber()
+    {
+        // The triage's scenario of the outside review of 0.2.0, 5.2, for a card that keeps no place (outside review of
+        // its Redfish fixes, round 2, L1 a): one of 0.1.2, one that went back to 0.1.2, which drops it at its next
+        // writing, and came up again, or, as here, one from a file of the wall, which carries the numbers and no place.
+        // Its controller lists two computers, and its node A is pulled before this version read A giving its number.
+        // Node B, off and giving no number, is the only one listed: nothing is pressed there, in this run or the next
+        // (before: listed alone, B passed in every run). A back, on and giving its number: found where it is, and kept;
+        // from then on it is pressed off and giving none, as the owner's boards are.
+        QTemporaryDir folder;
+        const QString file = folder.filePath(u"settings.json"_s);
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        bmc.ownListed = false;
+        bmc.others = {{u"Node2"_s, QJsonValue(), u"Off"_s}};
+        QString id;
+        QHash<QString, QByteArray> kept;
+        for (int run = 0; run < 2; ++run) {
+            OwnWall own(file, kept);
+            if (run == 0) {
+                core::WallExchange exchange(
+                    own.wall, core::exchange::Sealing{core::testing::quickCost, core::exchange::windowsDerive()});
+                const QList<core::WallExchange::Took> took = takenFrom(exchange, fileOf({inAFile(bmc, bothOf(bmc))}));
+                QCOMPARE(took.size(), 1);
+                QVERIFY(took.constFirst().came.ok());
+                id = took.constFirst().came.value();
+                QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == core::ServerPlace{});
+            }
+            // (Asked what it is first, as one from a file is, and looked at: which server answers cannot be told.)
+            QCOMPARE(cameTo(own.wall, id, u"error"_s).errorCode, u"another_machine"_s);
+            const base::Result<core::Done> pressed = answerTo<core::Done>(
+                [&](auto done) { own.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+            QCOMPARE(codeOf(pressed), std::string("another_machine"));
+            QCOMPARE(pressed.error().message, core::RedfishDevice::whereItsComputerIsNotKnownYet().message);
+            QVERIFY(bmc.actions.isEmpty());
+            QCOMPARE(bmc.others.at(0).power, u"Off"_s);
+            QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == core::ServerPlace{});
+            kept = own.secrets.all;
+        }
+        bmc.ownListed = true;
+        bmc.others.clear();
+        const core::ServerPlace at{bmc.system(), false};
+        {
+            OwnWall next(file, kept);
+            QCOMPARE(cameTo(next.wall, id, u"online"_s).state, u"online"_s);
+            QTRY_VERIFY_WITH_TIMEOUT(core::Settings(file).remembered().kvms.value(0).serverPlace == at, 10000);
+        }
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        OwnWall last(file, kept);
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { last.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+        QVERIFY2(pressed.ok(), pressed.ok() ? "" : pressed.error().message.c_str());
+        QCOMPARE(bmc.actions, QStringList{u"system On"_s});
+    }
+
+    void aChangeWithItsPasswordTypedKeepsThatItsControllerListedSeveral()
+    {
+        // (Outside review of 0.2.0's Redfish fixes, round 2, L1 c.) Added where its controller lists two computers, the
+        // card's found by its number: kept, and that its controller lists several. The other node out, its password is
+        // typed in the change box (a new one, say) while the card's computer is listed alone: the same server, and what
+        // was learnt of its controller stays (before: what that one sign-in saw alone was kept, and another node put in
+        // the card's own slot, off and giving no number, passed for it). So a computer at its place that gives no
+        // number is not pressed: on a controller of several, which node that is cannot be told.
+        OwnWall own;
+        RedfishByHand bmc(Layout::Ami, tls("first"));
+        bmc.others = {{u"Node2"_s, QJsonValue(), u"Off"_s}};
+        KvmAdding adding(own.wall, own.boxes());
+        const base::Result<KvmAdding::Added> added = addedBy(adding, typedAt(bmc, u"db-01"_s));
+        QVERIFY2(added.ok(), added.ok() ? "" : added.error().message.c_str());
+        const QString id = added.value().id;
+        const core::ServerPlace several{bmc.system(), true};
+        QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == several);
+        bmc.others.clear();
+        KvmEditing editing(own.wall, own.boxes());
+        KvmEditing::Typed typed = asItIs(own.wall, id);
+        typed.password = u"secret"_s;
+        const KvmEditing::Outcome typedIn = changedBy(editing, id, typed);
+        QVERIFY2(typedIn.result.ok(), typedIn.result.ok() ? "" : typedIn.result.error().message.c_str());
+        QCOMPARE(kvmOf(own.wall, id).value_or(OwnKvm{}).machine, bothOf(bmc));
+        QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == several);
+        QVERIFY(core::Settings(own.file).remembered().kvms.value(0).serverPlace == several);
+        bmc.uuid = zero;
+        bmc.power = u"Off"_s;
+        const base::Result<core::Done> pressed = answerTo<core::Done>(
+            [&](auto done) { own.wall.act(id, core::Action::plain(u"power_on"_s), std::move(done)); });
+        QCOMPARE(codeOf(pressed), std::string("another_machine"));
+        QVERIFY(bmc.actions.isEmpty());
     }
 
     void aKvmThatSaysNothingIsGivenUpOnInAKvmsTime()
@@ -664,12 +956,15 @@ private slots:
         typed.name = u"db-01, renamed"_s;
         QVERIFY(changedBy(editing, id, typed).result.ok());
         QCOMPARE(kvmOf(own.wall, id).value_or(OwnKvm{}).machine, kept);
-        // Typed: "this is the server".
+        // Typed: "this is the server", and where its controller keeps its computer with it (here another make's place:
+        // outside review of 0.2.0's Redfish fixes, M1).
+        bmc.becomeLayout(Layout::OpenBmc);
         typed.name = u"db-02"_s;
         typed.password = u"secret"_s;
         const KvmEditing::Outcome typedIn = changedBy(editing, id, typed);
         QVERIFY2(typedIn.result.ok(), typedIn.result.ok() ? "" : typedIn.result.error().message.c_str());
         QCOMPARE(kvmOf(own.wall, id).value_or(OwnKvm{}).machine, bothOf(bmc));
+        QVERIFY(kvmOf(own.wall, id).value_or(OwnKvm{}).serverPlace == (core::ServerPlace{bmc.system(), false}));
         QCOMPARE(cameTo(own.wall, id, u"online"_s).state, u"online"_s);
         const base::Result<core::Done> pressed = answerTo<core::Done>(
             [&](auto done) { own.wall.act(id, core::Action::plain(u"atx_power_long"_s), std::move(done)); });

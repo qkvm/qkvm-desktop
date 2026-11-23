@@ -257,7 +257,7 @@ struct Device {
     QString address;  // "https://host", "http://host:port": written the one way (kvm::addressFrom)
     QString user;     // never empty: "admin" where the file names nobody
     QString password; // as it stands in the file, whatever is in it; empty: none
-    QString kind;     // "kvmd", "jetkvm" or "redfish"
+    QString kind;     // "kvmd", "jetkvm", "redfish" or "proxmox"
     QString group;
     QString tls; // how its certificate is checked: "pinned", "system" or "insecure"
     // Over HTTPS and "pinned": the certificate it is known by, as the server keeps one (PEM, one
@@ -276,6 +276,11 @@ struct Device {
     // 0.1.x, which has no `machine` and kept the number its computer gives as its `ident`: that.
     QString machine;
     bool keepBoth = false; // somebody said it is to have a tile of its own beside its twin
+    // Of a Proxmox guest ("proxmox"): its node and its number, which the file's `url` carries as the web keeps a guest
+    // (https://host:8006/nodes/<node>/qemu/<vmid>, proxmox::guestUrl); `address` its Proxmox's alone. A guest's url
+    // that names no node and number of a guest leaves the device out. Of anything else, empty and 0.
+    QString node;
+    qint64 vmid = 0;
     // Where it stood in the file it was read from (PlaceInAFile, above): nothing a file holds.
     PlaceInAFile place;
 

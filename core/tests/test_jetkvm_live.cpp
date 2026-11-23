@@ -627,8 +627,8 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!rig.device.viewer().isOpen(), 5000);
     }
 
-    // How it is, while a connection is open: asked over rpc (its picture's size, its keyboard, its version, and
-    // the power light where its ATX extension is on); with none, a look of its status, which never connects.
+    // How it is, while a connection is open: asked over rpc (its picture's size, its keyboard, its version, its drive
+    // (A3), and the power light where its ATX extension is on); with none, a look of its status, which never connects.
     void statusIsAskedOverRpcWhileOpen()
     {
         Rig rig;
@@ -643,7 +643,7 @@ private slots:
         QCOMPARE(status.version, u"0.5.9"_s);
         QVERIFY(status.powerIsKnown);
         QCOMPARE(status.power, std::optional<bool>(false));
-        QCOMPARE(rig.viewer.calls - calls, 5);
+        QCOMPARE(rig.viewer.calls - calls, 6);
         rig.viewer.saySignal(false);
         QTRY_COMPARE(lookedAt(rig.device).state, u"no_signal"_s);
     }

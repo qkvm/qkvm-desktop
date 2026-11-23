@@ -1,0 +1,47 @@
+{
+  "about": "What each program and library of a package, and each update check the setup carries, must be built with against the misuse of its memory, by the package's kind of Windows, read from its own bytes (tools/build_common.ps1, Get-PeProtections, Get-ImageFileProtectionRefusals and Get-ImageProtectionRefusals). tools/package.ps1 makes no package, tools/test_package.ps1 passes none and the release audit's protections gate stays open, refusing a beta, while any image lacks what its row asks. The setup's two update checks (qkvm-update-check.exe and qkvm-update-check-arm64.exe, which the setup puts at the program's name while an update has the earlier version set aside) are held to the row of our own by the names they are carried under: tools/build_setup.ps1 makes no setup of one that lacks what it asks, and the release audit takes no setup that carries one for a beta. The setup's own loader and the uninstaller it leaves in the program's folder are Inno Setup's programs as its pinned release made them (tools/fetch_inno.ps1 holds that release to its digest): they are not read here. An image's row is the first whose names match its path in the package (with / between folders, in capitals or not); an image that no row names is refused, so that a new library is looked at before it ships. Our own programs have every protection of their kind. Another's library keeps what its x64 build has on both kinds, but for x64's shadow stack, which ARM64 has not: there pac stands in its place where that library signs its returns (the Visual C++ runtime does; Qt does not, as its note says, and SPEC.md section 3 says what that leaves weaker). Read on 2026-11-21 from the 0.1.2 and 0.2.0 x64 packages and the 0.2.0 ARM64 one.",
+  "protections": {
+    "aslr": "its place in memory chosen anew at every start (DYNAMIC_BASE, with its relocations kept)",
+    "highEntropyVa": "that place chosen from the whole 64-bit room (HIGH_ENTROPY_VA)",
+    "dep": "nothing run from its data (NX_COMPAT)",
+    "cfg": "every indirect call checked against its own table of what may be called (GUARD_CF, and its load configuration says its code was built so)",
+    "cet": "x64 only: fit for the processor's shadow stack, which checks every return against a copy Windows keeps (CET_COMPAT, of its extended characteristics)",
+    "ehContinuation": "its exception handlers' targets listed, for that stack (its load configuration's EH continuation table)",
+    "pac": "ARM64 only: at least two in three of its functions sign their return address with the processor's pointer authentication as they begin and check it before they return (PACIBSP, of the functions its unwind table names)"
+  },
+  "images": [
+    {
+      "of": "qKVM Desktop's own",
+      "names": ["qkvm-desktop.exe", "qkvm-setup.exe", "qkvm-update-check.exe", "qkvm-update-check-arm64.exe"],
+      "x64": ["aslr", "highEntropyVa", "dep", "cfg", "cet"],
+      "arm64": ["aslr", "highEntropyVa", "dep", "cfg", "pac"]
+    },
+    {
+      "of": "the Visual C++ runtime",
+      "names": ["vcruntime140*.dll", "msvcp140*.dll", "concrt140.dll", "vccorlib140.dll"],
+      "x64": ["aslr", "highEntropyVa", "dep", "cfg", "cet", "ehContinuation"],
+      "arm64": ["aslr", "highEntropyVa", "dep", "cfg", "ehContinuation", "pac"]
+    },
+    {
+      "of": "Qt",
+      "names": ["Qt6*.dll", "plugins/*.dll", "qml/*.dll"],
+      "x64": ["aslr", "highEntropyVa", "dep", "cfg", "cet"],
+      "arm64": ["aslr", "highEntropyVa", "dep", "cfg"],
+      "note": "Qt's ARM64 build (Qt's own, as fetched) does not sign its returns: only the runtime's few pieces linked into each of its libraries do (37 to 60 functions of each, of up to 22601). Its returns have no guard on ARM64, where on x64 the shadow stack guards them on a processor that has one."
+    },
+    {
+      "of": "FFmpeg (the project's own build, or the development one)",
+      "names": ["avcodec-*.dll", "avutil-*.dll", "swresample-*.dll"],
+      "x64": ["aslr", "highEntropyVa", "dep"],
+      "arm64": ["aslr", "highEntropyVa", "dep"],
+      "note": "Built with MinGW-w64's compilers, which give neither CFG nor a guard of returns on x64; on ARM64 the same, as x64's."
+    },
+    {
+      "of": "libdatachannel with Mbed TLS (experiments/webrtc/build-cpp-dependencies.ps1)",
+      "names": ["datachannel.dll"],
+      "x64": ["aslr", "highEntropyVa", "dep"],
+      "arm64": ["aslr", "highEntropyVa", "dep"],
+      "note": "Built from its pinned sources with their own options, which ask for neither CFG nor a guard of returns, on either kind."
+    }
+  ]
+}

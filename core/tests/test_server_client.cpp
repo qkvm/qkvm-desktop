@@ -1,6 +1,8 @@
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -15,6 +17,7 @@
 #include <QNetworkProxyFactory>
 #include <QNetworkReply>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <QSet>
 #include <QSslCertificate>
 #include <QSslConfiguration>
@@ -27,12 +30,15 @@
 
 #include <qkvm/core/server_client.h>
 
+#include "heard_of_threads.h"
+#include "signer_far_away.h"
 #include "stand_in.h"
 
 using namespace Qt::StringLiterals;
 using namespace qkvm;
 using core::testing::Answered;
 using core::testing::Asked;
+using core::testing::HeardOfThreads;
 using core::testing::StandIn;
 
 namespace {
@@ -160,6 +166,26 @@ private:
             return base::Error{"never", "The call was never answered."};
         }
         return answers.takeFirst();
+    }
+
+    // Whether a look out on the client's own lines, which were ended under it (another qKVM named, another
+    // certificate), was told so as it was while Qt's clearConnectionCache ended them
+    // (aQuestionOutWhenAnotherServerIsNamedIsToldOnce): once, as a server that could not be reached; or, where
+    // `orRefused` (another certificate), as refused under the new rule, which Qt's end of the lines told now and then
+    // (3 of 8, 2026-11-11: Qt sent it again on a line it made anew, and the certificate was looked at there). Empty
+    // where it was; else what it was told.
+    static QString toldTheirLinesEnded(const QList<base::Result<core::Wall>>& told, bool orRefused = false)
+    {
+        QStringList said;
+        for (const base::Result<core::Wall>& one : told) {
+            said.append(one ? u"a wall"_s : QString::fromStdString(one.error().code + " / " + one.error().message));
+        }
+        const bool once = told.size() == 1 && !told.constFirst().ok();
+        const bool canceled = once && told.constFirst().error().code == core::ServerClient::unreachable &&
+                              told.constFirst().error().message == "qKVM could not be reached: Operation canceled";
+        const bool refused =
+            once && orRefused && told.constFirst().error().code == core::ServerClient::certificateChanged;
+        return canceled || refused ? QString() : u"Told %1 times: [%2]"_s.arg(told.size()).arg(said.join(u"; "_s));
     }
 
     // What a QKVM says of itself; and a picture, as far as it has to be one here: how a JPEG begins.
@@ -1339,6 +1365,223 @@ private slots:
         QCOMPARE(lines.size(), server.asked.size());
     }
 
+    // The LOW of beta 2's review: every manager of Qt's for HTTP speaks on a thread of its own, and its end waits up to
+    // five seconds for that thread, which Windows may hold (below). A line made for one question ends a turn after its
+    // answer, and not on the interface thread (network_end.h).
+    void aLineMadeForOneQuestionEndsOffTheInterfaceThread()
+    {
+        StandIn server([](const Asked& /*asked*/) { return Answered{200, R"({"ok": true, "note": null})"}; });
+        core::ServerClient client;
+        QVERIFY(client.setAddress(server.address()).ok());
+        client.setSession("s1");
+        QList<base::Result<core::Done>> told;
+        client.act(u"pc"_s, core::Action::plain(u"atx_power"_s),
+                   [&told](const base::Result<core::Done>& done) { told.append(done); });
+        const QList<QNetworkAccessManager*> lines = client.findChildren<QNetworkAccessManager*>();
+        QCOMPARE(lines.size(), 1);
+        std::atomic<QThread*> endedOn{nullptr};
+        connect(lines.constFirst(), &QObject::destroyed, [&endedOn] { endedOn = QThread::currentThread(); });
+        QTRY_COMPARE(told.size(), 1);
+        QVERIFY2(told.constFirst().ok(), told.constFirst() ? "" : told.constFirst().error().message.c_str());
+        QTRY_VERIFY(endedOn.load() != nullptr);
+        QVERIFY(endedOn.load() != QThread::currentThread());
+        QVERIFY(client.findChildren<QNetworkAccessManager*>().isEmpty());
+    }
+
+    // And the client's own end, with a look on its own lines and an action on a line of its own, each being let in,
+    // their certificate being judged, and Windows fetching that certificate's signer from an address that does not
+    // answer (an AIA fetch on a PC without internet): both threads are held, and the interface thread was held with
+    // them, five seconds for each, as the client ended. It is not.
+    void aClientThatEndsWhileWindowsFetchesASignerDoesNotHoldTheInterfaceThread()
+    {
+        // (This program's own certificate and ports: signer_far_away.h.)
+        const auto& stalls = core::testing::stallsOfTheClient;
+        const core::testing::SignerFarAway far(stalls);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const core::testing::TlsDoorElsewhere door(tls(stalls.name));
+        QVERIFY(door.speaksWindowsOwnTls());
+        auto client = std::make_unique<core::ServerClient>();
+        QVERIFY(client->setAddress(door.address()).ok());
+        client->setSession("s1");
+        client->askWall([](const base::Result<core::Wall>& /*wall*/) {});
+        client->act(u"pc"_s, core::Action::plain(u"atx_power"_s), [](const base::Result<core::Done>& /*done*/) {});
+        // Their lines' certificate judged: Windows fetches the signer from where the certificate says, for this program
+        // here, on each of the two lines, and waits on both as the client ends.
+        QVERIFY2(QTest::qWaitFor([&far] { return far.asked() >= 2; }, 60'000),
+                 qPrintable(u"Windows did not fetch the signer here for both lines: "_s + far.said()));
+        QVERIFY2(far.waitedOn() >= 2, qPrintable(far.said()));
+        const core::testing::Stillness still;
+        client.reset();
+        QTest::qWait(6000);
+        QVERIFY2(still.longestMs() < 1000,
+                 qPrintable(
+                     u"The interface thread was held still for %1 ms (%2)."_s.arg(still.longestMs()).arg(far.said())));
+        // (And Windows still waited on both all through: what was measured is an end while their threads were held.)
+        QVERIFY2(far.waitedOn() >= 2, qPrintable(far.said()));
+        qInfo("%s", qPrintable(far.said()));
+    }
+
+    // What whoever asked is told where another qKVM is named while their question is out to the last one: once, and
+    // this. (Pinned on 2026-11-11 as it was told while Qt's clearConnectionCache ended the client's lines there, before
+    // they were ended another way: it stays so.)
+    void aQuestionOutWhenAnotherServerIsNamedIsToldOnce()
+    {
+        StandIn server([](const Asked& /*asked*/) {
+            Answered never;
+            never.never = true;
+            return never;
+        });
+        core::ServerClient client;
+        QVERIFY(client.setAddress(server.address()).ok());
+        client.setSession("s1");
+        QList<base::Result<core::Wall>> told;
+        client.askWall([&told](const base::Result<core::Wall>& wall) { told.append(wall); });
+        QTRY_COMPARE(server.asked.size(), 1);
+        const core::testing::NobodyThere nobody;
+        QVERIFY(client.setAddress(nobody.address()).ok());
+        // Not there and then: whoever is told may ask again at once, of the server named by then.
+        QCOMPARE(told.size(), 0);
+        QTRY_COMPARE(told.size(), 1);
+        QTest::qWait(1000);
+        const QString notAsPinned = toldTheirLinesEnded(told);
+        QVERIFY2(notAsPinned.isEmpty(), qPrintable(notAsPinned));
+        // And it was not asked of the last one again.
+        QCOMPARE(server.asked.size(), 1);
+    }
+
+    // And where the certificate the server is known by changes.
+    void aQuestionOutWhenTheCertificateChangesIsToldOnce()
+    {
+        StandIn server(
+            [](const Asked& /*asked*/) {
+                Answered never;
+                never.never = true;
+                return never;
+            },
+            tls("first"));
+        QVERIFY(server.isListening());
+        core::ServerClient client;
+        QVERIFY(client.setAddress(server.address()).ok());
+        client.setKnownCertificate(sha256Of("first"));
+        client.setSession("s1");
+        QList<base::Result<core::Wall>> told;
+        client.askWall([&told](const base::Result<core::Wall>& wall) { told.append(wall); });
+        QTRY_COMPARE(server.asked.size(), 1);
+        client.setKnownCertificate(sha256Of("second"));
+        // Not there and then: whoever is told may ask again at once, under the rule there is by then.
+        QCOMPARE(told.size(), 0);
+        QTRY_COMPARE(told.size(), 1);
+        QTest::qWait(1000);
+        const QString notAsPinned = toldTheirLinesEnded(told, true);
+        QVERIFY2(notAsPinned.isEmpty(), qPrintable(notAsPinned));
+        // And nothing more of it reached the server, under either rule.
+        QCOMPARE(server.asked.size(), 1);
+    }
+
+    // Nothing of a line to a server named before is used once another was named, nor when it is named again.
+    void aLineToAServerNamedBeforeIsNotUsedWhenItIsNamedAgain()
+    {
+        StandIn server(emptyWall);
+        server.keepsLines = true;
+        StandIn other(emptyWall);
+        core::ServerClient client;
+        const auto look = [&] { return answerTo<core::Wall>([&](const auto& told) { client.askWall(told); }); };
+        QVERIFY(client.setAddress(server.address()).ok());
+        QVERIFY(look().ok());
+        QCOMPARE(server.lines, 1);
+        QVERIFY(client.setAddress(other.address()).ok());
+        QVERIFY(look().ok());
+        QVERIFY(client.setAddress(server.address()).ok());
+        QVERIFY(look().ok());
+        QCOMPARE(server.asked.size(), 2);
+        QCOMPARE(server.lines, 2);
+    }
+
+    // Nor is a line opened under one certificate rule used under another.
+    void aLineKeptUnderOneCertificateIsNotUsedUnderAnother()
+    {
+        StandIn server(emptyWall, tls("first"));
+        QVERIFY(server.isListening());
+        server.keepsLines = true;
+        core::ServerClient client;
+        const auto look = [&] { return answerTo<core::Wall>([&](const auto& told) { client.askWall(told); }); };
+        QVERIFY(client.setAddress(server.address()).ok());
+        client.setKnownCertificate(sha256Of("first"));
+        const base::Result<core::Wall> known = look();
+        QVERIFY2(known.ok(), known ? "" : known.error().message.c_str());
+        QCOMPARE(server.asked.size(), 1);
+        client.setKnownCertificate(sha256Of("second"));
+        const base::Result<core::Wall> other = look();
+        QVERIFY(!other.ok());
+        QCOMPARE(other.error().code, std::string(core::ServerClient::certificateChanged));
+        QCOMPARE(server.asked.size(), 1);
+    }
+
+    // Another qKVM named while a look is out to the last one, its line being let in, its certificate judged, and
+    // Windows fetching that certificate's signer from an address that does not answer (an AIA fetch on a PC without
+    // internet): Qt's clearConnectionCache ended the client's lines there, and waited five seconds for the thread they
+    // were spoken on, which Windows held, on the interface thread. It does not: they end with their manager off the
+    // interface thread, and the client speaks on new ones.
+    void anotherServerNamedWhileWindowsFetchesASignerDoesNotHoldTheInterfaceThread()
+    {
+        // (This case's own certificate and ports: signer_far_away.h.)
+        const auto& stalls = core::testing::stallsOfAnotherServer;
+        const core::testing::SignerFarAway far(stalls);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const core::testing::TlsDoorElsewhere door(tls(stalls.name));
+        QVERIFY(door.speaksWindowsOwnTls());
+        core::ServerClient client;
+        QVERIFY(client.setAddress(door.address()).ok());
+        client.setSession("s1");
+        QList<base::Result<core::Wall>> told;
+        client.askWall([&told](const base::Result<core::Wall>& wall) { told.append(wall); });
+        QVERIFY2(QTest::qWaitFor([&far] { return far.asked() > 0; }, 60'000),
+                 qPrintable(u"Windows did not fetch the signer here for this program: "_s + far.said()));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        const core::testing::NobodyThere nobody;
+        const core::testing::Stillness still;
+        QVERIFY(client.setAddress(nobody.address()).ok());
+        QTest::qWait(6000);
+        QVERIFY2(still.longestMs() < 1000,
+                 qPrintable(
+                     u"The interface thread was held still for %1 ms (%2)."_s.arg(still.longestMs()).arg(far.said())));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        // And whoever asked was told, once, as where Windows held nothing.
+        const QString notAsPinned = toldTheirLinesEnded(told);
+        QVERIFY2(notAsPinned.isEmpty(), qPrintable(notAsPinned));
+        qInfo("%s", qPrintable(far.said()));
+    }
+
+    // And the certificate the server is known by changed meanwhile: the same.
+    void anotherCertificateWhileWindowsFetchesASignerDoesNotHoldTheInterfaceThread()
+    {
+        // (This case's own certificate and ports: signer_far_away.h.)
+        const auto& stalls = core::testing::stallsOfAnotherCertificate;
+        const core::testing::SignerFarAway far(stalls);
+        QVERIFY2(far.isListening(), qPrintable(far.said()));
+        const core::testing::TlsDoorElsewhere door(tls(stalls.name));
+        QVERIFY(door.speaksWindowsOwnTls());
+        core::ServerClient client;
+        QVERIFY(client.setAddress(door.address()).ok());
+        client.setSession("s1");
+        QList<base::Result<core::Wall>> told;
+        client.askWall([&told](const base::Result<core::Wall>& wall) { told.append(wall); });
+        QVERIFY2(QTest::qWaitFor([&far] { return far.asked() > 0; }, 60'000),
+                 qPrintable(u"Windows did not fetch the signer here for this program: "_s + far.said()));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        const core::testing::Stillness still;
+        client.setKnownCertificate(sha256Of("first"));
+        QTest::qWait(6000);
+        QVERIFY2(still.longestMs() < 1000,
+                 qPrintable(
+                     u"The interface thread was held still for %1 ms (%2)."_s.arg(still.longestMs()).arg(far.said())));
+        QVERIFY2(far.waitedOn() > 0, qPrintable(far.said()));
+        // And whoever asked was told, once, as where Windows held nothing.
+        const QString notAsPinned = toldTheirLinesEnded(told, true);
+        QVERIFY2(notAsPinned.isEmpty(), qPrintable(notAsPinned));
+        qInfo("%s", qPrintable(far.said()));
+    }
+
     // b11: a change on a line of its own is held to the server's certificate as every question is: known by the one it
     // shows, it arrives; known by another, or by none Windows trusts, nothing of it is sent, and why is said.
     void aChangeOnALineOfItsOwnKeepsTheCertificateRule()
@@ -2382,6 +2625,64 @@ private slots:
         QCOMPARE(client.limitsAlive(), 12);
         QTRY_COMPARE(came, 12);
         QTRY_COMPARE_WITH_TIMEOUT(client.limitsAlive(), 0, 3000);
+    }
+
+    // What a call keeps while it is out, its limit and whoever is to hear its answer, ends on this thread, wherever Qt
+    // lets go of what listens to its reply. Qt lets go of a connection's slot on whatever thread cleans up after the
+    // connection, and a reply's connections are cleaned up on Qt's own network thread too, as it ends what it had of a
+    // reply that ends here: test_ui_wall_windows and test_ui_merged_wall each ended once at "QObject::killTimer: Timers
+    // cannot be stopped from another thread", the limit of a call that was out, a timer of this thread, ended there
+    // with the slot that held it. Played here by another thread that is inside a signal of the reply, and so holds its
+    // connections, while the client ends with the call out: Qt lets go of them there, as the signal ends.
+    void whatACallKeepsEndsOnThisThreadWhereverQtLetsGoOfItsReply()
+    {
+        StandIn server([](const Asked& asked) {
+            if (asked.path == "/healthz") {
+                return Answered{200, aQkvm};
+            }
+            Answered never;
+            never.never = true;
+            return never;
+        });
+        auto client = std::make_unique<core::ServerClient>();
+        QVERIFY(client->setAddress(server.address()).ok());
+        client->setSession(QByteArray(43, 's'));
+        std::atomic<QThread*> hearerEndedOn{nullptr};
+        {
+            // (Whoever is to hear the answer holds this, and lets go of it as it ends.)
+            const std::shared_ptr<void> hearer(nullptr,
+                                               [&hearerEndedOn](void*) { hearerEndedOn = QThread::currentThread(); });
+            client->act(u"pc"_s, core::Action::plain(u"atx_power"_s), [hearer](const base::Result<core::Done>&) {});
+        }
+        QTRY_COMPARE(server.asked.size(), 1);
+        QNetworkReply* const reply = client->findChild<QNetworkReply*>();
+        QVERIFY(reply != nullptr);
+        QCOMPARE(client->limitsAlive(), 1);
+        const HeardOfThreads heard;
+        QSemaphore inside;
+        QSemaphore ended;
+        std::thread elsewhere([reply, &inside, &ended] {
+            const QObject here; // (of this thread)
+            QObject::connect(
+                reply, &QIODevice::channelBytesWritten, &here,
+                [&inside, &ended] {
+                    inside.release();
+                    ended.acquire();
+                },
+                Qt::DirectConnection);
+            emit reply->channelBytesWritten(0, 0);
+        });
+        if (!inside.tryAcquire(1, 10'000)) {
+            ended.release();
+            elsewhere.join();
+            QFAIL("The other thread never came inside the reply's signal.");
+        }
+        client.reset();
+        ended.release();
+        elsewhere.join();
+        QVERIFY2(hearerEndedOn.load() == QThread::currentThread(),
+                 "Whoever was to hear the answer ended on another thread.");
+        QVERIFY2(HeardOfThreads::said().isEmpty(), qPrintable(HeardOfThreads::said().join(u" | "_s)));
     }
 
     void whatIsAskedOfAMachineIsGivenLongerThanAnOrdinaryCall()

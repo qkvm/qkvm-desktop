@@ -12,6 +12,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
+#include "jetkvm_words.h"
+
 #include <qkvm/base/clock.h>
 #include <qkvm/core/jetkvm_layouts.h>
 
@@ -21,7 +23,7 @@ namespace qkvm::core {
 
 namespace {
 
-constexpr char hidVersion = 1;
+using jetkvm_words::hidVersion;
 constexpr int mostStep = 127;
 constexpr int farthest = 32767;
 constexpr int firstModifier = 0xE0;
@@ -319,12 +321,11 @@ bool JetKvmConnection::quiet() const
 
 void JetKvmConnection::heardHid(const QByteArray& bytes)
 {
-    if (bytes.isEmpty()) {
-        return;
-    }
-    const auto kind = static_cast<unsigned char>(bytes.at(0));
-    if (kind == 0x01 && bytes.size() >= 2) {
-        if (bytes.at(1) == hidVersion) {
+    // (Read as jetkvm_words.cpp reads it.)
+    using Hid = jetkvm_words::Hid;
+    const Hid said = jetkvm_words::hid(bytes);
+    if (said.kind == Hid::Kind::Shaken || said.kind == Hid::Kind::OtherVersion) {
+        if (said.kind == Hid::Kind::Shaken) {
             m_shaken = true;
             if (m_road == Road::Undecided) {
                 decide(Road::Hid);
@@ -339,15 +340,11 @@ void JetKvmConnection::heardHid(const QByteArray& bytes)
         decide(Road::Rpc);
         return;
     }
-    if (kind == 0x33 && bytes.size() >= 2 && m_road == Road::Hid) {
-        Keyboard said;
-        said.modifiers = static_cast<unsigned char>(bytes.at(1));
-        for (qsizetype at = 2; at < std::min<qsizetype>(bytes.size(), 8); ++at) {
-            if (const auto key = static_cast<unsigned char>(bytes.at(at)); key != 0) {
-                said.keys.append(key);
-            }
-        }
-        keysSaid(said);
+    if (said.kind == Hid::Kind::Keys && m_road == Road::Hid) {
+        Keyboard keyboard;
+        keyboard.modifiers = said.modifiers;
+        keyboard.keys = said.keys;
+        keysSaid(keyboard);
     }
 }
 

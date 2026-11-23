@@ -8,6 +8,7 @@
 #include <qkvm/core/wall_source.h>
 
 namespace qkvm::core {
+class MediaPlace;
 class ScreenWatch;
 class ServerClient;
 } // namespace qkvm::core
@@ -40,6 +41,10 @@ public:
     virtual core::WallSource& place() = 0;
     // History and the activity log belong to a server; local devices have neither API.
     virtual core::ServerClient* detailsClient() { return nullptr; }
+    // Where its machines' virtual media are asked for: a server's, through its client (for an admin of it, signed in in
+    // person: whoever has the windows sees to that); this PC's own wall's, the wall itself (its kvmd KVMs'). None: it
+    // has none.
+    virtual core::MediaPlace* mediaPlace();
     // This PC's own wall: its KVMs' screen watches, which tell their Details (c7). None for a server's.
     virtual core::ScreenWatch* screens() { return nullptr; }
     virtual core::WallFeed& feed() = 0;

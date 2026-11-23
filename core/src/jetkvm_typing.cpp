@@ -41,6 +41,8 @@ base::Error endedWhile(std::size_t done, std::size_t of, const base::Error& why)
 
 const base::Error noAnswer{"timeout", "The JetKVM did not answer in time"};
 
+const std::string mayNoLonger = "whoever asked for it may no longer do that";
+
 JetKvmConnection::Keyboard keyboardOf(const typed::Report& report)
 {
     JetKvmConnection::Keyboard keyboard;
@@ -62,6 +64,7 @@ struct Typing : std::enable_shared_from_this<Typing> {
     bool text = false;
     TypingPace pace;
     std::function<void()> keyGoes;
+    std::function<bool()> stoppedByWhoever;
     std::function<void(base::Result<Done>)> done;
     std::size_t at = 0;
     bool over = false;
@@ -88,6 +91,10 @@ struct Typing : std::enable_shared_from_this<Typing> {
     // Why nothing more goes, where nothing does.
     std::optional<base::Error> stopped(std::size_t typed) const
     {
+        // (Whoever had it typed may no longer: stopped where it stands, and the key before was let go of.)
+        if (stoppedByWhoever && stoppedByWhoever()) {
+            return stoppedTyping(typed, count());
+        }
         if (on == nullptr) {
             return endedWhile(typed, count(), base::Error{"dropped", "The connection to the JetKVM ended"});
         }
@@ -104,6 +111,10 @@ struct Typing : std::enable_shared_from_this<Typing> {
     // the JetKVM in among these, it would land in the text, or let go of a key held for a combination.
     void waitForTheLiveLine(const std::shared_ptr<QElapsedTimer>& clock)
     {
+        if (stoppedByWhoever && stoppedByWhoever()) {
+            finish(stoppedTyping());
+            return;
+        }
         if (on == nullptr || !on->keysOnTheirWay()) {
             start();
             return;
@@ -320,8 +331,17 @@ struct Typing : std::enable_shared_from_this<Typing> {
 
 } // namespace
 
+base::Error stoppedTyping(std::size_t done, std::size_t of)
+{
+    if (done == 0) {
+        return {"stopped", "It was not done: " + mayNoLonger};
+    }
+    return {"stopped",
+            "Typing was stopped after " + std::to_string(done) + " of " + std::to_string(of) + " keys: " + mayNoLonger};
+}
+
 void type(QPointer<JetKvmConnection> on, std::vector<typed::Report> reports, bool text, TypingPace pace,
-          std::function<void()> keyGoes, std::function<void(base::Result<Done>)> done)
+          std::function<void()> keyGoes, std::function<bool()> stopped, std::function<void(base::Result<Done>)> done)
 {
     auto typing = std::make_shared<Typing>();
     typing->on = std::move(on);
@@ -329,6 +349,7 @@ void type(QPointer<JetKvmConnection> on, std::vector<typed::Report> reports, boo
     typing->text = text;
     typing->pace = pace;
     typing->keyGoes = std::move(keyGoes);
+    typing->stoppedByWhoever = std::move(stopped);
     typing->done = std::move(done);
     auto clock = std::make_shared<QElapsedTimer>();
     clock->start();

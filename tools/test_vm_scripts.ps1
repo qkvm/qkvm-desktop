@@ -550,7 +550,7 @@ public static class QkvmVmWindows {
     }
 
     # --- the titles of a profile's own views (steps 04 and 06)
-    foreach ($version in '0.1.0', '0.1.1') {
+    foreach ($version in '0.1.0', '0.1.1', '0.1.2') {
         Check "the titles of $version's views are the program's" {
             $titles = @(Get-ProfileTitles (Join-Path $Fixtures "$version\profile\settings.json"))
             $expected = @('Rack A - This PC - qKVM', '127.0.0.1:47391 - qKVM')

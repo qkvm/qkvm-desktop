@@ -63,7 +63,7 @@ DeviceLine::Where liveWhere(const QNetworkRequest& request, const QByteArray& ce
     QByteArray path = address.path(QUrl::FullyEncoded).toLatin1();
     if (address.hasQuery())
         path += '?' + address.query(QUrl::FullyEncoded).toLatin1();
-    return {address, path, {}, !certificate.isEmpty(), certificate, false};
+    return {address, path, {}, !certificate.isEmpty(), certificate, false, {}, {}};
 }
 
 DeviceLine::Limits liveLimits(const LiveLink::Watch& watch)
@@ -71,7 +71,10 @@ DeviceLine::Limits liveLimits(const LiveLink::Watch& watch)
     DeviceLine::Limits limits;
     limits.letInWithinMs = watch.openWithinMs;
     limits.mostUnsentBytes = watch.mostUnsentBytes;
-    limits.lateAfterMs = watch.silentAfterMs;
+    // What waits in this program to go is held to the limit of every other line (a quarter of a second, Watch), apart
+    // from the watch for silence: a key from then is never pressed now (outside review 2.6; the merged review of 0.2.0,
+    // B-M2, and the owner's decision of 2026-11-19: it was the watch's nine seconds of silence).
+    limits.lateAfterMs = watch.lateAfterMs;
     limits.largestFrameBytes = largestPictureBytes + headBytes;
     // A bounded live-video budget: at most sixty maximum-sized pictures a second,
     // with headroom for frame headers and control messages. No limit is inferred

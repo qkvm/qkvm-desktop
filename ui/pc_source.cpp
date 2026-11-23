@@ -2,8 +2,6 @@
 
 #include <algorithm>
 
-#include <QUrl>
-
 using namespace Qt::StringLiterals;
 
 namespace qkvm::ui {
@@ -68,10 +66,10 @@ core::Account PcSource::whoever()
 
 bool PcSource::isEncrypted() const
 {
-    // What travels to a KVM does so as that KVM was added: one that is spoken to over plain HTTP
-    // is enough for the bar to say so.
-    return std::ranges::none_of(m_wall.kvms(),
-                                [](const core::OwnKvm& kvm) { return QUrl(kvm.address).scheme() == "http"_L1; });
+    // What travels to a KVM does so as that KVM was added: one that is spoken to in the clear (over plain HTTP, or a
+    // VNC server's vnc://) is enough for the bar to say so, by the rule its card and its row in the settings say it by
+    // (outside review c9a-4, M1: a VNC server over vnc:// was not counted).
+    return std::ranges::none_of(m_wall.kvms(), &core::OwnKvm::isInTheClear);
 }
 
 } // namespace qkvm::ui

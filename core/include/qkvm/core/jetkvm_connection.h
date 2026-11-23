@@ -39,7 +39,9 @@ class JetKvmDevice;
 //   The line falling after the answer ends nothing.
 // * Up once `rpc` is open (`opened`); not within openWithinMs of start(): `timeout`.
 // * JSON-RPC: numbers of its own from 1; an answer is taken only where its `id` is a whole number that waits,
-//   in any order; callWithinMs each, or `timeout`; an `error` is `action_failed`, in its words made plain.
+//   in any order; callWithinMs each, or `timeout`; an `error` is `action_failed`, in its words made plain. A message
+//   on `rpc` larger than 64 KiB is let go (WebRtcOffer counts it): a call that waited while one came is `timeout`
+//   still (that may have been its answer), its words saying that limit was met (the web ends the connection).
 // * Events: `otherSessionConnected` (another viewer took it: `takenByAnother`, and nothing more of ours goes
 //   to it; the stop word is read on the library's thread, before any drain), `videoInputState` (its input,
 //   and the moment it came back, stamped as the word was read), `usbState`, `atxState`, `localVersion`.
@@ -244,6 +246,8 @@ private:
         bool mouse = false;
         std::optional<Report> press;
         qint64 id = 0;
+        // How many messages of `rpc` had been let go as larger than it takes when it went (refused().tooLarge).
+        quint64 tooLargeBefore = 0;
     };
     // A whole keyboard said over hidrpc for an action, until the JetKVM says it has it.
     struct Echo {

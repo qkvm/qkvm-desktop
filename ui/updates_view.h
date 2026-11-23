@@ -53,6 +53,8 @@ public:
     bool showsFile() const { return m_updates.kind() == core::UpdateKind::Portable; }
     // A Setup copy's is installed by Setup, run verified, once qKVM has closed: "Install and restart".
     bool restarts() const { return m_updates.kind() == core::UpdateKind::Setup; }
+    // An x64 copy on Windows on Arm: what it offers is for Windows on Arm (core::Updates::offersThePcsOwnKind).
+    bool forThePcsOwnKind() const { return m_updates.offersThePcsOwnKind(); }
     // What this start found of the run before's hand-over to Setup (core::Updates::afterSetup).
     QString afterSetup() const { return m_updates.afterSetup(); }
     bool afterSetupWentWrong() const { return m_updates.afterSetupWentWrong(); }
@@ -77,6 +79,8 @@ signals:
     void changed();
 
 private:
+    // "qKVM <version> is downloaded and verified.", for Windows on Arm where it is.
+    QString downloaded() const;
     core::Updates& m_updates;
     QString m_problem;
     bool m_openedInstaller = false;

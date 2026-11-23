@@ -36,7 +36,8 @@ class EditKvmView : public QObject {
     Q_PROPERTY(QString calledInASentence READ calledInASentence NOTIFY changed)
     // What stands in the box's lines when it is opened. Its name as it is saved (empty for one that
     // is called by where it is), and its address as it is typed back: "https://" is not written,
-    // "http://" is.
+    // "http://" is; a Proxmox guest's Proxmox with its port written, 443 too, as one typed without a
+    // port is one at 8006 (review cx3-3, M1).
     Q_PROPERTY(QString name READ name NOTIFY changed)
     Q_PROPERTY(QString address READ address NOTIFY changed)
     Q_PROPERTY(QString user READ user NOTIFY changed)
@@ -50,10 +51,13 @@ class EditKvmView : public QObject {
     // The certificate it is known by: its SHA-256 as the page writes one. Empty where it is known
     // by none (plain HTTP, or a certificate Windows trusts).
     Q_PROPERTY(QString certificate READ certificate NOTIFY changed)
-    // It is spoken to over plain HTTP; it is spoken to over HTTPS, and so shows a certificate.
-    // (Neither while the box is open for none.)
+    // It is spoken to in the clear (over plain HTTP, or a VNC server's vnc://); it is spoken to over
+    // HTTPS. (Neither while the box is open for none.)
     Q_PROPERTY(bool overPlainHttp READ isOverPlainHttp NOTIFY changed)
     Q_PROPERTY(bool https READ isHttps NOTIFY changed)
+    // It shows a certificate, to be looked at and said yes to: over HTTPS, or a VNC server's over vncs:// (the
+    // page's showsCertificate, /^(https|vncs):/). Its certificate line and "Review certificate" hang on this.
+    Q_PROPERTY(bool showsCertificate READ showsCertificate NOTIFY changed)
     // The box was opened for its certificate alone (a card's "Review certificate"): its lines are
     // not shown.
     Q_PROPERTY(bool forReview READ isForReview NOTIFY changed)
@@ -73,6 +77,10 @@ class EditKvmView : public QObject {
     // Refused because it says by its number that it is another KVM of the wall: the person may keep both, as
     // on the page (saveKeepingBoth).
     Q_PROPERTY(bool mayKeepBoth READ mayKeepBoth NOTIFY changed)
+    // Refused because the KVM's plain address sends everybody on to HTTPS at the same host ("https_only"): that HTTPS
+    // address, which the box offers ("Use ...": its address line takes it, and the password is to be typed for it), as
+    // the page does (web 0.3.2). Never taken by itself. Empty otherwise.
+    Q_PROPERTY(QString useInstead READ useInstead NOTIFY changed)
     // The KVM it is open for was taken off the wall elsewhere while it was open (wentAway): there is
     // nothing of it to change, to take off or to say yes to any more. Until it is opened anew.
     Q_PROPERTY(bool gone READ isGone NOTIFY changed)
@@ -85,6 +93,9 @@ class EditKvmView : public QObject {
     // What it shows is the certificate another KVM of the wall is known by: what that one is
     // called. No yes is taken to it (the wall would refuse it). Empty: it is no other's.
     Q_PROPERTY(QString presentedIsCalled READ presentedIsCalled NOTIFY changed)
+    // ...and that one is the same device by what a VNC server's certificate says (one of the two is one), not proven:
+    // the box says the road there is for two displays behind one certificate (review cx6-2, L2).
+    Q_PROPERTY(bool presentedSaysSo READ presentedSaysSo NOTIFY changed)
     // A saving was refused over what answers at the address that was typed: the KVM would be
     // known otherwise there than it is known now. What it is known by and what is shown there
     // are there as the two of a review are (`remembered`, `presented`), and so is the address
@@ -121,6 +132,12 @@ class EditKvmView : public QObject {
     // And it was saved over HTTPS where it was spoken to over plain HTTP, at its own host: a JetKVM
     // whose owner turned that on (core::KvmEditing::Changed::ontoHttps). Said with `certificate`.
     Q_PROPERTY(bool ontoHttps READ isOntoHttps NOTIFY changed)
+    // A Proxmox guest whose boot order qKVM changed to start it from an image and has not put back: the order it wrote
+    // (`bootOrderWritten`), and the one it replaced, which only its card remembers (`bootOrderWas`). Both empty for
+    // any other. Said where the card is to be removed, which forgets that (the outside review of the wave 2 desktop,
+    // 6.4).
+    Q_PROPERTY(QString bootOrderWas READ bootOrderWas NOTIFY changed)
+    Q_PROPERTY(QString bootOrderWritten READ bootOrderWritten NOTIFY changed)
 
 public:
     // A KVM as its box shows it.
@@ -141,6 +158,9 @@ public:
         bool watchable = false;
         int noSignalMinutes = 0;
         int unchangedMinutes = 0;
+        // A guest's boot order from before, and the one written in its place (`bootOrderWas`).
+        QString bootOrderWas;
+        QString bootOrderWritten;
 
         bool operator==(const Shown&) const = default;
     };
@@ -188,9 +208,18 @@ public:
     QString user() const { return m_shown.user; }
     QString group() const { return m_shown.group; }
     QString family() const { return m_shown.family; }
+    QString bootOrderWas() const { return m_shown.bootOrderWas; }
+    QString bootOrderWritten() const { return m_shown.bootOrderWritten; }
     QString certificate() const { return m_shown.certificate; }
     bool isOverPlainHttp() const { return m_shown.overPlainHttp; }
     bool isHttps() const { return m_shown.https; }
+    bool showsCertificate() const { return showsACertificate(m_shown); }
+    // Whether a KVM as its box shows it shows a certificate (`showsCertificate`): over HTTPS, or a VNC server whose
+    // address, which its box shows whole, is a vncs:// one.
+    static bool showsACertificate(const Shown& kvm)
+    {
+        return kvm.https || kvm.address.startsWith(QLatin1StringView("vncs://"));
+    }
     bool isForReview() const { return m_forReview; }
     bool removesOnly() const { return m_removesOnly; }
     bool busy() const { return m_busy; }
@@ -198,12 +227,15 @@ public:
     bool waitsForAnotherSignIn() const { return m_busy && m_waitsForAnother; }
     QString problem() const { return m_problem; }
     bool mayKeepBoth() const { return m_mayKeepBoth; }
+    // (Only beside the problem it came with: a box whose problem went says nothing of it.)
+    QString useInstead() const { return m_problem.isEmpty() ? QString() : m_useInstead; }
     bool isGone() const { return m_gone; }
     bool isReviewed() const { return m_reviewed; }
     QString remembered() const { return m_remembered; }
     QString presented() const { return m_presented; }
     bool isSame() const { return m_reviewed && m_rememberedSha256 == m_presentedSha256; }
     QString presentedIsCalled() const { return m_presentedIsCalled; }
+    bool presentedSaysSo() const { return m_presentedSaysSo; }
     bool differs() const { return m_differs; }
     QString newAddress() const { return m_newAddress; }
     bool isOnWindowsWord() const { return m_onWindowsWord; }
@@ -276,7 +308,8 @@ public:
     void began(const QString& what);
     // What it asked waits for an earlier sign-in to the KVM (core::KvmEditing::signInWaits).
     void signInWaits();
-    void refused(const QString& why, bool mayKeepBoth = false);
+    // (`useInstead`: the HTTPS address an "https_only" offers; empty for any other refusal.)
+    void refused(const QString& why, bool mayKeepBoth = false, const QString& useInstead = {});
     // It was not done because the KVM is not what the box showed any more (another window changed
     // it): the box stays, and shows the KVM as it is now, its lines filled anew.
     void refusedOver(const Shown& now, const QString& why);
@@ -306,9 +339,11 @@ public:
     void savedAndStays(const Shown& now, bool ontoHttps = false);
     // The certificate it is known by (empty: by none) and the one it shows right now, each by its
     // SHA-256; and what the KVM of the wall is called whose certificate the second is, where it
-    // is another one's. Where they come for a yes (it was said to a certificate that is shown no
-    // longer), that is said with them (`yesWasToAnother`), and the yes rests anew, for longer.
-    void reviewed(const QByteArray& remembered, const QByteArray& presented, const QString& isCalled = {});
+    // is another one's, and whether by what a VNC server's certificate says (`saysSo`). Where they come for a yes (it
+    // was said to a certificate that is shown no longer), that is said with them (`yesWasToAnother`), and the yes rests
+    // anew, for longer.
+    void reviewed(const QByteArray& remembered, const QByteArray& presented, const QString& isCalled = {},
+                  bool saysSo = false);
     // The saving was refused over what is shown at the new address: what the KVM is known by
     // (empty: by none) and the certificate that is shown there, each by its SHA-256; the address
     // as it is typed; and whether Windows trusts what is shown there, so that the KVM would be
@@ -405,12 +440,14 @@ private:
     QString m_asked;
     QString m_problem;
     bool m_mayKeepBoth = false;
+    QString m_useInstead;
     bool m_gone = false;
     bool m_reviewed = false;
     bool m_differs = false;
     QString m_newAddress;
     bool m_onWindowsWord = false;
     QString m_presentedIsCalled;
+    bool m_presentedSaysSo = false;
     QString m_savedAs;
     bool m_ontoHttps = false;
     QString m_remembered;

@@ -9,26 +9,26 @@ Open source. No server, no cloud, no account. Built in C++ and Qt 6 for video th
 
 <a href="https://github.com/qkvm/qkvm-desktop/releases"><img src="https://img.shields.io/github/v/release/qkvm/qkvm-desktop?include_prereleases&label=release&color=0b6bff" alt="Latest release"></a>
 <a href="https://github.com/qkvm/qkvm-desktop/releases"><img src="https://img.shields.io/github/downloads/qkvm/qkvm-desktop/total?label=downloads&color=0b6bff" alt="Downloads"></a>
-<img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64-0b6bff" alt="Windows 10 and 11, x64">
+<img src="https://img.shields.io/badge/Windows-10%20%7C%2011%20x64%2C%2011%20Arm64-0b6bff" alt="Windows 10 and 11, x64, and Windows 11 on Arm">
 <img src="https://img.shields.io/badge/C%2B%2B-20-0b6bff" alt="C++20">
 <img src="https://img.shields.io/badge/Qt-6.12-0b6bff" alt="Qt 6.12">
 <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-0b6bff" alt="Licence: AGPL-3.0"></a>
 
-[Website](https://qkvm.com) · [Download](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2) · [qKVM server](https://github.com/qkvm/qkvm) · [Live demo of the web app](https://demo.qkvm.com) · [Documentation](https://docs.qkvm.com) · [Security](SECURITY.md)
+[Website](https://qkvm.com) · [Download](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.2.0) · [qKVM server](https://github.com/qkvm/qkvm) · [Live demo of the web app](https://demo.qkvm.com) · [Documentation](https://docs.qkvm.com) · [Security](SECURITY.md)
 
 <br>
 
-<a href="https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-light.svg" width="100%" alt="qKVM Desktop: a wall of nine machines with their live screens, names and state, one of them shown large and live with the real keyboard, and a server's power and sensors."></picture></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/tag/v0.2.0"><picture><source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-dark.svg"><img src="https://raw.githubusercontent.com/qkvm/qkvm-desktop/main/docs/readme/hero-light.svg" width="100%" alt="qKVM Desktop: a wall of nine machines with their live screens, names and state, one of them shown large and live with the real keyboard, and a server's power and sensors."></picture></a>
 
 <sub>An illustration of the wall. The machines are made up.</sub>
 
 <br>
 
-<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe"><img src="https://img.shields.io/badge/Download-the%20setup%2C%2019%20MB-0b6bff?style=for-the-badge" alt="Download the setup" height="38"></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-setup.exe"><img src="https://img.shields.io/badge/Download-the%20setup-0b6bff?style=for-the-badge" alt="Download the setup" height="38"></a>
 &nbsp;
-<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip"><img src="https://img.shields.io/badge/Download-the%20ZIP%2C%20no%20install-1f2937?style=for-the-badge" alt="Download the ZIP" height="38"></a>
+<a href="https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-x64.zip"><img src="https://img.shields.io/badge/Download-the%20ZIP%2C%20no%20install-1f2937?style=for-the-badge" alt="Download the ZIP" height="38"></a>
 
-<sub>Version 0.1.2, a beta. For Windows 10 (22H2) and Windows 11, x64. No administrator rights needed.</sub>
+<sub>Version 0.2.0, a beta. For Windows 10 (22H2) and Windows 11, x64, and Windows 11 on Arm. No administrator rights needed.</sub>
 
 </div>
 
@@ -71,12 +71,13 @@ They work together: the desktop can sign in to a qKVM server and show that serve
     <td width="33%" valign="top">
       <b>Servers too</b><br>
       Server boards through their management controller over Redfish: power, health, temperatures, fans, the
-      locator light, and the server's own screen where its controller runs AMI MegaRAC.
+      locator light, and the server's own screen where its controller runs AMI MegaRAC or OpenBMC.
     </td>
     <td width="33%" valign="top">
       <b>Safe with passwords</b><br>
-      Each device is known by the certificate it first showed. Its password goes to that device only, and is kept in
-      Windows Credential Manager behind the program's own app password.
+      A KVM over HTTPS is known by the certificate it first showed, a server by the numbers it gives for itself. A
+      password goes only to the device it was saved for, kept in Windows Credential Manager; the app password guards
+      the program itself.
     </td>
     <td width="33%" valign="top">
       <b>Signed updates</b><br>
@@ -87,9 +88,10 @@ They work together: the desktop can sign in to a qKVM server and show that serve
 </table>
 
 **Works with** GL.iNet Comet · PiKVM-style KVMs (kvmd) · JetKVM · servers with a Redfish management controller (BMC),
-including the console of AMI MegaRAC · a [qKVM server](https://github.com/qkvm/qkvm) 0.3 or later.
+including the console of AMI MegaRAC and OpenBMC · VNC servers · Proxmox VE guests · a
+[qKVM server](https://github.com/qkvm/qkvm) 0.3 or later.
 
-<sub>qKVM is an independent project. It is not affiliated with GL.iNet, PiKVM, JetKVM or AMI.</sub>
+<sub>qKVM is an independent project. It is not affiliated with GL.iNet, PiKVM, JetKVM, AMI or Proxmox.</sub>
 
 ## Desktop or web?
 
@@ -106,9 +108,11 @@ Both are free and open source under the same licence. Pick by where you work; ma
 | **JetKVM** | ✓ | ✓ |
 | **Servers over Redfish:** power, health, sensors | ✓ | ✓ |
 | **A server's own screen** (AMI MegaRAC) | ✓ | ✓ |
-| **OpenBMC's console** | Planned | ✓ |
-| **PCs with Intel AMT, VNC servers, Proxmox VE** | Planned | ✓ |
-| **Virtual media** (mount an ISO) | Through a qKVM server | ✓ |
+| **OpenBMC's console** | ✓ | ✓ |
+| **VNC servers** (`vnc://`, `vncs://`) | ✓ | ✓ |
+| **Proxmox VE guests:** power, screen, keys, the guest it was added for | ✓ | ✓ |
+| **PCs with Intel AMT** | Planned | ✓ |
+| **Virtual media** (mount an ISO) | GL.iNet Comet, PiKVM, JetKVM and Proxmox VE guests directly; servers through a qKVM server | ✓ |
 | **Keyboard** | Taken in its window, the Windows key and Alt+Tab included | The keys the browser lets through |
 | **Video** | Decoded on your graphics card, in the program | Decoded in the browser |
 | **Windows and monitors** | Several windows, across monitors | Browser tabs and windows |
@@ -116,7 +120,7 @@ Both are free and open source under the same licence. Pick by where you work; ma
 | **Updates** | Signed feed; Install and restart | In place, or by pip or Docker |
 | **Licence** | AGPL-3.0 | AGPL-3.0 |
 
-<sub>As of qKVM Desktop 0.1.2 and qKVM server 0.3. "Planned" has no date yet.</sub>
+<sub>As of qKVM Desktop 0.2.0 and qKVM server 0.3. "Planned" has no date yet.</sub>
 
 ## Why native C++, and not Electron?
 
@@ -147,7 +151,7 @@ but our own code and your graphics card.
 
 ## Get started in a minute
 
-1. **Download** the [setup](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe)
+1. **Download** the [setup](https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-setup.exe)
    (or the ZIP) and start it.
 2. **Choose an app password.** It guards the passwords of your devices. Leave "Sign in automatically on this PC"
    ticked only if the PC is yours alone.
@@ -159,22 +163,29 @@ your own.
 
 ## Download
 
-For Windows 10 (22H2) and Windows 11, x64, the same program in two forms:
+For Windows 10 (22H2) and Windows 11, x64, and for Windows 11 on Arm, the same program in two forms:
 
 - **The setup**,
-  [qKVM-Desktop-0.1.2-windows-x64-setup.exe](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64-setup.exe).
-  It installs the program for you alone, without asking for an administrator, into
+  [qKVM-Desktop-0.2.0-windows-setup.exe](https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-setup.exe),
+  one for both kinds of PC: it installs the x64 program, or on Windows on Arm the ARM64 one, which
+  runs natively. It installs the program for you alone, without asking for an administrator, into
   `%LOCALAPPDATA%\Programs\qKVM Desktop`, and adds it to the Start menu (to the desktop only if
   you tick that) and to Settings, Apps.
 - **The ZIP**,
-  [qKVM-Desktop-0.1.2-windows-x64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip).
+  [qKVM-Desktop-0.2.0-windows-x64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-x64.zip),
+  or for Windows on Arm
+  [qKVM-Desktop-0.2.0-windows-arm64.zip](https://github.com/qkvm/qkvm-desktop/releases/download/v0.2.0/qKVM-Desktop-0.2.0-windows-arm64.zip).
   Nothing is installed: unpack the whole ZIP into a folder of its own and start
   `qkvm-desktop.exe` in it.
 
+On Windows on Arm, an x64 copy of 0.2.0 or later (which Windows runs under its emulation) is offered the ARM64
+program of its own version too, and says that it is for Windows on Arm. A ZIP of 0.1.x there is first offered the
+x64 0.2.0 ZIP, and that copy then offers the ARM64 one.
+
 The same files are also at
-[download.qkvm.com](https://download.qkvm.com/desktop/0.1.2/qKVM-Desktop-0.1.2-windows-x64.zip), where
-installed copies and ZIP copies take their updates from. Both files, their `SHA256SUMS` and the release notes are on the
-[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.1.2). At the first start
+[download.qkvm.com](https://download.qkvm.com/desktop/0.2.0/qKVM-Desktop-0.2.0-windows-x64.zip), where
+installed copies and ZIP copies take their updates from. The files, their `SHA256SUMS` and the release notes are on the
+[release page](https://github.com/qkvm/qkvm-desktop/releases/tag/v0.2.0). At the first start
 the program asks for a password of its own.
 
 **This is a beta.** Try it first where a mistake costs little.
@@ -187,8 +198,9 @@ More info, then Run anyway.
 Before you run the setup or unpack the ZIP, compare its SHA-256 with the line for it in
 `SHA256SUMS` on the release page. In PowerShell, in the folder you downloaded it to:
 
-    Get-FileHash .\qKVM-Desktop-0.1.2-windows-x64-setup.exe -Algorithm SHA256
-    Get-FileHash .\qKVM-Desktop-0.1.2-windows-x64.zip -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.2.0-windows-setup.exe -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.2.0-windows-x64.zip -Algorithm SHA256
+    Get-FileHash .\qKVM-Desktop-0.2.0-windows-arm64.zip -Algorithm SHA256
 
 If the two differ, do not run it. `SHA256SUMS` itself is signed with the release key the program pins
 (`SHA256SUMS.sig`).
@@ -226,11 +238,15 @@ that setup install it, and starts again.
 To upgrade a copy from the ZIP, close it and unpack the newer ZIP into a folder of its own, or
 run the setup instead. Either finds your wall as it was (see below).
 
-If an update was cut off (the PC lost power or the setup was ended) and qKVM no longer
-starts, run the setup again, the newer one or the one you have: it puts the program back
-first. The same goes for an update or upgrade that stops partway through its copy (a file in
-use, a full disk): the earlier qKVM may not start until you run the setup again, and nothing
-of your wall, settings or passwords is lost.
+An update or upgrade that stops partway through its copy (a file in use, a full disk) leaves
+the earlier qKVM as it was: the setup sets the earlier version aside before it copies, and
+puts it back. If an update was cut off (the PC lost power or the setup was ended), qKVM says
+so when you start it: choose OK, then run the setup again, the newer one or the one you have:
+it puts the earlier version back first, or finishes the update. Nothing of your wall,
+settings or passwords is lost either way. (If such a cut was of an upgrade from 0.1.x and
+you uninstall with 0.1.x's own uninstaller before any setup has run again, files the
+upgrade set aside, ending in `.old-update`, may stay in the folder; the next setup of
+0.2.0 or later removes them.)
 
 To uninstall it: Settings, Apps, Installed apps, qKVM Desktop, Uninstall. A copy from the ZIP
 is removed by closing the program and deleting its folder.
@@ -295,6 +311,35 @@ Then:
 
 `tools\check.ps1` keeps everything it printed in `build\check.txt`; it has passed when its
 last line says so. A test that passes only when it is run a second time is named there.
+
+### For Windows on ARM
+
+The program is built for ARM64 too, natively: its own code, Qt, FFmpeg (with its NEON code) and
+libdatachannel are ARM64, and it decodes and draws on the graphics card through Direct3D 11 as it does
+on x64. It is built on an x64 PC (a cross-build), with the Build Tools' "MSVC ARM64 build tools" beside
+the x64 ones, and the x64 Qt above as Qt's host:
+
+    tools\fetch_qt.ps1 -Into D:\Qt -Arch arm64     Qt for ARM64, into local.cmake as QKVM_QT_DIR_ARM64
+    tools\build_ffmpeg.ps1 -Arch arm64             FFmpeg for ARM64, in WSL, with llvm-mingw (pinned)
+    tools\fetch_webrtc.ps1 -Arch arm64             libdatachannel and Mbed TLS for ARM64
+
+The libraries go to `.deps\arm64`, or where `local.cmake` says (`QKVM_DEPS_ARM64`). The one tool of its
+own the build runs while it builds comes from the x64 debug build of the same sources
+(`cmake --build --preset debug --target qkvm-make-jetkvm-layouts`), and then, in a PowerShell where
+`Enter-BuildEnvironment -Arch arm64` of `tools\common.ps1` has run, the `arm64-debug` and
+`arm64-release` presets build as the others do; `tools\package.ps1 -Arch arm64` makes the ARM64 folder
+and ZIP. Programs made so cannot start on the x64 PC: the tests and the package's checks run on
+Windows on ARM itself. The address sanitizer is not offered for ARM64 by Microsoft's compiler.
+A cross-build refuses an x64 tool older than its source (built from an earlier tree): build it again.
+
+Three things differ there. The interface's script is interpreted: Qt's own ARM64 build has no QML
+just-in-time compiler, so what of the QML is not compiled to C++ runs slower (the pictures do not go
+through it). Returns are guarded by the processor's pointer authentication in our own code and the
+Visual C++ runtime's, where x64 has the shadow stack, but not in Qt's, whose ARM64 build does not
+sign them (SPEC.md section 3 says what each kind has, and `tools/image-protections.json` holds every
+file to it). And the debug build's tests take about three times as long as x64's (Qt's debug
+libraries and the interpreter): some run past the limits CTest gives them, which are x64's, so run
+them with three times their limits, as the ARM64 leg's runner does, or run the release preset.
 
 How the program is meant to behave is in [SPEC.md](SPEC.md), and how it is built in
 [DESIGN.md](DESIGN.md). What changed from one release to the next: [CHANGELOG.md](CHANGELOG.md).

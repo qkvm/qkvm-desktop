@@ -232,11 +232,15 @@ try {
     $signedShown = [IO.File]::ReadAllBytes($shownSignature)
     Assert-SigningTest (Test-ReleaseSignature -Data $asShown -Signature $signedShown -PublicKey $made.PublicKey) 'What was shown is not what was signed.'
     Assert-SigningTest (-not (Test-ReleaseSignature -Data ([IO.File]::ReadAllBytes($shownFile)) -Signature $signedShown -PublicKey $made.PublicKey)) 'The file as it was changed after it was shown was signed.'
-    # And sign_release.ps1 itself reads the file once: to show it, to sign it, and to say the SHA-256 of what it signed.
+    # And sign_release.ps1 itself reads each file once (Get-SignableFiles): to show it, to sign it, and to say the
+    # SHA-256 of what it signed; it shows every file's name and SHA-256 before it asks for the passphrase, once.
     $tool = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'sign_release.ps1'))
-    Assert-SigningTest ([regex]::Matches($tool, 'Get-SignableFile').Count -eq 1 -and $tool -match 'Invoke-SignRelease [^\r\n]*-What \$what' -and
-        $tool -notmatch 'Invoke-SignRelease [^\r\n]*-File' -and $tool -notmatch 'Get-FileHash|ReadAllBytes|Get-Content|Get-Item') 'sign_release.ps1 reads what it signs more than once.'
-    Assert-SigningTest ([regex]::Matches($tool, '\$what\.Sha256').Count -eq 2) 'sign_release.ps1 does not show the SHA-256 of what it signs, and say it of what it signed.'
+    Assert-SigningTest ([regex]::Matches($tool, 'Get-SignableFiles?\b').Count -eq 1 -and $tool -match 'Invoke-SignReleaseFiles [^\r\n]*-What \$what' -and
+        $tool -notmatch 'Invoke-SignRelease\s' -and $tool -notmatch 'Get-FileHash|ReadAllBytes|Get-Content|Get-Item') 'sign_release.ps1 reads what it signs more than once.'
+    $asks = $tool.IndexOf('Read-ReleasePassphrase')
+    Assert-SigningTest ([regex]::Matches($tool, 'Read-ReleasePassphrase').Count -eq 1 -and $tool.IndexOf('$one.Name') -gt 0 -and
+        $tool.IndexOf('$one.Sha256') -gt 0 -and $asks -gt $tool.IndexOf('$one.Name') -and $asks -gt $tool.IndexOf('$one.Sha256')) 'sign_release.ps1 does not show every file''s name and SHA-256 before it asks for the passphrase, once.'
+    Assert-SigningTest ($tool -match '\$what\[\$at\]\.Sha256') 'sign_release.ps1 does not say the SHA-256 of what it signed.'
 
     # 6. The feed signed again: new dates, every other field as it was, and the program's own check of it (a public
     # fixture, made below, for the C++ verifier).
@@ -250,7 +254,8 @@ try {
         if ($name -cin @('published', 'expires')) { continue }
         Assert-SigningTest ($newFields[$name] -ceq $oldFields[$name]) "The refreshed feed changed $name."
     }
-    Assert-SigningTest ($newFields.published -ceq (Write-UtcDate $later) -and $newFields.expires -ceq (Write-UtcDate $later.AddDays(30))) 'The refreshed feed has not the new dates.'
+    # (Published ten minutes before it is signed, as a new payload is: a PC whose clock is a little behind takes it; i020.)
+Assert-SigningTest ($newFields.published -ceq (Write-UtcDate $later.AddMinutes(-10)) -and $newFields.expires -ceq (Write-UtcDate $later.AddDays(30))) 'The refreshed feed has not the new dates.'
     $oldText = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($payload)) -replace '"(published|expires)":"[^"]+"', ''
     $newText = [Text.Encoding]::UTF8.GetString($newPayload) -replace '"(published|expires)":"[^"]+"', ''
     Assert-SigningTest ($newText -ceq $oldText) 'The refreshed payload is not written as prepare_update_payload.ps1 writes it.'
@@ -305,7 +310,142 @@ try {
     }
     Assert-SigningTest ($setupNew.platform -ceq 'windows-x64-setup' -and $setupTold.expires -ceq $setupNew.expires) 'The setup feed was not refreshed as a setup feed.'
     Assert-SigningTest ((Get-FeedName $setupNew.platform) -ceq 'stable-setup.json' -and (Get-FeedName $newFields.platform) -ceq 'stable.json') 'The feeds are not named for their kinds.'
-    Assert-SigningTest ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'refresh_feed.ps1')) -match 'Get-FeedName \$was\.platform') 'refresh_feed.ps1 does not say which feed it wrote.'
+    $refreshTool = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'refresh_feed.ps1'))
+    Assert-SigningTest ($refreshTool -match 'Get-FeedName \$what\[\$at\]\.Fields\.platform') 'refresh_feed.ps1 does not say which feed it wrote.'
+    $refreshAsks = $refreshTool.IndexOf('Read-ReleasePassphrase')
+    Assert-SigningTest ([regex]::Matches($refreshTool, 'Read-ReleasePassphrase').Count -eq 1 -and $refreshTool.IndexOf('$one.Name') -gt 0 -and
+        $refreshTool.IndexOf('$one.Sha256') -gt 0 -and $refreshAsks -gt $refreshTool.IndexOf('$one.Name') -and
+        $refreshAsks -gt $refreshTool.IndexOf('$one.Sha256') -and $refreshTool -match 'Invoke-RefreshFeeds [^\r\n]*-What \$what' -and
+        $refreshTool -notmatch 'Invoke-RefreshFeed\s') 'refresh_feed.ps1 does not show every feed''s name and the SHA-256 of what it signs before it asks for the passphrase, once.'
+
+    # 7. Several files signed with one passphrase (the owner, 2026-11-19): each read once and shown by its name and the
+    # SHA-256 of its bytes; the key opened once; each signature of its own file's bytes; and where any one file is not
+    # signable, named twice, or its signature's place is taken, nothing is signed or left.
+    $script:openings = 0
+    $opener = ${function:Open-ReleaseKey}
+    function Open-ReleaseKey([string] $Key, [Security.SecureString] $Passphrase, [string] $PublicKey) {
+        $script:openings++
+        & $opener -Key $Key -Passphrase $Passphrase -PublicKey $PublicKey
+    }
+    $sumsMany = Write-TestFile 'SHA256SUMS-many' "$('3' * 64)  qKVM-Desktop-0.2.0-windows-arm64.zip`n$('4' * 64)  qKVM-Desktop-0.2.0-windows-setup.exe`n"
+    $armZip = Join-Path $public 'arm64.zip'
+    [IO.File]::WriteAllBytes($armZip, [Text.Encoding]::UTF8.GetBytes('A made-up test package for Arm; never installed.'))
+    $armPayload = Join-Path $public 'payload-arm64.json'
+    & "$PSScriptRoot/prepare_update_payload.ps1" -TestPackage -Portable -Arch arm64 -Package $armZip -Version '0.2.0' -ValidDays 2 `
+        -PackageUrl 'https://updates.example.test/qKVM-Desktop-0.2.0-windows-arm64.zip' -Notes 'Test release' -Output $armPayload | Out-Null
+    $many = @($payload, $armPayload, $sumsMany)
+    $read = Get-SignableFiles $many
+    Assert-SigningTest (@($read).Count -eq 3) "Three files to sign were read as $(@($read).Count)."
+    for ($at = 0; $at -lt 3; $at++) {
+        Assert-SigningTest ($read[$at].Name -ceq (Split-Path -Leaf $many[$at]) -and $read[$at].Sha256 -ceq (Get-FileHash -LiteralPath $many[$at]).Hash.ToLowerInvariant()) "File $at is not shown by its name and its SHA-256."
+    }
+    Assert-SigningTest ($read[1].Said -match 'windows-arm64-portable') "The ARM64 payload is not said as one: $($read[1].Said)"
+    $manyOut = @("$payload.many.sig", "$armPayload.many.sig", "$sumsMany.many.sig")
+    # (What is shown is what is signed: a file changes after it was read, and the bytes read are signed.)
+    $readBytes = [Collections.Generic.List[byte[]]]::new()
+    foreach ($one in $read) { $readBytes.Add([byte[]] $one.Bytes) }
+    [IO.File]::WriteAllBytes($sumsMany, [Text.Encoding]::ASCII.GetBytes("$('5' * 64)  qKVM-Desktop-0.2.0-windows-arm64.zip`n"))
+    $script:openings = 0
+    $wrote = Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs $manyOut -Passphrase $passphrase
+    Assert-SigningTest ($script:openings -eq 1) "The key was opened $($script:openings) times for three files."
+    Assert-SigningTest (@($wrote).Count -eq 3) 'Not every file''s signature was said.'
+    for ($at = 0; $at -lt 3; $at++) {
+        $sig = [IO.File]::ReadAllBytes($manyOut[$at])
+        Assert-SigningTest (Test-ReleaseSignature -Data $readBytes[$at] -Signature $sig -PublicKey $made.PublicKey) "Signature $at is not of the bytes read of its own file."
+        Assert-SigningTest (-not (Test-ReleaseSignature -Data $readBytes[($at + 1) % 3] -Signature $sig -PublicKey $made.PublicKey)) "Signature $at checks against another file."
+    }
+    Assert-SigningTest (-not (Test-ReleaseSignature -Data ([IO.File]::ReadAllBytes($sumsMany)) -Signature ([IO.File]::ReadAllBytes($manyOut[2])) -PublicKey $made.PublicKey)) 'The file as it was changed after it was read was signed.'
+    # Any one file that is no release file, or not current, or named twice: nothing signed, and it is named.
+    $notRelease = Write-TestFile 'not-a-release.txt' "just some words that are no release file at all, long enough to be looked at`n"
+    Expect-SigningRefusal { Get-SignableFiles @($payload, $notRelease, $armPayload) } 'not-a-release\.txt.*Nothing was signed'
+    $expiredMany = Write-TestFile 'expired-many.json' (& $withDates $now.AddDays(-10) $now.AddDays(-1))
+    Expect-SigningRefusal { Get-SignableFiles @($payload, $armPayload, $expiredMany) } 'expired-many\.json.*not current.*Nothing was signed'
+    Expect-SigningRefusal { Get-SignableFiles @($payload, $armPayload, $payload) } 'named twice'
+    Expect-SigningRefusal { Get-SignableFiles @() } 'Name the files'
+    # A signature's place taken, named twice, or one of the files signed, or one missing: nothing signed, nothing left.
+    $read = Get-SignableFiles @($payload, $armPayload)
+    $script:openings = 0
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs @("$payload.r2.sig", $manyOut[1]) -Passphrase $passphrase } 'there already'
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs @("$payload.r3.sig", "$payload.r3.sig") -Passphrase $passphrase } 'named twice'
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs @("$payload.r4.sig") -Passphrase $passphrase } 'one signature file of its own'
+    Assert-SigningTest ($script:openings -eq 0) 'The key was opened for files whose signatures had nowhere to go.'
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs @("$payload.r5.sig", "$armPayload.r5.sig") -Passphrase $wrong } 'passphrase does not open'
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $otherKey.PublicKey -What $read -Outputs @("$payload.r5.sig", "$armPayload.r5.sig") -Passphrase $passphrase } 'not the one the program pins'
+    # One that cannot be written (its folder is not there): none left, the first taken away again.
+    Expect-SigningRefusal { Invoke-SignReleaseFiles -Key $keyFile -PublicKey $made.PublicKey -What $read -Outputs @("$payload.r6.sig", (Join-Path $public 'no-such-folder\x.sig')) -Passphrase $passphrase } 'None was left'
+    foreach ($place in "$notRelease.sig", "$expiredMany.sig", "$payload.r2.sig", "$payload.r3.sig", "$payload.r4.sig", "$payload.r5.sig", "$armPayload.r5.sig", "$payload.r6.sig") {
+        Assert-SigningTest (-not (Test-Path -LiteralPath $place)) "A refusal left $place."
+    }
+
+    # 8. Several feeds signed again with one passphrase: each new payload made and shown (its feed's name and the
+    # SHA-256 of the bytes then signed) before the key is opened, once; each new feed of its own payload; where any one
+    # does not read or its new file's place is taken, nothing.
+    $armSignature = Invoke-SignRelease -Key $keyFile -PublicKey $made.PublicKey -File $armPayload -Output "$armPayload.sig" -Passphrase $passphrase
+    $armFeed = Join-Path $public 'stable-arm64.json'
+    & "$PSScriptRoot/assemble_update_feed.ps1" -Payload $armPayload -Signature $armSignature -PublicKey $made.PublicKey -Output $armFeed | Out-Null
+    $feeds = @($feed, $setupFeed, $armFeed)
+    $fresh = @($feeds | ForEach-Object { Get-RefreshedPayload -Feed $_ -PublicKey $made.PublicKey -ValidDays 30 -Now $later })
+    $freshOut = @((Join-Path $public 'many-stable.json'), (Join-Path $public 'many-stable-setup.json'), (Join-Path $public 'many-stable-arm64.json'))
+    $script:openings = 0
+    $wroteFeeds = Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $fresh -Outputs $freshOut -Passphrase $passphrase
+    Assert-SigningTest ($script:openings -eq 1 -and @($wroteFeeds).Count -eq 3) "Three feeds were refreshed with $($script:openings) openings of the key, $(@($wroteFeeds).Count) written."
+    for ($at = 0; $at -lt 3; $at++) {
+        $newBytes = Read-SignedFeed -Feed $freshOut[$at] -PublicKey $made.PublicKey
+        Assert-SigningTest ($fresh[$at].Name -ceq (Split-Path -Leaf $feeds[$at])) "Feed $at is not shown by its name."
+        Assert-SigningTest ($fresh[$at].Sha256 -ceq [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($newBytes)).ToLowerInvariant()) "Feed $at's SHA-256 shown is not that of the payload it signed."
+        $before = Test-UpdatePayload -Bytes (Read-SignedFeed -Feed $feeds[$at] -PublicKey $made.PublicKey) -AllowExpired
+        $after = Test-UpdatePayload -Bytes $newBytes
+        foreach ($name in @($UpdatePayloadFields | Where-Object { $_ -cnotin 'published', 'expires' })) {
+            Assert-SigningTest ($after[$name] -ceq $before[$name]) "Feed $at refreshed changed $name."
+        }
+    }
+    Assert-SigningTest ((Get-FeedName $fresh[2].Fields.platform) -ceq 'stable-arm64.json') 'The ARM64 feed is not served as stable-arm64.json.'
+    # The set refreshed is the one a release serves (review armp-1 L6): the four platforms once each, at one version,
+    # each feed read from a file of a served name of that very name's kind; fewer only where -Partial says so, and
+    # those left out named; and the upload of each under the name it is served at, never cached.
+    $feedSet = Get-FeedSetRefusals -What $fresh
+    Assert-SigningTest (@($feedSet.Refusals | Where-Object { $_ -match 'not the whole set: stable-arm64-setup\.json is not among them' }).Count -eq 1) "Three feeds of four were taken for the whole set ($(@($feedSet.Refusals) -join '; '))."
+    $feedSet = Get-FeedSetRefusals -What $fresh -Partial
+    Assert-SigningTest (@($feedSet.Refusals).Count -eq 0 -and (@($feedSet.Missing) -join ',') -ceq 'stable-arm64-setup.json') "Three feeds of four, said to be fewer, were not taken with the one left out named ($(@($feedSet.Refusals) -join '; '))."
+    $madeUp = { param([string] $name, [string] $platform, [string] $version = '0.2.0') [pscustomobject]@{ Name = $name; Fields = [ordered]@{ platform = $platform; version = $version } } }
+    $four = @((& $madeUp 'stable.json' 'windows-x64-portable'), (& $madeUp 'stable-setup.json' 'windows-x64-setup'), (& $madeUp 'stable-arm64.json' 'windows-arm64-portable'),
+        (& $madeUp 'stable-arm64-setup.json' 'windows-arm64-setup'))
+    $feedSet = Get-FeedSetRefusals -What $four
+    Assert-SigningTest (@($feedSet.Refusals).Count -eq 0 -and @($feedSet.Missing).Count -eq 0) "The four feeds were not taken as the whole set ($(@($feedSet.Refusals) -join '; '))."
+    $renamed = @((& $madeUp 'stable-new.json' 'windows-x64-portable'), (& $madeUp 'refresh-2.json' 'windows-x64-setup'), $four[2], $four[3])
+    Assert-SigningTest (@((Get-FeedSetRefusals -What $renamed).Refusals).Count -eq 0) 'Feeds read from files of other names than the served ones were refused.'
+    foreach ($case in @(
+            @(@($four[0], $four[1], $four[2], (& $madeUp 'stable-arm64-setup.json' 'windows-x64-setup')), 'stable-arm64-setup\.json holds windows-x64-setup', 'A feed of one kind read from the served name of another'),
+            @(@($four[0], $four[0], $four[2], $four[3]), 'windows-x64-portable is there twice', 'A platform twice'),
+            @(@($four[0], $four[1], $four[2], (& $madeUp 'stable-arm64-setup.json' 'windows-arm64-setup' '0.2.1')), 'more than one version \(0\.2\.0, 0\.2\.1\)', 'Feeds of two versions'),
+            @(@($four[0], $four[1], $four[2], (& $madeUp 'stable-arm64-msix.json' 'windows-arm64-msix')), 'windows-arm64-msix is no feed a release serves', 'A feed of a platform no release serves'))) {
+        $refused = @((Get-FeedSetRefusals -What $case[0] -Partial).Refusals)
+        Assert-SigningTest (@($refused | Where-Object { $_ -match $case[1] }).Count -eq 1) "$($case[2]) was not refused ($($refused -join '; '))."
+    }
+    $lines = @(Get-FeedUploadLines -What $four -Written @('C:\f\a.json', 'C:\f\b.json', 'C:\f\c.json', 'C:\f\d.json') -Bucket 'qkvm-downloads')
+    $served = @('stable.json', 'stable-setup.json', 'stable-arm64.json', 'stable-arm64-setup.json')
+    for ($at = 0; $at -lt 4; $at++) {
+        Assert-SigningTest ($lines[$at] -ceq "npx --yes wrangler@4.152.0 r2 object put `"qkvm-downloads/desktop/$($served[$at])`" --file `"C:\f\$([char] (97 + $at)).json`" --content-type `"application/json`" --cache-control `"no-cache`" --remote") "Feed $at's upload is not said as release_commands.ps1 says it ($($lines[$at]))."
+    }
+    Assert-SigningTest ($lines.Count -eq 4) "Not one upload for each refreshed feed ($($lines.Count))."
+    $refreshText = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'refresh_feed.ps1'))
+    $setAt = $refreshText.IndexOf('$set = Get-FeedSetRefusals -What $what -Partial:$Partial')
+    Assert-SigningTest ($setAt -gt 0 -and $setAt -lt $refreshText.IndexOf('$passphrase = Read-ReleasePassphrase') -and $refreshText.Contains('if (@($set.Refusals).Count) { throw') -and
+        $refreshText.Contains('Get-FeedUploadLines -What $what -Written $written -Bucket $Bucket')) 'refresh_feed.ps1 does not hold the feeds to the set a release serves before it asks for the passphrase, or does not say their uploads.'
+    Expect-SigningRefusal { Get-RefreshedPayload -Feed $tamperedFeed -PublicKey $made.PublicKey -ValidDays 30 } 'not signed by the key the program pins'
+    $mixed = @($fresh[0], $fresh[1])
+    $script:openings = 0
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $mixed -Outputs @((Join-Path $public 'r7a.json'), $freshOut[2]) -Passphrase $passphrase } 'there already'
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $mixed -Outputs @((Join-Path $public 'r7b.json'), $feeds[0]) -Passphrase $passphrase } 'there already'
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What @($fresh[0], $fresh[0]) -Outputs @((Join-Path $public 'r7c.json'), (Join-Path $public 'r7d.json')) -Passphrase $passphrase } 'named twice'
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $mixed -Outputs @((Join-Path $public 'r7g.json'), (Join-Path $public 'r7g.json')) -Passphrase $passphrase } 'named twice'
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $mixed -Outputs @((Join-Path $public 'r7e.json')) -Passphrase $passphrase } 'one new file of its own'
+    Assert-SigningTest ($script:openings -eq 0) 'The key was opened for feeds whose new files had nowhere to go.'
+    Expect-SigningRefusal { Invoke-RefreshFeeds -Key $keyFile -PublicKey $made.PublicKey -What $mixed -Outputs @((Join-Path $public 'r7f.json'), (Join-Path $public 'no-such-folder\y.json')) -Passphrase $passphrase } 'None was left'
+    foreach ($place in 'r7a.json', 'r7b.json', 'r7c.json', 'r7d.json', 'r7e.json', 'r7f.json', 'r7g.json') {
+        Assert-SigningTest (-not (Test-Path -LiteralPath (Join-Path $public $place))) "A refusal left $place."
+    }
+    Remove-Item Function:\Open-ReleaseKey
 
     $publicFixture = [ordered]@{
         source = 'prepare_update_payload.ps1 -Portable, Invoke-SignRelease (sign_release.ps1), assemble_update_feed.ps1, then Invoke-RefreshFeed (refresh_feed.ps1); a throwaway encrypted .NET P-256 key, removed'

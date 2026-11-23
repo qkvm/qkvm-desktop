@@ -24,16 +24,27 @@ function Expect-UpdateRefusal([scriptblock] $Operation, [string] $Because = '') 
 # is kept for the C++ verifier (the private key has already been disposed of: only the public coordinates, the signed
 # feed and a fixed verification time).
 function Test-Kind([string] $Kind, [string] $Ending, [string] $Platform, [string] $FeedName, [switch] $Portable,
-    [switch] $Setup) {
+    [switch] $Setup, [string] $Arch = 'x64') {
     $package = Join-Path $folder "test$Ending"
     $payload = Join-Path $folder "payload-$Kind.json"
     $signature = Join-Path $folder "signature-$Kind.bin"
     $feed = Join-Path $folder "feed-$Kind.json"
     [IO.File]::WriteAllBytes($package, [Text.Encoding]::UTF8.GetBytes('A made-up test package; never installed.'))
-    & "$PSScriptRoot/prepare_update_payload.ps1" -TestPackage -Portable:$Portable -Setup:$Setup -Package $package -Version '0.2.0' `
+    $before = [DateTime]::UtcNow
+    & "$PSScriptRoot/prepare_update_payload.ps1" -TestPackage -Portable:$Portable -Setup:$Setup -Arch $Arch -Package $package -Version '0.2.0' `
         -PackageUrl "https://updates.example.test/qkvm-0.2.0$Ending" -Notes 'Test release' -Output $payload | Out-Null
+    $after = [DateTime]::UtcNow
     $payloadBytes = [IO.File]::ReadAllBytes($payload)
-    $parsed = [Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json
+    $parsed = [Text.Encoding]::UTF8.GetString($payloadBytes) | ConvertFrom-Json -DateKind String
+    # Published ten minutes before it was made (and so before it is signed): a PC whose clock is a little behind takes
+    # it; the program's own allowance of 300 s for a clock ahead stays as it is (i020 step 6). Expiring the days after
+    # it was made, as before.
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $styles = [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal
+    $published = [DateTime]::ParseExact([string] $parsed.published, "yyyy-MM-dd'T'HH:mm:ss'Z'", $culture, $styles)
+    $expires = [DateTime]::ParseExact([string] $parsed.expires, "yyyy-MM-dd'T'HH:mm:ss'Z'", $culture, $styles)
+    Assert-UpdateTest ($published -ge $before.AddMinutes(-10).AddSeconds(-1) -and $published -le $after.AddMinutes(-10)) "The $Kind payload is published at $($parsed.published), not ten minutes before it was made ($($before.ToString('o')))."
+    Assert-UpdateTest ($expires -ge $before.AddDays(7).AddSeconds(-1) -and $expires -le $after.AddDays(7)) "The $Kind payload expires at $($parsed.expires), not seven days after it was made."
     Assert-UpdateTest ($parsed.product -ceq 'qkvm-desktop' -and $parsed.platform -ceq $Platform) "Wrong product or platform for $Kind."
     Assert-UpdateTest ($parsed.package -ceq "https://updates.example.test/qkvm-0.2.0$Ending") "Wrong package address for $Kind."
     Assert-UpdateTest ($parsed.bytes -eq (Get-Item -LiteralPath $package).Length) 'Wrong package size.'
@@ -57,7 +68,7 @@ function Test-Kind([string] $Kind, [string] $Ending, [string] $Platform, [string
     Assert-UpdateTest ($envelope.payload -ceq [Convert]::ToBase64String($payloadBytes)) 'Payload bytes changed during assembly.'
     Assert-UpdateTest ($envelope.signature -ceq [Convert]::ToBase64String($signed)) 'Signature bytes changed during assembly.'
     $publicFixture = [ordered]@{
-        source = "prepare_update_payload.ps1$(if ($Portable) { ' -Portable' })$(if ($Setup) { ' -Setup' }) and assemble_update_feed.ps1; ephemeral .NET P-256 key"
+        source = "prepare_update_payload.ps1$(if ($Portable) { ' -Portable' })$(if ($Setup) { ' -Setup' }) -Arch $Arch and assemble_update_feed.ps1; ephemeral .NET P-256 key"
         checked_at = [Text.Encoding]::UTF8.GetString($payloadBytes) | Select-String -Pattern '"published":"([^"]+)"' |
             ForEach-Object { $_.Matches[0].Groups[1].Value }
         public_key = $publicHex
@@ -71,6 +82,20 @@ function Test-Kind([string] $Kind, [string] $Ending, [string] $Platform, [string
 $msix = Test-Kind -Kind 'msix' -Ending '.msix' -Platform 'windows-x64-msix' -FeedName 'stable.json'
 $portable = Test-Kind -Kind 'portable' -Ending '.zip' -Platform 'windows-x64-portable' -FeedName 'stable.json' -Portable
 $setup = Test-Kind -Kind 'setup' -Ending '-setup.exe' -Platform 'windows-x64-setup' -FeedName 'stable-setup.json' -Setup
+# Windows on Arm's (0.2.0): its own platforms, served as stable-arm64.json and stable-arm64-setup.json beside the others.
+$null = Test-Kind -Kind 'arm64-msix' -Ending '.msix' -Platform 'windows-arm64-msix' -FeedName 'stable-arm64.json' -Arch arm64
+$null = Test-Kind -Kind 'arm64-portable' -Ending '.zip' -Platform 'windows-arm64-portable' -FeedName 'stable-arm64.json' -Portable -Arch arm64
+$null = Test-Kind -Kind 'arm64-setup' -Ending '-setup.exe' -Platform 'windows-arm64-setup' -FeedName 'stable-arm64-setup.json' -Setup -Arch arm64
+# (Said in capitals, the kind is written as the program reads it: in small letters.)
+$null = Test-Kind -Kind 'arm64-capitals' -Ending '.zip' -Platform 'windows-arm64-portable' -FeedName 'stable-arm64.json' -Portable -Arch ARM64
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -TestPackage -Portable -Arch 'aarch64' -Package $portable.Package -Version '0.2.0' -PackageUrl 'https://updates.example.test/a.zip' -Notes 'Test' -Output (Join-Path $folder 'refused-arch.json') } 'aarch64'
+Assert-UpdateTest (-not (Test-Path -LiteralPath (Join-Path $folder 'refused-arch.json'))) 'A payload of an unknown kind of Windows was written.'
+foreach ($named in @(
+        @('windows-x64-portable', 'stable.json'), @('windows-x64-msix', 'stable.json'), @('windows-x64-setup', 'stable-setup.json'),
+        @('windows-arm64-portable', 'stable-arm64.json'), @('windows-arm64-msix', 'stable-arm64.json'),
+        @('windows-arm64-setup', 'stable-arm64-setup.json'))) {
+    Assert-UpdateTest ((Get-FeedName $named[0]) -ceq $named[1]) "$($named[0]) is not served as $($named[1])."
+}
 
 $original = [IO.File]::ReadAllText($msix.Feed)
 Expect-UpdateRefusal { & "$PSScriptRoot/assemble_update_feed.ps1" -Payload $msix.Payload -Signature $msix.Signature -PublicKey $msix.Public -Output $msix.Feed }
@@ -118,10 +143,33 @@ Assert-UpdateTest (-not (Test-Path -LiteralPath $refusedFeed)) 'A refused payloa
 $standSetup = Join-Path $folder 'qKVM-Desktop-0.2.0-windows-x64-setup.exe'
 Copy-Item -LiteralPath (Join-Path $env:SystemRoot 'System32\where.exe') -Destination $standSetup
 Assert-UpdateTest ((Get-SetupVersion -Setup $standSetup) -ceq (Get-Item -LiteralPath $standSetup).VersionInfo.ProductVersion.Trim()) 'The version of a setup was not read from its file version information.'
-Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed } 'says version'
+# (Its record as build_setup.ps1 writes it, setup-record.json: of that very setup, and of the kinds it carries; review
+# armp-1 L7. A setup of x64's package alone, as the gate makes one under the release's name, carries no ARM64 program.)
+function New-SetupRecord([string] $Setup, [string[]] $Kinds, [string] $Version = '0.2.0') {
+    $file = Join-Path $folder "setup-record-$([guid]::NewGuid().ToString('N')).json"
+    [ordered]@{ schema = 2; version = $Version; architectures = $Kinds
+        setup = [ordered]@{ name = Split-Path -Leaf $Setup; bytes = (Get-Item -LiteralPath $Setup).Length; sha256 = (Get-FileHash -LiteralPath $Setup -Algorithm SHA256).Hash.ToLowerInvariant() } } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $file -Encoding utf8
+    return $file
+}
+$bothKinds = New-SetupRecord $standSetup @('x64', 'arm64')
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord $bothKinds } 'says version'
 $noVersion = Join-Path $folder 'none-setup.exe'
 [IO.File]::WriteAllBytes($noVersion, [Text.Encoding]::UTF8.GetBytes('No program at all; never run.'))
-Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $noVersion -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed } 'says no version'
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $noVersion -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord (New-SetupRecord $noVersion @('x64', 'arm64')) } 'says no version'
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed } 'Name the setup''s record with -SetupRecord'
+$x64Only = New-SetupRecord $standSetup @('x64')
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Arch arm64 -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord $x64Only } 'carries the program for x64 alone, not for arm64'
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord (New-SetupRecord $noVersion @('x64', 'arm64')) } 'is not the record of this setup'
+# (Of the same size and other bytes: what tells them apart is the SHA-256.)
+$sameSize = New-SetupRecord $standSetup @('x64', 'arm64')
+$otherBytes = Get-Content -LiteralPath $sameSize -Raw | ConvertFrom-Json
+$otherBytes.setup.sha256 = '0' * 64
+$otherBytes | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $sameSize -Encoding utf8
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord $sameSize } 'is not the record of this setup'
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord (New-SetupRecord $standSetup @('x64', 'arm64') '0.1.9') } 'is not the record of this setup of 0\.2\.0'
+# (Of x64 the same: the record must carry x64 too, letter for letter.)
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Setup -Package $standSetup -Version '0.2.0' -PackageUrl 'https://updates.example.test/a-setup.exe' -Notes 'Test' -Output $refusedFeed -SetupRecord (New-SetupRecord $standSetup @('X64', 'arm64')) } 'not for x64'
 Assert-UpdateTest (-not (Test-Path -LiteralPath $refusedFeed)) 'A refused setup payload left an output file.'
 
 # Only a current release payload is assembled into a feed: a payload of another platform, expired, or no payload at all
@@ -180,6 +228,26 @@ $notZip = Join-Path $folder 'not-a.zip'
 [IO.File]::WriteAllBytes($notZip, [Text.Encoding]::UTF8.GetBytes('not a zip at all'))
 Expect-UpdateRefusal { Get-PortableProgramVersion -Zip $notZip -Beside $folder } 'not a ZIP'
 Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Portable -Package $inFolder -Version '0.2.0' -PackageUrl 'https://updates.example.test/a.zip' -Notes 'Test' -Output $refusedFeed } 'is version'
+# The ZIP's program is of the kind of Windows the payload names, by its PE machine (where.exe: this PC's, x64).
+Assert-UpdateTest ((Get-PortableProgramArchitecture -Zip $inFolder) -ceq 'x64') 'The kind of Windows of the ZIP''s program was not read.'
+Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Portable -Arch arm64 -Package $inFolder -Version '0.2.0' -PackageUrl 'https://updates.example.test/a.zip' -Notes 'Test' -Output $refusedFeed } 'a program for x64 Windows, not for arm64'
+function New-MachineZip([string] $Name, [uint16] $Machine) {
+    $tree = Join-Path $folder "machine-$Name"
+    New-Item -ItemType Directory -Path "$tree/qKVM" -Force | Out-Null
+    $image = [IO.File]::ReadAllBytes($stand)
+    [Array]::Copy([BitConverter]::GetBytes($Machine), 0, $image, [BitConverter]::ToInt32($image, 0x3C) + 4, 2)
+    [IO.File]::WriteAllBytes("$tree/qKVM/qkvm-desktop.exe", $image)
+    $archive = Join-Path $folder "machine-$Name.zip"
+    [IO.Compression.ZipFile]::CreateFromDirectory($tree, $archive)
+    return $archive
+}
+Assert-UpdateTest ((Get-PortableProgramArchitecture -Zip (New-MachineZip 'arm64' 0xAA64)) -ceq 'arm64') 'An ARM64 program in a ZIP was not read as one.'
+$x86 = New-MachineZip 'x86' 0x014C
+Assert-UpdateTest ((Get-PortableProgramArchitecture -Zip $x86) -ceq 'machine 0x014C') 'A program of another kind of Windows was not said as it is.'
+foreach ($kind in 'x64', 'arm64') {
+    Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Portable -Arch $kind -Package $x86 -Version '0.2.0' -PackageUrl 'https://updates.example.test/a.zip' -Notes 'Test' -Output $refusedFeed } "a program for machine 0x014C Windows, not for $kind"
+}
+Assert-UpdateTest ((Get-PeArchitecture ([Text.Encoding]::ASCII.GetBytes('no program at all, long enough to be looked at by its header'))) -ceq 'no Windows program') 'What is no program was taken for one.'
 Expect-UpdateRefusal { & "$PSScriptRoot/prepare_update_payload.ps1" -Portable -Package $none -Version '0.2.0' -PackageUrl 'https://updates.example.test/a.zip' -Notes 'Test' -Output $refusedFeed } 'exactly one qkvm-desktop.exe'
 Assert-UpdateTest (-not (Test-Path -LiteralPath $refusedFeed)) 'A refused portable payload left an output file.'
 Write-Output "$checks release-tool checks passed. Public test artifacts: $folder"

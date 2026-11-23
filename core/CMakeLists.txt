@@ -5,7 +5,11 @@
 qt_add_library(qkvm_core STATIC
     include/qkvm/core/server_details.h src/server_details.cpp
     include/qkvm/core/read_ahead.h src/read_ahead.cpp
+    include/qkvm/core/carried_image.h src/carried_image.cpp
+    include/qkvm/core/server_console.h
     include/qkvm/core/server_screen.h src/server_screen.cpp src/screen_reader.h src/screen_reader.cpp
+    include/qkvm/core/rfb_screen.h src/rfb_screen.cpp src/rfb_reader.h src/rfb_reader.cpp src/jpeg_pixels.h
+    src/jpeg_pixels.cpp
     include/qkvm/core/server_live.h src/server_live.cpp
     include/qkvm/core/typed_keys.h src/typed_keys.cpp
     include/qkvm/core/incidents.h src/incidents.cpp
@@ -27,6 +31,7 @@ qt_add_library(qkvm_core STATIC
     include/qkvm/core/exchange.h
     include/qkvm/core/exchange_work.h
     include/qkvm/core/board_holds.h
+    include/qkvm/core/kept_with.h
     include/qkvm/core/kvm_adding.h
     include/qkvm/core/kvm_certificate.h
     include/qkvm/core/kvm_editing.h
@@ -37,15 +42,21 @@ qt_add_library(qkvm_core STATIC
     include/qkvm/core/jetkvm_connection.h
     include/qkvm/core/jetkvm_device.h
     include/qkvm/core/jetkvm_kept.h
+    include/qkvm/core/jetkvm_media.h
     include/qkvm/core/jetkvm_live.h
     include/qkvm/core/jetkvm_viewer.h
     include/qkvm/core/redfish_answers.h
     include/qkvm/core/redfish_device.h
+    include/qkvm/core/proxmox_adding.h
+    include/qkvm/core/proxmox_answers.h
+    include/qkvm/core/proxmox_device.h
     include/qkvm/core/kvmd_device.h
     include/qkvm/core/kvmd_input.h
     include/qkvm/core/device_asker.h
     include/qkvm/core/kvmd_live.h
+    include/qkvm/core/kvmd_media.h
     include/qkvm/core/own_device.h
+    include/qkvm/core/own_media.h
     include/qkvm/core/own_sign_in.h
     include/qkvm/core/sign_in_pacing.h
     include/qkvm/core/pacing_file.h
@@ -53,7 +64,9 @@ qt_add_library(qkvm_core STATIC
     include/qkvm/core/live.h
     include/qkvm/core/live_link.h
     include/qkvm/core/local_wall.h
+    include/qkvm/core/media_place.h
     include/qkvm/core/multipart_pictures.h
+    include/qkvm/core/network_end.h
     include/qkvm/core/own_actions.h
     include/qkvm/core/screen_watch.h
     include/qkvm/core/scrypt.h
@@ -65,6 +78,8 @@ qt_add_library(qkvm_core STATIC
     include/qkvm/core/setup_overrides.h
     include/qkvm/core/strict_json.h
     include/qkvm/core/tls.h
+    include/qkvm/core/vnc_auth.h
+    include/qkvm/core/vnc_device.h
     include/qkvm/core/wall_exchange.h
     include/qkvm/core/wall_feed.h
     include/qkvm/core/wall_source.h
@@ -73,6 +88,7 @@ qt_add_library(qkvm_core STATIC
     src/cng.h
     src/connection.cpp
     src/device_line.cpp
+    src/line_threads.h src/line_threads.cpp
     src/discovery.cpp
     src/h264_rtp.cpp
     src/picture_box.cpp
@@ -96,8 +112,12 @@ qt_add_library(qkvm_core STATIC
     src/pacing_file.cpp
     src/jetkvm_connection.cpp
     src/jetkvm_keys.cpp
+    src/jetkvm_words.h src/jetkvm_words.cpp
     src/jetkvm_typing.cpp
     src/jetkvm_device.cpp
+    src/jetkvm_media.cpp
+    src/jetkvm_media_answers.cpp
+    src/jetkvm_upload.cpp
     src/jetkvm_live.cpp
     src/jetkvm_viewer.cpp
     src/redfish_answers.cpp
@@ -105,9 +125,17 @@ qt_add_library(qkvm_core STATIC
     src/redfish_console_way.cpp
     src/redfish_screen.cpp
     src/redfish_setup.cpp
+    src/proxmox_adding.cpp
+    src/proxmox_answers.cpp
+    src/proxmox_device.cpp
+    src/proxmox_media.cpp
+    src/proxmox_screen.cpp
     src/board_holds.cpp
     src/kvmd_board.cpp
     src/kvmd_fingerbot.cpp
+    src/kvmd_media.cpp
+    src/kvmd_media_answers.cpp
+    src/local_wall_media.cpp
     src/kvmd_device.cpp
     src/kvmd_input.cpp
     src/kvmd_live.cpp
@@ -116,6 +144,7 @@ qt_add_library(qkvm_core STATIC
     src/local_wall.cpp
     src/own_sign_in.cpp
     src/multipart_pictures.cpp
+    src/network_end.cpp
     src/own_actions.cpp
     src/screen_watch.cpp
     src/scrypt.cpp
@@ -125,6 +154,8 @@ qt_add_library(qkvm_core STATIC
     src/setup_overrides.cpp
     src/strict_json.cpp
     src/tls.cpp
+    src/vnc_auth.cpp
+    src/vnc_device.cpp
     src/wall_exchange.cpp
     src/wall_feed.cpp
     src/wiped.cpp
@@ -140,10 +171,28 @@ add_executable(qkvm-make-jetkvm-layouts tools/make_jetkvm_layouts.cpp)
 set_target_properties(qkvm-make-jetkvm-layouts PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 target_link_libraries(qkvm-make-jetkvm-layouts PRIVATE qkvm_build)
 set(qkvm_layouts_made "${CMAKE_CURRENT_BINARY_DIR}/made/jetkvm_layouts.inc")
+# (A cross-build cannot run the tool it makes: it runs an x64 build's, QKVM_HOST_TOOLS in the top CMakeLists.txt.)
+set(qkvm_layouts_maker qkvm-make-jetkvm-layouts)
+set(qkvm_layouts_checked "")
+set(qkvm_layouts_maker_source "")
+if(CMAKE_CROSSCOMPILING)
+    set(qkvm_layouts_maker "${QKVM_HOST_TOOLS}/qkvm-make-jetkvm-layouts.exe")
+    if(NOT EXISTS "${qkvm_layouts_maker}")
+        message(FATAL_ERROR "A cross-build runs the x64 build's qkvm-make-jetkvm-layouts, and ${qkvm_layouts_maker} is "
+            "not there: build it first (cmake --build --preset debug --target qkvm-make-jetkvm-layouts), or say where it "
+            "is with QKVM_HOST_TOOLS.")
+    endif()
+    # (And made again where the tool's source changed, by a tool no older than it: an x64 build's of an earlier tree
+    # would make that tree's tables, and nothing would say so. tools/host_tool_check.cmake refuses it.)
+    set(qkvm_layouts_maker_source "${CMAKE_CURRENT_SOURCE_DIR}/tools/make_jetkvm_layouts.cpp")
+    set(qkvm_layouts_checked COMMAND "${CMAKE_COMMAND}" "-Dtool=${qkvm_layouts_maker}"
+        "-Dsource=${qkvm_layouts_maker_source}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/host_tool_check.cmake")
+endif()
 add_custom_command(OUTPUT "${qkvm_layouts_made}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/made"
-    COMMAND qkvm-make-jetkvm-layouts "${CMAKE_CURRENT_SOURCE_DIR}/data/jetkvm_layouts.py" "${qkvm_layouts_made}"
-    DEPENDS qkvm-make-jetkvm-layouts "${CMAKE_CURRENT_SOURCE_DIR}/data/jetkvm_layouts.py"
+    ${qkvm_layouts_checked}
+    COMMAND ${qkvm_layouts_maker} "${CMAKE_CURRENT_SOURCE_DIR}/data/jetkvm_layouts.py" "${qkvm_layouts_made}"
+    DEPENDS ${qkvm_layouts_maker} ${qkvm_layouts_maker_source} "${CMAKE_CURRENT_SOURCE_DIR}/data/jetkvm_layouts.py"
     COMMENT "Making the JetKVM keyboard layouts' tables" VERBATIM)
 target_sources(qkvm_core PRIVATE src/jetkvm_layouts.cpp "${qkvm_layouts_made}")
 target_include_directories(qkvm_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/made")
@@ -160,15 +209,19 @@ configure_file(update_channel.h.in update_channel.h @ONLY)
 target_include_directories(qkvm_core PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 # (bcrypt and crypt32: Windows' own cryptography and its reader of certificates, for the wall as a
 # file. No library is added for either.)
-# (qkvm_bmc: a server's own screen, read in the program's own process.)
-target_link_libraries(qkvm_core PUBLIC Qt6::Core Qt6::Network qkvm_base qkvm_bmc
-    PRIVATE qkvm_build qkvm_webrtc ws2_32 bcrypt crypt32 windowsapp)
+# (qkvm_bmc and qkvm_rfb: a server's own screen, read in the program's own process, AMI's console and OpenBMC's; and
+# FFmpeg's JPEG decoder, the engine's own, for the JPEGs of OpenBMC's console.)
+target_link_libraries(qkvm_core PUBLIC Qt6::Core Qt6::Network qkvm_base qkvm_bmc qkvm_rfb
+    PRIVATE qkvm_build qkvm_webrtc qkvm_ffmpeg ws2_32 bcrypt crypt32 windowsapp)
 # What a server's console says beside its frames is read in server_screen.cpp: that file is built with the standard
 # library's own checks in every build, as bmc/ is (bmc/CMakeLists.txt), and refuses a build without them. (The file
 # alone: what the checks would cost the rest of qkvm_core is not measured.)
 set_source_files_properties(src/server_screen.cpp PROPERTIES COMPILE_DEFINITIONS _MSVC_STL_HARDENING=1)
 # ...and so is where its frames are read and what they came to is held, off the interface thread (review 3's HIGH 1).
 set_source_files_properties(src/screen_reader.cpp PROPERTIES COMPILE_DEFINITIONS _MSVC_STL_HARDENING=1)
+# ...and the same for OpenBMC's console: where its RFB is read, and its JPEGs made into pixels.
+set_source_files_properties(src/rfb_reader.cpp src/rfb_screen.cpp src/jpeg_pixels.cpp
+    PROPERTIES COMPILE_DEFINITIONS _MSVC_STL_HARDENING=1)
 
 # A server for tests, and secrets kept in memory: here and wherever else the program's dealings with
 # a server are tested. And a wall of this PC's own that fails its test rather than have anything
@@ -201,8 +254,11 @@ qkvm_add_test(test_core_pacing_file SOURCES tests/test_pacing_file.cpp tests/mem
 qkvm_add_test(test_core_profile SOURCES tests/test_profile.cpp LIBRARIES qkvm_core)
 # A device's password and what is made of it for a sign-in, written over at every boundary where it changes hands (the
 # outside review, F5): under the debug heap's hook, which a release build has not (those cases are skipped there).
-qkvm_add_test(test_core_secrets_wiped SOURCES tests/test_secrets_wiped.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
+# (And a console line's API token, a Proxmox guest's, against a console by hand: rfb_console_by_hand.h.)
+qkvm_add_test(test_core_secrets_wiped SOURCES tests/test_secrets_wiped.cpp tests/rfb_console_by_hand.h
+    tests/proxmox_by_hand.h tests/proxmox_console_by_hand.h LIBRARIES qkvm_core qkvm_core_stand_in Qt6::Gui)
 target_compile_definitions(test_core_secrets_wiped PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+target_include_directories(test_core_secrets_wiped PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
 qkvm_add_test(test_core_server_details SOURCES tests/test_server_details.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 qkvm_add_test(test_core_discovery SOURCES tests/test_discovery.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 # The wall as a file, read and written by the program itself: against files a QKVM server's own
@@ -227,28 +283,87 @@ target_compile_definitions(test_core_kvm_adding PRIVATE QKVM_TESTDATA="${CMAKE_S
 qkvm_add_test(test_core_kvm_editing SOURCES tests/test_kvm_editing.cpp LIBRARIES qkvm_core qkvm_core_stand_in
     TIMEOUT 450)
 target_compile_definitions(test_core_kvm_editing PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
-qkvm_add_test(test_core_kvm_probe SOURCES tests/test_kvm_probe.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
+qkvm_add_test(test_core_kvm_probe
+    SOURCES tests/test_kvm_probe.cpp tests/signer_far_away.h tests/signer_far_away.cpp
+    LIBRARIES qkvm_core qkvm_core_stand_in)
 target_compile_definitions(test_core_kvm_probe PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_core_kvmd_answers SOURCES tests/test_kvmd_answers.cpp LIBRARIES qkvm_core)
 qkvm_add_test(test_core_kvmd_console_line
     SOURCES tests/test_kvmd_console_line.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 target_compile_definitions(test_core_kvmd_console_line PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
-qkvm_add_test(test_core_device_asker SOURCES tests/test_device_asker.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
+qkvm_add_test(test_core_device_asker
+    SOURCES tests/test_device_asker.cpp tests/signer_far_away.h tests/signer_far_away.cpp
+    LIBRARIES qkvm_core qkvm_core_stand_in)
 target_compile_definitions(test_core_device_asker PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# What a manager that endOffThisThread ended leaves behind on the thread it was made on, looked at past the longest Qt
+# keeps an idle line, which the case measures (120 s is possible): 300.
+qkvm_add_test(test_core_network_end SOURCES tests/test_network_end.cpp LIBRARIES qkvm_core qkvm_core_stand_in
+    TIMEOUT 300)
+target_compile_definitions(test_core_network_end PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_core_redfish_answers SOURCES tests/test_redfish_answers.cpp LIBRARIES qkvm_core)
 # A server's controller against stand-ins on this PC's loopback address, some of which wait out a sign-out
 # that dawdles or a pause after a refused password: a program for each part of its driver (its sign-in and
 # sessions; which server answers; how it is; its buttons; the way into its console), each well inside the
 # limit of one (one program was at three quarters of it in gate 23, and grew with every step).
-foreach(part IN ITEMS sign_in which_server look buttons console setup)
+foreach(part IN ITEMS sign_in which_server look buttons console setup setup_queued rfb)
     qkvm_add_test(test_core_redfish_${part}
         SOURCES tests/test_redfish_${part}.cpp tests/redfish_device_tests.h LIBRARIES qkvm_core qkvm_core_stand_in)
+    target_include_directories(test_core_redfish_${part} PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
     target_compile_definitions(test_core_redfish_${part} PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 endforeach()
 # Measured: its sign-in and sessions took 86.3 to 93.8 s in gate 33's three runs (the sanitizer's the slowest), and
 # 110 s alone in Debug once three drivers at a slow board's pace came in (42175c1): about 135 s to be expected for the
 # sanitizer's on a busy PC. 220, about 63% above that.
 set_tests_properties(test_core_redfish_sign_in PROPERTIES TIMEOUT 220)
+# Its start into BIOS setup took 157 s (release), 161 s (debug) and 163 s (the sanitizer's) on the build box once the
+# rows of D1's followed task came in, and with the rows of round 3 of the fuzz work's review 177 to 185 s in gate box11;
+# but 236 to 475 s on the loaded build box (five builders' jobs beside a gate's), past the 400 it had, with the outside
+# review of 0.2.0's area 5 and a restart given room in the tests whose subject is not its time. Two programs since: the
+# press itself, what is kept beside the settings and the way out (setup); and a change the controller only queued, its
+# task followed, and the prune of records (setup_queued). Measured on the loaded build box: see the commit. 400 each.
+set_tests_properties(test_core_redfish_setup test_core_redfish_setup_queued PROPERTIES TIMEOUT 400)
+# A virtual machine on Proxmox VE (c9b, wave 2): what its API says, read without a network; and its driver against a
+# stand-in on this PC's loopback address (its token, its card, the guests a token may see).
+qkvm_add_test(test_core_proxmox_answers SOURCES tests/test_proxmox_answers.cpp LIBRARIES qkvm_core)
+qkvm_add_test(test_core_proxmox_device
+    SOURCES tests/test_proxmox_device.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_compile_definitions(test_core_proxmox_device PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# Rule 30: a guest is the one it was added for, by its SMBIOS UUID.
+qkvm_add_test(test_core_proxmox_same_guest
+    SOURCES tests/test_proxmox_same_guest.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_compile_definitions(test_core_proxmox_same_guest PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# Its power buttons: start, shut down, stop, reset, and the wait for a start or a stop with Proxmox's task.
+# Measured: 113.0 s Release, 115.0 s Debug and 116.9 s ASAN of 120 in gate box22 (2026-11-22), once the rows of the
+# outside review 2's 4.1, 4.2 and 4.4 came in, each of which waits out a slow reading, a bound or a late answer by
+# the clock: about the same in every preset, so the time is waited, not worked. 240, about twice the worst.
+qkvm_add_test(test_core_proxmox_power
+    SOURCES tests/test_proxmox_power.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in TIMEOUT 240)
+target_compile_definitions(test_core_proxmox_power PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# Its console: vncproxy's ticket, vncwebsocket on this program's own line, RFB with the ticket's one-time password.
+qkvm_add_test(test_core_proxmox_console
+    SOURCES tests/test_proxmox_console.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h
+    tests/proxmox_console_by_hand.h tests/rfb_console_by_hand.h tests/memory_secrets.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_include_directories(test_core_proxmox_console PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
+# On this PC's own wall: a guest added from what a token lists, its card, its stored shape (and that the published
+# 0.1.2 keeps it as it stands), its buttons through the wall, the number it gives kept with it.
+qkvm_add_test(test_core_local_wall_proxmox
+    SOURCES tests/test_local_wall_proxmox.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h
+    tests/memory_secrets.h tests/vnc_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_compile_definitions(test_core_local_wall_proxmox PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# (A VNC server by hand beside the guests: a wall of both families, after the rebase onto the VNC servers.)
+target_include_directories(test_core_local_wall_proxmox PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
+target_compile_definitions(test_core_proxmox_console PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# Its virtual media (step 7): an ISO image on Proxmox's storages in the guest's CD-ROM drive and taken out, rule 30
+# right before each change, and through this PC's own wall.
+qkvm_add_test(test_core_proxmox_media
+    SOURCES tests/test_proxmox_media.cpp tests/proxmox_device_tests.h tests/proxmox_by_hand.h tests/memory_secrets.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_compile_definitions(test_core_proxmox_media PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 # Measured: 64.5 to 66.6 s in gate 31's three runs; 87 s alone in Debug once the hold's rows came in (d8963b4), and the
 # PC busy with builders adds about an eighth. 160, about 57% above the worst to be expected (about 100 s).
 qkvm_add_test(test_core_jetkvm_device SOURCES tests/test_jetkvm_device.cpp LIBRARIES qkvm_core qkvm_core_stand_in
@@ -269,6 +384,14 @@ target_compile_definitions(test_core_kvmd_board PRIVATE QKVM_TESTDATA="${CMAKE_S
 qkvm_add_test(test_core_screen_watch SOURCES tests/test_screen_watch.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 # A Fingerbot paired with a Comet (rule 29): its presses in the board's hold, its word, its battery.
 qkvm_add_test(test_core_kvmd_fingerbot SOURCES tests/test_kvmd_fingerbot.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
+# A kvmd KVM's virtual media (A2): the state of its drive, kept as the web keeps it, and what is done to it.
+qkvm_add_test(test_core_kvmd_media SOURCES tests/test_kvmd_media.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
+# And an image carried there from this PC (A2): streamed from its file, one at a time, and nothing left of a cut.
+# This PC's own wall as the place of its kvmd KVMs' virtual media (A2): what it holds to before a driver is asked.
+qkvm_add_test(test_core_local_wall_media SOURCES tests/test_local_wall_media.cpp tests/far_away_file.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+qkvm_add_test(test_core_kvmd_upload SOURCES tests/test_kvmd_upload.cpp tests/far_away_file.h LIBRARIES qkvm_core
+    qkvm_core_stand_in)
 qkvm_add_test(test_core_kvmd_input SOURCES tests/test_kvmd_input.cpp LIBRARIES qkvm_core)
 qkvm_add_test(test_core_typed_keys SOURCES tests/test_typed_keys.cpp LIBRARIES qkvm_core)
 qkvm_add_test(test_core_jetkvm_layouts SOURCES tests/test_jetkvm_layouts.cpp LIBRARIES qkvm_core)
@@ -276,17 +399,45 @@ qkvm_add_test(test_core_kvmd_live SOURCES tests/test_kvmd_live.cpp LIBRARIES qkv
 qkvm_add_test(test_core_kvmd_stream SOURCES tests/test_kvmd_stream.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 target_compile_definitions(test_core_kvmd_stream PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_core_device_line SOURCES tests/test_device_line.cpp LIBRARIES qkvm_core)
-# A server's own screen against a controller's console by hand, which sends frames the tests' own writer makes.
-# Measured: 92.2 to 93.5 s in gate 35's three runs (of the default 120), and 106 s alone in Debug, as much under the
-# address sanitizer, once the reading off the interface thread came with its measuring rows (d635a0e5, d011ded0):
-# about 125 s to be expected on a busy PC. 200, about 60% above that, until the program is split (the screen's WIP).
-qkvm_add_test(test_core_server_screen SOURCES tests/test_server_screen.cpp tests/ami_console_by_hand.h
-    LIBRARIES qkvm_core qkvm_core_stand_in TIMEOUT 200)
-target_include_directories(test_core_server_screen PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests")
-target_compile_definitions(test_core_server_screen PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+target_compile_definitions(test_core_device_line PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+target_include_directories(test_core_device_line PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src") # (line_threads.h)
+# Every kind of device line while Windows judges its certificate and waits for a signer far away, and the program's
+# end meanwhile (the program started again, twice). Windows gives a far signer some 15 s a place, which a case that
+# goes wrong waits out for each line in turn: 240.
+qkvm_add_test(test_core_device_line_tls
+    SOURCES tests/test_device_line_tls.cpp tests/signer_far_away.h tests/signer_far_away.cpp
+    LIBRARIES qkvm_core qkvm_core_stand_in TIMEOUT 240)
+target_compile_definitions(test_core_device_line_tls PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+target_include_directories(test_core_device_line_tls PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src") # (line_threads.h)
+# A server's own screen against a controller's console by hand, which sends frames the tests' own writer makes, in
+# three programs by area, sharing server_screen_wall.h: the console's session and its manners; keys, the pointer and
+# typings over it; the same behind what waits to leave. One program of them all came to 92.2 to 93.5 s in gate 35's
+# three runs (of the default 120) and 106 s alone in Debug, as much under the address sanitizer, once the reading off
+# the interface thread came with its measuring rows (d635a0e5, d011ded0), and had 200 until it was split. Split, alone
+# in Debug on the loaded slow cores (2026-11-13): 57.6 to 62.5 s, 17.5 s and 33.4 s; the default 120 for each. With
+# part 4's second reading: 56.7, 17.7 and 64.8 s in Debug, 65.4, 19.0 and 71.7 s under the address sanitizer.
+foreach(part server_screen server_screen_input server_screen_backlog)
+    qkvm_add_test(test_core_${part} SOURCES tests/test_${part}.cpp tests/server_screen_wall.h
+        tests/ami_console_by_hand.h LIBRARIES qkvm_core qkvm_core_stand_in)
+    target_include_directories(test_core_${part} PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests")
+    target_compile_definitions(test_core_${part} PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+endforeach()
 qkvm_add_test(test_core_server_live SOURCES tests/test_server_live.cpp tests/ami_console_by_hand.h
     LIBRARIES qkvm_core qkvm_core_stand_in)
 target_include_directories(test_core_server_live PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests")
+# OpenBMC's console (RFB over /kvm/0) against a stand-in on this PC's loopback address; its JPEGs made with Qt's own.
+# (Its share and deadline tests wait out pauses, and its stream runs a minute. Measured on the slow cores through
+# CTest (2026-11-14): 156.9 s in Debug, 115.5 s in Release, 155.5 s under the address sanitizer. 400, some 2.5
+# times the most.)
+qkvm_add_test(test_core_rfb_screen SOURCES tests/test_rfb_screen.cpp tests/rfb_console_by_hand.h tests/vnc_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in Qt6::Gui TIMEOUT 400)
+target_include_directories(test_core_rfb_screen PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
+# The JPEG walk's exhaustive reading, and real JPEGs through the reader, a program of its own (round-5 review MEDIUM
+# 1). Measured as above: 30.4 s in Debug, 6.8 s in Release, 91.8 s under the address sanitizer (109.8 and 124.5 s
+# in earlier runs). 300, some 2.4 times the most.
+qkvm_add_test(test_core_rfb_screen_sweeps SOURCES tests/test_rfb_screen_sweeps.cpp tests/rfb_screen_sweep_inputs.h
+    LIBRARIES qkvm_core Qt6::Gui TIMEOUT 300)
+target_include_directories(test_core_rfb_screen_sweeps PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
 qkvm_add_test(test_core_live_link SOURCES tests/test_live_link.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 target_compile_definitions(test_core_live_link PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 # (Walls of made-up KVMs, many of them waiting for one that is slow or away: more than two minutes
@@ -310,7 +461,7 @@ target_compile_definitions(test_core_wall_servers PRIVATE QKVM_TESTDATA="${CMAKE
 # console's times.)
 qkvm_add_test(test_core_wall_server_screens SOURCES tests/test_wall_server_screens.cpp tests/ami_console_by_hand.h
     LIBRARIES qkvm_core qkvm_core_stand_in TIMEOUT 300)
-target_include_directories(test_core_wall_server_screens PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests")
+target_include_directories(test_core_wall_server_screens PRIVATE "${CMAKE_SOURCE_DIR}/bmc/tests" "${CMAKE_SOURCE_DIR}/rfb/tests")
 target_compile_definitions(test_core_wall_server_screens PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_core_multipart_pictures SOURCES tests/test_multipart_pictures.cpp LIBRARIES qkvm_core)
 # The saved actions of this PC's own wall: the rules for what is typed in, their texts in the
@@ -318,14 +469,30 @@ qkvm_add_test(test_core_multipart_pictures SOURCES tests/test_multipart_pictures
 # under a name of the test's own.
 qkvm_add_test(test_core_own_actions SOURCES tests/test_own_actions.cpp LIBRARIES qkvm_core qkvm_core_stand_in)
 qkvm_add_test(test_core_scrypt SOURCES tests/test_scrypt.cpp LIBRARIES qkvm_core)
+# VNC authentication's answer (Windows' own DES) against published vectors.
+qkvm_add_test(test_core_vnc_auth SOURCES tests/test_vnc_auth.cpp LIBRARIES qkvm_core)
+# A VNC server of this PC's own wall, against VNC servers by hand on this PC's loopback address.
+qkvm_add_test(test_core_vnc_device SOURCES tests/test_vnc_device.cpp tests/vnc_by_hand.h
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_include_directories(test_core_vnc_device PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
+target_compile_definitions(test_core_vnc_device PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# Adding a VNC server, changing one and reviewing its certificate, against VNC servers by hand.
+qkvm_add_test(test_core_vnc_adding
+    SOURCES tests/test_vnc_adding.cpp tests/vnc_by_hand.h tests/signer_far_away.h tests/signer_far_away.cpp
+    LIBRARIES qkvm_core qkvm_core_stand_in)
+target_include_directories(test_core_vnc_adding PRIVATE "${CMAKE_SOURCE_DIR}/rfb/tests")
+target_compile_definitions(test_core_vnc_adding PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_core_sealing SOURCES tests/test_sealing.cpp tests/windows_gcm_by_hand.h LIBRARIES qkvm_core)
 qkvm_add_test(test_core_server_types SOURCES tests/test_server_types.cpp LIBRARIES qkvm_core)
 # A hundred and fifty questions to a made-up server, a good many of which wait out a time limit of
 # the client's (a picture that is too slow, an answer that dribbles): two minutes and more.
 # (200.77 to 205.13 s on 2026-10-26, and some 20 s more since the proxy test: 400.)
-qkvm_add_test(test_core_server_client SOURCES tests/test_server_client.cpp LIBRARIES qkvm_core qkvm_core_stand_in
-    TIMEOUT 400)
+qkvm_add_test(test_core_server_client
+    SOURCES tests/test_server_client.cpp tests/signer_far_away.h tests/signer_far_away.cpp
+    LIBRARIES qkvm_core qkvm_core_stand_in TIMEOUT 400)
 target_compile_definitions(test_core_server_client PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# (Its cases make more sections than an object file holds by default.)
+target_compile_options(test_core_server_client PRIVATE /bigobj)
 # Start into BIOS setup is given four minutes, as the page gives it: its one test waits 160 s for an answer (more than
 # an action's 150), so it has a program of its own. 300, about 85% above that.
 qkvm_add_test(test_core_server_client_setup SOURCES tests/test_server_client_setup.cpp
@@ -404,6 +571,19 @@ qkvm_add_test(test_core_jetkvm_actions SOURCES tests/test_jetkvm_actions.cpp tes
     tests/jetkvm_by_hand.h tests/jetkvm_peer_by_hand.h tests/film_sender.h
     LIBRARIES qkvm_core qkvm_core_stand_in qkvm_webrtc qkvm_clips)
 target_compile_definitions(test_core_jetkvm_actions PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# A JetKVM's virtual media (A3): its own image storage, one image in its drive as a CD-ROM drive or a disk, read-only,
+# over the connection its card holds, and through this PC's own wall; against the JetKVM by hand and its storage.
+qkvm_add_test(test_core_jetkvm_media SOURCES tests/test_jetkvm_media.cpp tests/jetkvm_viewer_by_hand.h
+    tests/jetkvm_by_hand.h tests/jetkvm_peer_by_hand.h tests/jetkvm_storage_by_hand.h tests/film_sender.h
+    tests/memory_secrets.h LIBRARIES qkvm_core qkvm_core_stand_in qkvm_webrtc qkvm_clips TIMEOUT 300)
+target_compile_definitions(test_core_jetkvm_media PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
+# And an image carried there from this PC (A3): opened over its connection, its bytes on a line of their own after it was
+# asked which JetKVM it is, streamed from its file, one at a time, and nothing left of a cut. These wait for uploads.
+qkvm_add_test(test_core_jetkvm_upload SOURCES tests/test_jetkvm_upload.cpp tests/jetkvm_viewer_by_hand.h
+    tests/jetkvm_by_hand.h tests/jetkvm_peer_by_hand.h tests/jetkvm_storage_by_hand.h tests/film_sender.h
+    tests/far_away_file.h tests/memory_secrets.h LIBRARIES qkvm_core qkvm_core_stand_in qkvm_webrtc qkvm_clips
+    TIMEOUT 300)
+target_compile_definitions(test_core_jetkvm_upload PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
 qkvm_add_test(test_engine_native_video SOURCES tests/test_native_video.cpp tests/janus_by_hand.h tests/film_sender.h
     LIBRARIES qkvm_core qkvm_core_stand_in qkvm_webrtc qkvm_engine qkvm_clips TIMEOUT 180)
 target_compile_definitions(test_engine_native_video PRIVATE QKVM_TESTDATA="${CMAKE_SOURCE_DIR}/.testdata")
@@ -421,3 +601,69 @@ set_target_properties(qkvm-test-stand-in-setup PROPERTIES AUTOMOC OFF AUTOUIC OF
 add_dependencies(test_core_updates qkvm-test-stand-in-setup)
 
 qkvm_add_test(test_core_incidents SOURCES tests/test_incidents.cpp LIBRARIES qkvm_core)
+
+# What the fuzz targets ever found (a crash, a hang, a promise broken), each input as bytes in the source, run through
+# the very harness that found it (core/fuzz, rfb/fuzz, bmc/fuzz), in every preset; and the input with which each found
+# its canary, held to reaching that state still (DESIGN.md section 8).
+qkvm_add_test(test_core_fuzz_found SOURCES tests/test_fuzz_found.cpp LIBRARIES qkvm_core Qt6::Network)
+target_include_directories(test_core_fuzz_found PRIVATE src "${CMAKE_SOURCE_DIR}/bmc/include")
+
+# libFuzzer's targets of the readers here of what a device or a server sends that DESIGN.md section 8 names (the fuzz
+# preset, which the gate runs:
+# CMakeLists.txt, qkvm_add_fuzzer), each with the readers it reads with compiled into it again; and the seed maker,
+# which makes every target's first inputs at build time (fuzz_seeds). The JetKVM's words, as its connection and its
+# driver read them (src/jetkvm_words.cpp), by fuzz_jetkvm, with the program's own JSON reader (strict_json alone too)
+# and its answer's description and addresses (rtc_sdp alone too); its pictures by h264_rtp.
+if(QKVM_FUZZ)
+    set(qkvm_rfb_readers ../rfb/src/rfb.cpp ../rfb/src/inflate.cpp ../rfb/src/keysyms.cpp ../rfb/src/vnc_key.cpp)
+    set(qkvm_fuzz_includes include src ../rfb/include ../bmc/include)
+    qkvm_add_fuzzer(fuzz_rfb SOURCES fuzz/fuzz_rfb.cpp fuzz/fuzz_rfb.h ${qkvm_rfb_readers} src/jpeg_pixels.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES qkvm_ffmpeg MAX_LEN 16384 MALLOC_MB 1024 SEEDS rfb)
+    qkvm_add_fuzzer(fuzz_jpeg SOURCES fuzz/fuzz_jpeg.cpp fuzz/fuzz_jpeg.h src/jpeg_pixels.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES qkvm_ffmpeg MAX_LEN 8192 MALLOC_MB 1024 SEEDS jpeg)
+    qkvm_add_fuzzer(fuzz_vnc
+        SOURCES fuzz/fuzz_vnc.cpp fuzz/fuzz_vnc.h ${qkvm_rfb_readers} src/rfb_reader.cpp src/vnc_auth.cpp src/wiped.cpp
+            src/jpeg_pixels.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core qkvm_ffmpeg bcrypt MAX_LEN 16384 MALLOC_MB 1024 SEEDS vnc)
+    qkvm_add_fuzzer(fuzz_redfish
+        SOURCES fuzz/fuzz_redfish.cpp fuzz/fuzz_redfish.h src/redfish_answers.cpp src/kvmd_answers.cpp
+            src/server_types.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS redfish)
+    qkvm_add_fuzzer(fuzz_kvmd SOURCES fuzz/fuzz_kvmd.cpp fuzz/fuzz_kvmd.h src/kvmd_answers.cpp src/server_types.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS kvmd)
+    qkvm_add_fuzzer(fuzz_kvmd_media
+        SOURCES fuzz/fuzz_kvmd_media.cpp fuzz/fuzz_kvmd_media.h src/kvmd_media_answers.cpp src/kvmd_answers.cpp
+            src/server_types.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS kvmd_media)
+    qkvm_add_fuzzer(fuzz_multipart
+        SOURCES fuzz/fuzz_multipart.cpp fuzz/fuzz_multipart.h src/multipart_pictures.cpp src/kvmd_answers.cpp
+            src/server_types.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS multipart)
+    qkvm_add_fuzzer(fuzz_strict_json SOURCES fuzz/fuzz_strict_json.cpp fuzz/fuzz_strict_json.h src/strict_json.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core MAX_LEN 65536 MALLOC_MB 256 SEEDS strict_json)
+    qkvm_add_fuzzer(fuzz_rtc_sdp SOURCES fuzz/fuzz_rtc_sdp.cpp fuzz/fuzz_rtc_sdp.h src/rtc_sdp.cpp src/h264_rtp.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS rtc_sdp)
+    qkvm_add_fuzzer(fuzz_h264_rtp SOURCES fuzz/fuzz_h264_rtp.cpp fuzz/fuzz_h264_rtp.h src/h264_rtp.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core MAX_LEN 65536 MALLOC_MB 256 SEEDS h264_rtp)
+    qkvm_add_fuzzer(fuzz_jetkvm
+        SOURCES fuzz/fuzz_jetkvm.cpp fuzz/fuzz_jetkvm.h src/jetkvm_words.cpp src/strict_json.cpp src/rtc_sdp.cpp
+            src/h264_rtp.cpp src/kvmd_answers.cpp src/server_types.cpp
+        INCLUDES ${qkvm_fuzz_includes} LIBRARIES Qt6::Core Qt6::Network MAX_LEN 65536 MALLOC_MB 256 SEEDS jetkvm)
+endif()
+# (The fuzz targets' ways in are compiled, not linked, in the other presets, and the seed maker is built in every preset
+# and run only by the fuzz preset's fuzz_seeds: so the gate's clang-tidy reads each with the flags it is built with, as
+# every other file of ours.)
+if(NOT QKVM_FUZZ)
+    add_library(qkvm_core_fuzz_ways_in OBJECT fuzz/fuzz_rfb.cpp fuzz/fuzz_jpeg.cpp fuzz/fuzz_vnc.cpp fuzz/fuzz_redfish.cpp
+        fuzz/fuzz_kvmd.cpp fuzz/fuzz_kvmd_media.cpp fuzz/fuzz_multipart.cpp fuzz/fuzz_strict_json.cpp
+        fuzz/fuzz_rtc_sdp.cpp fuzz/fuzz_h264_rtp.cpp fuzz/fuzz_jetkvm.cpp)
+    target_include_directories(qkvm_core_fuzz_ways_in PRIVATE include src ../rfb/include ../bmc/include)
+    target_link_libraries(qkvm_core_fuzz_ways_in PRIVATE qkvm_build qkvm_base qkvm_core qkvm_rfb qkvm_bmc qkvm_ffmpeg
+        Qt6::Core Qt6::Network)
+    set_target_properties(qkvm_core_fuzz_ways_in PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+endif()
+add_executable(qkvm-fuzz-seeds fuzz/make_seeds.cpp tests/rfb_screen_sweep_inputs.h)
+target_include_directories(qkvm-fuzz-seeds PRIVATE include src ../rfb/include ../bmc/include ../rfb/tests ../bmc/tests)
+target_compile_definitions(qkvm-fuzz-seeds PRIVATE QKVM_EXPORT_EXAMPLES="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/export")
+target_link_libraries(qkvm-fuzz-seeds PRIVATE qkvm_build qkvm_base qkvm_bmc Qt6::Core Qt6::Gui)
+set_target_properties(qkvm-fuzz-seeds PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)

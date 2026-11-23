@@ -55,11 +55,13 @@
 #include "win/hand_over_end.h"
 #include "win/keyboard_hook.h"
 #include "win/own_temp.h"
+#include "win/profile_lock.h"
 #include "win/quit_requests.h"
 #include "win/setup_wait.h"
 #include "win/shell_start.h"
 #include "win/show_file.h"
 #include "win/single_instance.h"
+#include "win/unfinished_update.h"
 #include <cstring>
 
 using namespace Qt::StringLiterals;
@@ -109,6 +111,17 @@ int main(int argc, char* argv[])
             // (Nothing run, nothing shown: Setup's log says why where Setup could tell, review C1.)
             return 3;
         }
+        // An update of this installed copy that did not finish (the PC lost power, or the setup was ended, while it
+        // had the earlier version's files set aside, packaging/qkvm-desktop.iss): the setup's marker beside this file,
+        // and a file its record set aside beside it. Looked at by Windows' own calls alone and said in a box of
+        // Windows' own, with nothing of Qt's in either, and the program ends, before its single-instance mutex and
+        // before anything of it starts. Only Setup is at work no more here: Setup's own start waited above for it to
+        // end, and every other start while it works has ended. A marker whose record names nothing still set aside is
+        // taken away, and the program starts: a marker left behind never keeps it from starting.
+        if (qkvm::ui::lookForUnfinishedUpdate(qkvm::ui::ownFolder()).found == qkvm::ui::UpdateLeft::Unfinished) {
+            MessageBoxW(nullptr, qkvm::ui::unfinishedUpdateWords(), L"qKVM", MB_OK | MB_ICONERROR);
+            return 1;
+        }
     } else {
         qkvm::installer::preparePackageCheckEnvironment();
     }
@@ -142,11 +155,34 @@ int main(int argc, char* argv[])
     if (!only.isFirst()) {
         return 0;
     }
+    // Setup's gate looked at again, now that this copy's mutex is there: an uninstall (or a setup) makes its gate first
+    // and then looks for that mutex, so one that began after the first look sees this copy, and one that looked before
+    // the mutex was there is seen here. No start slips in between an uninstall's last look and the removal of the
+    // files (SECURITY.md, a known limit of 0.1.2). Ended at once and without a word, as above.
+    const auto setupAtWork = [] {
+        return qkvm::ui::whileSetupWorks(QString::fromLatin1(qkvm::ui::setupMutexName), false, std::chrono::seconds(0),
+                                         [] { return false; }) != qkvm::ui::WhileSetupWorks::GoOn;
+    };
+    if (setupAtWork()) {
+        return 0;
+    }
     // Its data, in a folder that is there but cannot be read (a list that shuts the person out, a junction this start
     // may not cross), is never taken for none: no first start, and nothing written. Said, and the program ends.
     if (const QString why = qkvm::core::whyDataCannotBeRead(qkvm::core::Settings::usualFile()); !why.isEmpty()) {
         MessageBoxW(nullptr, why.toStdWString().c_str(), L"qKVM", MB_OK | MB_ICONERROR);
         return 1;
+    }
+    // One copy of this account writes its profile, in whatever Windows session it runs (outside review of 0.1.2, C3):
+    // the lock of a file beside the settings, kept until this copy ends. Held by a copy in another session: said, and
+    // the program ends; held by an uninstall at work: ended at once, without a word. Where it cannot be told: said.
+    const qkvm::ui::ProfileLock writes(qkvm::core::profile::runningFile(qkvm::core::Settings::usualFile()));
+    if (!writes.taken()) {
+        if (writes.heldElsewhere() && setupAtWork()) {
+            return 0;
+        }
+        MessageBoxW(nullptr, writes.whyNot().toStdWString().c_str(), L"qKVM",
+                    MB_OK | (writes.heldElsewhere() ? MB_ICONINFORMATION : MB_ICONERROR));
+        return writes.heldElsewhere() ? 0 : 1;
     }
 
     QString diagnosticDirectory;
@@ -395,8 +431,19 @@ int main(int argc, char* argv[])
     if (!atStart.said.isEmpty()) {
         windows.actions(0)->tell(atStart.said, false);
     }
+    // And a note of which servers' BIOS setup boot override may be set that could not be read whole: kept aside byte
+    // for byte before anything is written, never written over, and said (outside review of the fuzz work, round 3, M1).
+    static_cast<void>(qkvm::core::SetupOverrides::program().putAsideWhatCouldNotBeRead());
+    if (const QString said = qkvm::core::SetupOverrides::program().toldOfItsFile(); !said.isEmpty()) {
+        windows.actions(0)->tellWhenSeen(said, false);
+    }
     // And a server whose BIOS setup boot override may still be set from the run before: told, until somebody sees it
-    // (its card says it too, until a look shows the override off).
+    // (its card says it too, until a look shows the override off). What stood for a server on no card any more, its
+    // doubt over, goes first (SetupOverrides::prune), only where the settings' list was read whole: settings that could
+    // not be read start as new, and say nothing of which servers are on no card (outside review of the prune, M2). One
+    // marked queued never goes so: the start after such a one reads a list its run wrote (round 2, M1); and none goes
+    // while such settings stand put aside beside these, to be put back with their cards (round 3, M2).
+    static_cast<void>(qkvm::core::SetupOverrides::program().prune(settings));
     for (const QString& said : qkvm::core::SetupOverrides::program().toldAtStart(settings.remembered().kvms)) {
         windows.actions(0)->tellWhenSeen(said, false);
     }
@@ -435,8 +482,13 @@ int main(int argc, char* argv[])
         if (!release) {
             return;
         }
+        // (An x64 copy on Windows on Arm: what it offers is the program for Windows on Arm, of its own version too.)
         const QString message =
-            QCoreApplication::translate("Updates", "qKVM %1 is available. Open Settings > Updates to review it.")
+            (updates.offersThePcsOwnKind()
+                 ? QCoreApplication::translate(
+                       "Updates", "qKVM %1 for Windows on Arm is available. Open Settings > Updates to review it.")
+                 : QCoreApplication::translate("Updates",
+                                               "qKVM %1 is available. Open Settings > Updates to review it."))
                 .arg(release->version);
         tray->tell(u"qKVM"_s, message, false);
         for (qsizetype index = 0; index < windows.count(); ++index) {

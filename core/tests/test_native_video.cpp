@@ -833,11 +833,22 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(ended.size(), 1, 5000);
         QCOMPARE(ended.first().first().toString(), u"video_timeout"_s);
     }
+    void rejectedVideoSessionRefreshesOnlyOnceWithinTheHold_data()
+    {
+        // (The web's `_line`: a kvmd KVM's line refused as not signed in, or as not allowed, is asked for once more
+        // under a new session.)
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QString>("name");
+        QTest::newRow("not signed in (401)") << 401 << u"Unauthorized"_s;
+        QTest::newRow("not allowed (403)") << 403 << u"Forbidden"_s;
+    }
     void rejectedVideoSessionRefreshesOnlyOnceWithinTheHold()
     {
+        QFETCH(int, status);
+        QFETCH(QString, name);
         MadeUpKvm kvm;
         kvm.stand->handsLinesOver = false;
-        kvm.instead["/janus/ws"_ba] = refusal(401, u"Unauthorized"_s);
+        kvm.instead["/janus/ws"_ba] = refusal(status, name);
         core::KvmdDevice driver(kvm.where(), kvm.password);
         for (int attempt = 0; attempt < 4; ++attempt) {
             core::KvmdWebRtc receiver(driver);

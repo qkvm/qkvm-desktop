@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <memory>
@@ -836,6 +837,26 @@ private slots:
         QCOMPARE(jet.signIns, 2);
     }
 
+    void aLineRefusedToTheSessionIsSaidAndNoSecondSignInGoes()
+    {
+        // (The web's _signalling: a JetKVM is signed in to anew where its line says the session is none, 401, alone.)
+        // A 403 says the session it holds may not have that line: said in the web's words, and the session kept.
+        JetKvmByHand jet;
+        jet.refuseLines = 1;
+        jet.lineRefusedWith = 403;
+        JetKvmDevice device(at(jet), u"secret"_s, quick());
+        const auto refused = identified(device);
+        QCOMPARE(codeOf(refused), std::string("bad_response"));
+        QCOMPARE(refused.error().message, std::string("The JetKVM refused (HTTP 403)"));
+        QCOMPARE(jet.signIns, 1);
+        QCOMPARE(jet.lineAskings, 1);
+        // Asked again, under the same session: no password went out for it.
+        QVERIFY(identified(device));
+        QCOMPARE(jet.signIns, 1);
+        QCOMPARE(jet.lineAskings, 2);
+        QCOMPARE(jet.lineCookies, (QList<QByteArray>{"authToken=jet.1"_ba, "authToken=jet.1"_ba}));
+    }
+
     void aSessionThatIsRefusedOnceMoreIsSaidAndNotAskedForAWhile()
     {
         JetKvmByHand jet;
@@ -1057,6 +1078,9 @@ private slots:
         where.certificate = StandIn::certificateIn(tls("second").certificateFile).digest(QCryptographicHash::Sha256);
         JetKvmDevice::Pace pace = quick();
         pace.connectWithinMs = 5000; // (a TLS handshake under the address sanitizer on a busy PC)
+        // (And as long to be quiet: Qt's quiet runs from the asking on, through the handshake, as test_kvm_editing's
+        // quickProbe says; behind 1.5 s the room above was none.)
+        pace.quietMs = pace.connectWithinMs;
         JetKvmDevice other(where, u"secret"_s, pace);
         QCOMPARE(codeOf(identified(other)), std::string("cert_mismatch"));
         QVERIFY(jet.signInBodies.isEmpty());
@@ -1189,13 +1213,36 @@ private slots:
         QCOMPARE(jet.signIns, 2);
     }
 
+    void threeDriversSignInOneAtATimeAndEachIsLetIn_data()
+    {
+        QTest::addColumn<int>("switchesLateMs");
+        QTest::addColumn<int>("firstNumberAfterMs");
+        QTest::newRow("each as it comes") << 0 << 0;
+        // Each yes heard, and its session carried, before the stand-in's own timer ends the one before, as Qt ran the
+        // stand-in's two timers in a whole run of this program.
+        QTest::newRow("each yes heard before the one before ends") << 300 << 0;
+        // The first one held up after its yes, as on a loaded PC: it asks for its signalling line only after the next
+        // one's yes.
+        QTest::newRow("the first held up past the next one's yes") << 0 << 1500;
+    }
+
     void threeDriversSignInOneAtATimeAndEachIsLetIn()
     {
         // (The pacing's second reading, L3, as a kvmd's.) The one told second of two that waited waits again for the
-        // one that went first, rather than being told the JetKVM does not sign it in.
+        // one that went first, rather than being told the JetKVM does not sign it in. One at a time: none goes before
+        // the answer to the one before; and each is let in on its line after its one sign-in. The JetKVM keeps every
+        // session it gave, as a kvmd does (whose case this is): with its one session, a driver that asked for its line
+        // only after the next one's yes was refused it and signed in once more, by right, and a count of four said
+        // nothing of the pacing. Here a fourth is a driver that sent twice.
+        QFETCH(const int, switchesLateMs);
+        QFETCH(const int, firstNumberAfterMs);
         JetKvmByHand jet;
         jet.signInAfterMs = 1000;
-        const JetKvmDevice::Pace pace = quick();
+        jet.switchesLateMs = switchesLateMs;
+        jet.keepsEverySession = true;
+        jet.firstNumberAfterMs = firstNumberAfterMs;
+        JetKvmDevice::Pace pace = quick();
+        pace.quietMs = std::max(pace.quietMs, 2 * firstNumberAfterMs); // (the hold is no silence to give up on)
         JetKvmDevice one(at(jet), u"secret"_s, pace);
         JetKvmDevice two(at(jet), u"secret"_s, pace);
         JetKvmDevice three(at(jet), u"secret"_s, pace);
@@ -1208,6 +1255,9 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(codes.size(), 3, 20000);
         QCOMPARE(codes, (QList<std::string>{"ok", "ok", "ok"}));
         QCOMPARE(jet.signIns, 3);
+        // (A little less than its wait: what Qt's timer and the stand-in's clock each say of one second.)
+        QVERIFY2(jet.leastMsBetweenSignIns >= jet.signInAfterMs - 20, QByteArray::number(jet.leastMsBetweenSignIns));
+        QCOMPARE(jet.linesIn, 3);
     }
 
     void aWaiterToldAsAnotherHasJustSentWaitsAgain()
@@ -1380,9 +1430,11 @@ private slots:
     void aSecondDriverWaitsForTheFirstsSignInAndThenSignsInItself()
     {
         // (The pacing's reading, L3, as a kvmd's.) A slow yes: the other is not told "does not sign qKVM in" while it
-        // is out; it waits, and signs in itself after.
+        // is out; it waits, and signs in itself after. (Every session kept, as in the case of three: whether the first
+        // asked for its line before the other's yes replaced its session is the PC's load, not the pacing.)
         JetKvmByHand jet;
         jet.signInAfterMs = 1200;
+        jet.keepsEverySession = true;
         const JetKvmDevice::Pace pace = quick();
         JetKvmDevice one(at(jet), u"secret"_s, pace);
         JetKvmDevice other(at(jet), u"secret"_s, pace);
@@ -1397,6 +1449,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(codes.size(), 2, 10000);
         QCOMPARE(codes, (QList<std::string>{"ok", "ok"}));
         QCOMPARE(jet.signIns, 2);
+        QVERIFY2(jet.leastMsBetweenSignIns >= jet.signInAfterMs - 20, QByteArray::number(jet.leastMsBetweenSignIns));
     }
 
     void theQuestionAskedFirstAndTheSignInGoOnOneLine()

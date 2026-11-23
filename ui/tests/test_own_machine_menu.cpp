@@ -123,6 +123,30 @@ private slots:
         of.status->capabilities->removeAll(u"bios_setup"_s);
         QVERIFY(ui::menuFor(of).row(u"power:bios_setup"_s) == nullptr);
     }
+
+    void aCometHasItsMediaWhereItsDriverSaysItsDriveIsOn()
+    {
+        // GAPS A2: "Media..." for a KVM of this PC's own wall, which says no `can`, where its driver says its drive is
+        // switched on (Status::offersMedia, as the web's `media` in `can`); for whoever may have them here (not while
+        // the program only shows: MenuOf::media), among the rows that lead elsewhere.
+        MenuOf of;
+        of.machine = comet();
+        of.machine.own = true;
+        of.status = online();
+        of.media = true;
+        QVERIFY(ui::menuFor(of).row(u"media"_s) == nullptr);
+        of.status->offersMedia = true;
+        const Menu menu = ui::menuFor(of);
+        const MenuRow* media = menu.row(u"media"_s);
+        QVERIFY(media != nullptr);
+        QVERIFY(!media->ask.has_value());
+        of.media = false;
+        QVERIFY(ui::menuFor(of).row(u"media"_s) == nullptr);
+        // Nothing heard of its drive yet (its status not said): none.
+        of.media = true;
+        of.status.reset();
+        QVERIFY(ui::menuFor(of).row(u"media"_s) == nullptr);
+    }
 };
 
 QTEST_MAIN(TestOwnMachineMenu)

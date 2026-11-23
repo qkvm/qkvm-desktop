@@ -20,8 +20,10 @@
 #include <qkvm/core/jetkvm_kept.h>
 #include <qkvm/core/kvm_probe.h>
 #include <qkvm/core/kvmd_device.h>
+#include <qkvm/core/media_place.h>
 #include <qkvm/core/own_actions.h>
 #include <qkvm/core/own_device.h>
+#include <qkvm/core/own_media.h>
 #include <qkvm/core/own_sign_in.h>
 #include <qkvm/core/screen_watch.h>
 #include <qkvm/core/secrets.h>
@@ -179,7 +181,7 @@ namespace qkvm::core {
 // There are no accounts here and no roles: whoever sits at this PC may do everything.
 //
 // The settings and the secret store outlive it.
-class LocalWall : public QObject, public WallSource {
+class LocalWall : public QObject, public WallSource, public MediaPlace {
     Q_OBJECT
 
 public:
@@ -223,6 +225,18 @@ public:
         // after the first of them came to something, for all that have by then: fifty KVMs
         // that come online within a second are a few words, and not fifty.
         int saidAfterMs = 100;
+        // So many of the looks an asking begins (askStatus) begin in one turn of the loop, and the next so many in
+        // the next turn, in the wall's order. Each look begins on the interface thread (a JetKVM's asks its four
+        // questions over its connection, a kvmd's its lines; and each sets its patience's timer): 0.7 ms each in
+        // the program's own window, and a wall of 64 JetKVMs whose looks all began in one turn held that thread
+        // 45 to 62 ms every four seconds, so that the window answered late (SPEC.md section 9, PERF-1). A few in a
+        // turn are about 3 ms, with whatever else waits taken between them. And the next few this long after: the
+        // looks' answers, which are taken on that thread as well, come as spread as the looks began (begun in turns
+        // that followed each other at once, all 64 within some 50 ms, their answers kept the window 21 to 36 ms late).
+        // A frame of a monitor of 60 a second: 64 KVMs are looked at within a quarter of a second of the asking, and
+        // the asking is answered that much later than when all began at once.
+        int looksInATurn = 4;
+        int looksEveryMs = 16;
         // Its screen watches' times (a test makes them short).
         ScreenWatch::Times screens;
     };
@@ -288,6 +302,36 @@ public:
     void openLive(const QString& machine, Live::Need need,
                   std::function<void(base::Result<std::unique_ptr<Live>>)> done) override;
 
+    // Its kvmd KVMs', JetKVMs' and Proxmox guests' virtual media (MediaPlace; local_wall_media.cpp; GAPS A2 and A3,
+    // wave 2): what the web's server does before its driver is asked (server.py: media_target, media_named, media_held,
+    // and what the driver offers), and the machine's driver the rest (OwnMedia: KvmdDevice's media, JetKvmDevice's,
+    // ProxmoxDevice's). A KVM of the
+    // wall, asked what it is, of a family that has virtual media and has some now (its drive switched on), named as the
+    // question named it ("changed" otherwise, nothing done); a mount, an unmount and a deletion held as an action is
+    // (one thing at a time to a KVM), and none of the image on its way to it; one upload at a time. While one is on its
+    // way, the KVM is neither changed nor taken off the wall ("busy"); an action goes, as the web lets it. Answered by
+    // the wall where the KVM's driver is let go of meanwhile (owedBy).
+    void askMedia(const QString& machine, std::function<void(base::Result<MediaList>)> done) override;
+    void mountMedia(const QString& machine, const MediaMount& mount,
+                    std::function<void(base::Result<MediaDone>)> done) override;
+    // (Its lists carry no `listed`, and none is asked of a change: a box of it is held to MediaList::boundTo instead,
+    // by movedSince.)
+    void unmountMedia(const QString& machine, const QString& image, const QString& named, const QString& listed,
+                      std::function<void(base::Result<MediaDone>)> done) override;
+    void deleteMedia(const QString& machine, const QString& image, const QString& named, const QString& listed,
+                     std::function<void(base::Result<MediaDone>)> done) override;
+    std::function<void()> uploadMedia(const QString& machine, const QString& name, const QString& named,
+                                      const QString& listed, std::unique_ptr<QIODevice> image,
+                                      std::function<void(base::Result<MediaUploaded>)> done) override;
+    void askUpload(const QString& machine,
+                   std::function<void(base::Result<std::optional<MediaUploading>>)> done) override;
+    // One wall on this PC, which nobody signs in to.
+    QByteArray mediaIdentity() const override { return QByteArrayLiteral("this-pc"); }
+    // Every word of a KVM's driver is said as it is: there is no server between that could say nothing.
+    bool saidNothing(const base::Error& /*error*/) const override { return false; }
+    // Of a KVM that is gone, or is at another address or known by another certificate than when the box listed it.
+    std::optional<base::Error> movedSince(const QString& machine, const QString& bound) const override;
+
     // The saved actions of the wall (own_actions.h): the list, and adding to it, changing and
     // removing, for whoever manages them. A change of the list is said as a change of the wall
     // (`changed`), so that it reaches whoever shows the wall the way a KVM that was added does.
@@ -330,7 +374,8 @@ public:
     //   wall is ("duplicate").
     // * With no password given, anything the kept one may not go to: signerIn()'s rule, which is
     //   kept here too ("password_needed", the same sentence). That is another address, unless
-    //   both are HTTPS and the KVM is known by a certificate, which it then keeps; and another
+    //   both are HTTPS and the KVM is known by a certificate, which it then keeps (never a
+    //   server's controller, nor a VNC server, vncs:// or not: the web's known_again); and another
     //   certificate, or none, at any address (for that there is knowBy()).
     // * With no password given, another address where none is kept for the KVM as it is: there
     //   is none to take along, and the KVM is not moved without one ("no_password", its driver's
@@ -433,6 +478,10 @@ public:
     // none made anew from then on: nothing of the wall looks, asks or signs in any more (the KVMs stay in the
     // settings as they are). Whoever is owed an answer is told "stopped".
     void letGoOfEveryDriver();
+    // Every typing a driver of the wall has under way key by key through a console of its own ends where it stands
+    // (OwnDevice::stopTyping), and its action is answered "stopped": whoever had it typed may have it no longer (the
+    // program locked, or this PC made a wall screen: the outside review of the wave 2 desktop, 6.18).
+    void stopEveryTyping();
     // How often a KVM's secret was written since the program started; 0 for one that is not on
     // the wall. Whoever reads a KVM, speaks to it for a while and saves then (kvm_editing.h) sees
     // by this that its password is another than it was: the list does not tell. A writing is
@@ -473,10 +522,15 @@ public:
     // many KVMs against many (a file of two thousand against a wall of two thousand) and would
     // otherwise read every address anew for every pair. A place is the host, the port as it is
     // written (-1: none of its own), and the port that is spoken to.
+    // A VNC server's place is its address itself, as written (`vnc`): it is at one place with another only where that
+    // is the very same address, and never with a KVM of its host (the web's; outside review M1).
     struct Place {
         QString host;
         int written = -1;
         int spokenTo = 0;
+        QString vnc;
+        // Of a Proxmox guest, its number (one Proxmox has many guests: two of them are two places); else 0.
+        qint64 guest = 0;
     };
     static Place placeOf(const OwnKvm& kvm);
     static bool atOnePlace(const Place& one, const Place& other);
@@ -486,7 +540,9 @@ public:
     // and its certificate be forgotten, and whoever sees "certificate does not match" on its card
     // is who would try that, on the day somebody sits on the line. Nothing: this is not in the
     // way (the other direction, and another place, are changes like any other). Whoever changes
-    // a KVM asks this before anything is asked of the KVM; change() asks it again.
+    // a KVM asks this before anything is asked of the KVM; change() asks it again. A VNC server
+    // likewise from vncs:// to vnc:// at the same host and port (its place is otherwise its whole
+    // address): outside review c9a-2, H1.
     static std::optional<base::Error> intoTheClear(const OwnKvm& from, const OwnKvm& to);
     // The one of these KVMs that is known by the certificate `kvm` is known by: a KVM makes its
     // certificate itself, so that one is this KVM, by whichever address it is reached. Nothing:
@@ -499,14 +555,32 @@ public:
     // A server's management controller is never one by a certificate, whichever of the two it is: its
     // maker may have put one certificate, and one key, on every board (the web's core.identity). A
     // server is known by its computer's number alone (OwnKvm::number), and two that give none are two.
+    // A VNC server is the one known by the certificate it is known by, or another by a VNC server's, by what that
+    // certificate says and not proven (certificateSaysSo): asked as by a number, and passed by where somebody said to
+    // keep both (6.5).
     static std::optional<OwnKvm> twinOf(const QList<OwnKvm>& there, const OwnKvm& kvm);
+    // The twin, of these KVMs, of one that comes onto the wall: added, changed to another address, or taken from a
+    // file. As twinOf, and then, where a VNC server is one of the two, by what the certificate says whatever the one
+    // there was kept beside (one kept beside a twin removed since may be all that holds it): passed by only where `kvm`
+    // itself is to stay beside its twin, "Keep both" said in that very box or file row (review cx6-2, L1).
+    static std::optional<OwnKvm> twinOfOneComing(const QList<OwnKvm>& there, const OwnKvm& kvm);
     // Whether somebody said a KVM is to stay beside its twin by number (OwnKvm::keptBesideItsTwin), as the number
     // goes by: never of a server's controller, whatever a file says (a server has one card on this PC's wall: the
     // owner's word, M7 Q2).
     static bool isKeptBeside(const OwnKvm& kvm);
     // Whether both are known by one certificate, which makes two one: never where either is a
-    // server's controller (above).
+    // server's controller (above), a Proxmox guest or a VNC server.
     static bool sameCertificate(const OwnKvm& one, const OwnKvm& other);
+    // Whether both are known by one certificate where one of the two is a VNC server: one TLS proxy before several
+    // displays of a host shows one certificate for all of them, and a PiKVM's VNC server its web page's. The same
+    // device by what that says, as the web's core.identity has it, and kept beside it where somebody says so (the
+    // web's keep_both; the outside review of the wave 2 desktop, 6.5).
+    static bool certificateSaysSo(const OwnKvm& one, const OwnKvm& other);
+    // The one of these KVMs that is known by the certificate `kvm` is to be known by, by either rule above, whatever
+    // either was kept beside: the one a yes to that certificate would take this one's kept password to. A yes on one
+    // card never takes a certificate another card is known by, whatever "Keep both" said: that answers "are these two
+    // the same device?", and never "may this one's password go to that one's certificate?" (review cx6-1, M1, of 6.5).
+    static std::optional<OwnKvm> knownByTheSameCertificate(const QList<OwnKvm>& there, const OwnKvm& kvm);
     // Why a KVM is not on the wall beside its twin: "same_device", in the server's sentence, which
     // names the one that is there (calledInASentence), and where it is behind that where it has
     // a name. Whoever adds a KVM, changes one or says yes to a certificate says it in these
@@ -533,8 +607,8 @@ public:
     // it was asked what it is (OwnKvm::askedWhatItIs). That is no change anybody made, and comes
     // while a box is open: at the first start, when a KVM that was away comes back, during the
     // box's own asking and sign-in. Whoever asks "was it changed meanwhile" asks this. Nor is the
-    // mark a server's controller's driver took for its server (OwnKvm::machine), which the wall
-    // notes by itself.
+    // mark a server's controller's driver took for its server (OwnKvm::machine), nor where it found
+    // that server's computer (OwnKvm::serverPlace), which the wall notes by itself.
     static bool isStillTheOne(const OwnKvm& now, const OwnKvm& seen);
     // The name its password is kept under.
     static QString secretOf(const QString& id);
@@ -572,6 +646,10 @@ public:
     // sign in to it with something that was typed asks this first (kvm_editing.h), and says
     // `notAskedYet` where it was not.
     bool wasAskedWhatItIs(const QString& id) const;
+    // Of a KVM that was not asked yet: where the wall's last asking at its plain address was sent on to HTTPS at the
+    // same host ("https_only" on its card, notTheKvm), that address, for the change box to say and offer as the
+    // web's edit does (web 0.3.2); nothing otherwise.
+    std::optional<QUrl> sentOnToHttps(const QString& id) const;
     // Whether the wall followed this KVM onto HTTPS by itself (a JetKVM that offered it at its own host),
     // and it is still there.
     bool followedOntoHttps(const QString& id) const;
@@ -649,6 +727,9 @@ signals:
     // that is asked again and is away as before, nor of what a later look finds: that is what
     // whoever shows the wall asks at their own pace.
     void cameToSomething();
+    // A look at this KVM of the wall begins now, as an asking began it (askStatus): for whoever counts how many
+    // begin in one turn of the loop (Own::looksInATurn). Said right before the look is begun.
+    void looking(const QString& machine);
 
 protected:
     // Keeps the certificate itself that a KVM's driver was shown, where it is the one the KVM
@@ -680,7 +761,8 @@ private:
         QString id;
         // Its family's driver (own_device.h; a kvmd's: KvmdDevice).
         std::unique_ptr<OwnDevice> device;
-        bool busy = false; // something is being done to it
+        bool busy = false;      // something is being done to it
+        bool uploading = false; // an image is on its way to it (uploadMedia)
         // One higher each time what is kept as its secret has become another: with every change
         // that wrote it, and with one that failed after it and could not put back what was kept.
         quint64 secretWrites = 0;
@@ -713,15 +795,34 @@ private:
         // what answers its plain way too, and no password goes there in the clear. Not asked what it is
         // meanwhile, its card saying so; and its HTTPS asked again at every asking, whatever the way's
         // pace, until it shows a certificate no other KVM of the wall is known by, or nothing listens
-        // there (in doubt, it stays held, for as long as the one it is held for is on the wall). Kept
-        // across a start (heldFor).
+        // there (in doubt, it stays held, for as long as a KVM of the wall is known by that certificate:
+        // outside review 2, 4.3). Kept across a start (heldFor).
         bool heldBackByTwin = false;
         // A JetKVM's: what outlives each of its drivers (design 3.4: that the program stepped aside for
         // another viewer, and its one connection at a time), handed to every driver it has.
         std::shared_ptr<JetKvmKept> jetkvm;
+        // A kvmd's: what outlives each of its drivers (KvmdKept: that it showed several inputs, for a driver of the
+        // same KVM made anew), handed to every driver it has.
+        std::shared_ptr<KvmdKept> kvmd;
     };
 
     Held* held(const QString& id);
+    // What a question of a KVM's virtual media is asked of (local_wall_media.cpp): the KVM, what it is called (on the
+    // wall, and in a sentence), and its driver's media (of whichever family: OwnMedia); or why not. `what`: what a
+    // refusal for another name says was not done; none: the question names nothing.
+    struct OfMedia {
+        Held* one = nullptr;
+        OwnMedia* driver = nullptr;
+        QString called;
+        QString inASentence;
+        std::optional<base::Error> refused;
+    };
+    OfMedia mediaOf(const QString& machine, const QString& named, const char* what);
+    // (`restart`: a restart from the media is asked, a power button's.)
+    std::optional<base::Error> mediaHeld(const OfMedia& of, const QString& image, bool restart) const;
+    void changeMedia(const QString& machine, const QString& image, const QString& named, const char* what, bool restart,
+                     const std::function<void(OwnMedia&, std::function<void(base::Result<MediaDone>)>)>& change,
+                     std::function<void(base::Result<MediaDone>)> done);
     // The driver of the KVM's family (OwnKvm::kind: a kvmd's KvmdDevice, a JetKVM's JetKvmDevice, a
     // server's controller's RedfishDevice), made of where it is, who signs in, what it is known by (and of
     // a controller, the mark its server is kept by) and its password, at its family's pace; a JetKVM's with
@@ -738,6 +839,16 @@ private:
     // with the KVM by itself, where the KVM is still the one that driver was made for (its driver is that
     // one, and the mark is still `before`), and for no other.
     void knowsItsServer(const QString& id, const OwnDevice* by, const QString& before, const QString& now);
+    // ...and found where its controller keeps that server's computer (`at`, of the server it is known by, `machine`):
+    // noted with the KVM by itself, as above, where the KVM is still known by that mark (OwnKvm::serverPlace).
+    void knowsWhereItsServerIs(const QString& id, const OwnDevice* by, const QString& machine, const ServerPlace& at);
+    // A Proxmox guest's driver keeps the boot order it replaces with the guest (ProxmoxDevice::BootOrderKeeper):
+    // written down at once, or said why not.
+    base::Result<void> keepsBootOrder(const QString& id, const OwnDevice* by, const std::optional<BootOrderWas>& was);
+    // Whether something is being done to a KVM of the wall now (an action, a change of its media: Held::busy), in the
+    // words of the refusal of a second ("busy"); none where nothing is. What a guest's lives are refused keyboard and
+    // mouse by meanwhile (ProxmoxDevice::refuseControlWhile).
+    std::optional<base::Error> actedOn(const QString& id);
 
     // Asks what answers at the address of a KVM that was not asked yet, unless that is under
     // way or not due yet, or there is no room for it (then it waits its turn:
@@ -756,6 +867,14 @@ private:
     void leavesItsPlace(quint64 number);
     // A KVM has come to something: said soon, for all that have by then (cameToSomething).
     void noteThatOneCameToSomething();
+    // Begins the looks an asking begins (askStatus) at these KVMs of the wall, in this order, in one line for the whole
+    // wall: Own::looksInATurn of the line's first now (where no turn is due already) and the next so many every
+    // Own::looksEveryMs. A KVM that waits in the line already is not put in it again. `overOne` once for each of them,
+    // as its look is over or its patience is (OwnDevice::afterLook), or a turn of the loop after its turn where it is
+    // not looked at then: taken off the wall, its driver one that was not asked yet, or found as it is meanwhile by
+    // another asking's look.
+    void lookInTurns(const QStringList& machines, const std::function<void()>& overOne);
+    void beginDueLooks();
     // A KVM over plain HTTP whose HTTPS shows another of the wall (`twin`; its card says heldBackFor()): not asked from
     // here on, its driver one with no password, and asked again later, and later each time. Noted with it, and which
     // one it is held for (Remembered::kvmsHeldForATwin): it is held so from the start of the next run too.
@@ -782,6 +901,9 @@ private:
     // SHA-256; sameCertificate): what showed it is that one, whether Windows would trust that certificate there or
     // not. Nothing: none is, or nothing was shown.
     std::optional<OwnKvm> anotherKnownBy(const QString& id, const QByteArray& shown) const;
+    // ...of these KVMs (`among`): what a hold for a twin goes over to where the one it was held for is taken off
+    // (remember; outside review 2, 4.3).
+    static std::optional<OwnKvm> knownBy(const QList<OwnKvm>& among, const QString& id, const QByteArray& shown);
     // What an asking found.
     // `overHttps`: what answered at the HTTPS way of a JetKVM over plain HTTP, asked beside it with the
     // JetKVM's question alone; a JetKVM there is followed there before any driver has its password.
@@ -842,6 +964,18 @@ private:
     // Says what the wall has to say by itself of its KVMs, a short while after the first of it.
     QTimer m_saySoon;
     QTimer m_tidy;
+    // The looks the askings began that wait for their turn (lookInTurns), in the order they were asked for, each once,
+    // with whoever waits for each; and the next few's time.
+    QStringList m_looksDue;
+    struct LookDue {
+        quint64 serial = 0;
+        QList<std::function<void()>> waiting;
+    };
+    QHash<QString, LookDue> m_looksWaited;
+    quint64 m_looksSerial = 0;
+    QTimer m_looksTurn;
+    // When the last few began, by m_clock.
+    qint64 m_lastLooksAt = -1'000'000;
     // For when a KVM that was not asked yet is asked again, and for when what was noted is
     // written down at the latest.
     QElapsedTimer m_clock;

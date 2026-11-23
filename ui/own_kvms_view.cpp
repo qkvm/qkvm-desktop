@@ -6,7 +6,6 @@
 
 #include <QSet>
 #include <QStringList>
-#include <QUrl>
 
 using namespace Qt::StringLiterals;
 
@@ -113,7 +112,9 @@ OwnKvmsView::Row OwnKvmsView::rowOf(const core::OwnKvm& kvm, const Alike& alike,
     row.family = kvm.kind;
     // (One without a name is called by where it is, as its card calls it.)
     row.name = kvm.name.isEmpty() ? row.host : kvm.name;
-    if (QUrl(kvm.address).scheme() != u"https"_s) {
+    // (A VNC server over vncs:// is known as a KVM over HTTPS is; one in the clear is said so by the rule its card and
+    // the bar say it by.)
+    if (kvm.isInTheClear()) {
         row.way = u"plain"_s;
     } else {
         row.way = kvm.knownByCertificate ? u"certificate"_s : u"windows"_s;

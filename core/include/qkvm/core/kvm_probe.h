@@ -76,6 +76,21 @@ std::optional<QUrl> otherWayOf(const QUrl& address);
 // with one of them, otherWayOf. Nothing where there is no such address.
 std::optional<QUrl> bothWaysOf(const QString& typed, const QUrl& address);
 
+// Where a KVM's plain address sends everybody on to HTTPS at the same host, by one answer from there (the web's
+// https_instead, ../app/qkvm/kvm.py of web 0.3.2): a PiKVM's or a Comet's web server once HTTPS is its only way in
+// answers its plain address with a redirect (301, 302, 303, 307 or 308) to https:// at the same host. The address that
+// names, its scheme, host and port and nothing else of it, written as addressFrom writes one. Nothing for anything
+// else: no redirect, an address that is not plain HTTP, a redirect elsewhere (another host, plain HTTP, nowhere that
+// can be read). Never followed by the program: it is said (httpsOnly), and offered to whoever adds or changes the KVM.
+std::optional<QUrl> httpsInstead(const QUrl& address, int status, const QByteArray& location);
+// What is said of a KVM whose plain address sends everybody on to HTTPS at `to`, in the web's code and sentence
+// (on_https): "https_only". Its card says it (a KVM that is there and wants HTTPS: "error"), and the boxes that add and
+// change a KVM offer `to` (httpsOffered).
+base::Error httpsOnly(const QUrl& to);
+// The HTTPS address an "https_only" offers, read back from its sentence (made by httpsOnly alone); nothing for any
+// other refusal.
+std::optional<QUrl> httpsOffered(const base::Error& refusal);
+
 } // namespace kvm
 
 // Asks an address what answers there, with nothing that says who asks: no password, no session,
@@ -152,6 +167,11 @@ public:
         // something that listens: where in doubt, something listens. (Whether a JetKVM beside it is
         // signed in to the plain way rests on this: kvm::wayOf.)
         bool nothingListens = false;
+        // Nothing answered as a family of the three at a plain address, and a question there was answered by sending it
+        // on to HTTPS at the same host (kvm::httpsInstead): that address, kvmd's question's first (a web server may
+        // send its API on alone), else another's. Nothing anywhere else. Not followed: whoever adds or changes a KVM
+        // there says "https_only" (kvm::whyNotSignedInTo), and nothing goes to that address by itself.
+        std::optional<QUrl> sentOnTo;
     };
 
     // What a KVM of the wall is known by, for an asking that is held to it: by a certificate,

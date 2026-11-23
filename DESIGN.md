@@ -9,9 +9,10 @@ in place. The program and Setup keep a contract between them, and neither change
 * **The kind** (`core::updateKindOf`, `UpdateKind::Setup`). A copy is Setup's when that marker lies beside the running
   program with exactly that content (six bytes: no other line end, no byte-order mark, no other word); otherwise an
   MSIX copy where Windows gives the program a package identity, as before; otherwise portable. The signed payload's
-  platform for it is `windows-x64-setup`, and its package's name ends in `-setup.exe`. A release of another kind is
-  refused, as any wrong release is, and a Setup copy refuses the portable and MSIX releases.
-* **Its feed** (`core::setupFeedBeside`). A Setup copy reads `stable-setup.json`, in the folder of the feed built into
+  platform for it is `windows-x64-setup` (`windows-arm64-setup` on Windows on Arm, below), and its package's name ends
+  in `-setup.exe`. A release of another kind is refused, as any wrong release is, and a Setup copy refuses the
+  portable and MSIX releases.
+* **Its feed** (`core::feedFor`). A Setup copy reads `stable-setup.json`, in the folder of the feed built into
   the program: `https://download.qkvm.com/desktop/stable-setup.json`. Every other copy reads the built-in
   `stable.json` as before, so beta 1's portable copies, which take only a payload of `windows-x64-portable`, keep
   working unchanged. Chosen over one payload that names a package per kind because that is the smaller change: each
@@ -23,6 +24,20 @@ in place. The program and Setup keep a contract between them, and neither change
   say the advertised version, read as data, never run), and `assemble_update_feed.ps1` and `refresh_feed.ps1` say which
   of the two names the feed they wrote is served as. Nothing of the feed becomes an argument, a path or a command:
   it names a package, its size and its hash, and its version (three numbers) names Setup's log.
+* **The PC's own kind of Windows** (0.2.0, the owner, 2026-11-19: native ARM64, a person on Windows on Arm ends up with
+  the ARM64 program by every road). `base::machineArchitecture` asks Windows what the PC is (IsWow64Process2's native
+  machine, looked up at run time; where it is missing or fails, the program's own kind); only an x64 program on
+  Windows on Arm is told the PC is another kind than its own (`base::machineFrom`). The channel keeps both
+  (`UpdateChannel::machine`, `::program`); the platform is `windows-<x64 or arm64>-<kind>` of the PC's kind, and the
+  feeds on Windows on Arm `stable-arm64.json` and `stable-arm64-setup.json`, beside the others, so that x64 copies of
+  0.1.x and later read what they always read. The same version is offered only where the program is not of the PC's
+  kind (an x64 copy under emulation; `Updates::offersThePcsOwnKind`, and the texts say "for Windows on Arm"); never an
+  older one. Chosen over one payload naming both kinds for the same reasons as the setup's feed above: 0.1.x reads one
+  platform letter for letter. A 0.1.x ZIP copy on Arm reads stable.json, which must keep naming the x64 ZIP for x64's
+  sake: it lands on x64 0.2.0, whose check then offers the ARM64 ZIP. The setup is one for both kinds (it installs
+  the PC's own, `packaging/qkvm-desktop.iss`), so the two setup feeds name the same file; a hand-over notes the kind it
+  is for, and the next start says "Updated to" only where that kind starts. The MSIX installer takes only the PC's
+  kind (`installer::packageFitsThePc`).
 * **Install and restart** (`Updates::runSetup`, `UpdatesView::install`). After the download, which is verified as
   every kind's is, and only when the person presses it, with a way to hand over (`UpdatesView::handOverWith`, given
   by `main`), and only where the program's end cuts nothing short (`WallWindows::whatHoldsAnUpdate`, which says what
@@ -94,6 +109,128 @@ in place. The program and Setup keep a contract between them, and neither change
   is not the person's own (another user's desktop, or a shell above them) or cannot start it, it ends starting
   nothing, and the person starts qKVM from the Start menu; a setup that runs with administrator rights starts nothing
   at all, and says so in its log. The argument means nothing else and skips nothing.
+* **An update that did not finish** (0.2.0; `ui::lookForUnfinishedUpdate`, `ui/win/unfinished_update.h`, in `main`
+  right after Setup's wait, before the single-instance mutex and before anything else of the program). Setup's staged
+  install (`packaging/qkvm-desktop.iss`): before its copy, where the folder holds any file of its package, it writes
+  `{app}\qkvm-desktop.update-unfinished` with its record (`qKVM Desktop set-aside record 1`: the ending it gives, one
+  `aside <name>` line for each file it renames, the program's own first, one `left <ending> <name>` line for each file
+  an earlier finishing update could not remove, and `end of the record`), first under `qkvm-desktop.update-record`,
+  flushed to the disk, then renamed to the marker in one step; and only then renames each such file to its name and the
+  record's ending in its own folder, by its package's list made at build time (`package.iss`). From the record's writing
+  until the marker is renamed, or this setup puts anything right, it holds the marker open without letting anything
+  else remove it (a start of the program in another Windows session takes away a marker whose record names nothing set
+  aside yet), and checks that hold: a handle of a file on a disk, holding its own record, or nothing is set aside
+  (outside review of 0.2.0, 1.4). A start takes such a marker away only while it holds the account's gate
+  (`Global\qKVM-Desktop-Setup-Account-<SID>`, `lookForUnfinishedUpdate`), which every setup and uninstall owns from its
+  start to its end (`TakeAccountGate`, 1.3: one at a time for the account, in whatever Windows session), and looks at
+  the record again then; so the instant between the marker's rename and the hold is closed too. Where the marker is gone
+  at the end of a whole copy all the same, it writes its own record again as the
+  finishing marker and finishes, never taking the copy for one to put back (review i020-2, L1). The ending is the first of
+  `.old-update`, `.2.old-update` to `.9.old-update` that no file of the package's has beside it, so a file of that name
+  and ending which is not the setup's is never in its way. Its copy then makes every file anew, so a copy that fails is
+  never a mix (Inno Setup's rollback removes what it made; nothing is replaced). A copy that comes to its end counts
+  only where it is whole: every file of the package's (and the contract's marker) a plain file of the size and the
+  SHA-256 the manifest gives (`package.iss`'s `PackageFileBytes` and `PackageFileSha256`; the size first, then the bytes
+  read, once again where they cannot be; review i020-2, L7); one the copy skipped (its box's Skip this file) or that went
+  since is not, and then nothing is removed, the earlier version is put back at once, Settings > Apps names its version
+  again, the result line and a box say so, and the setup ends with 7. Before the copy is judged so, every start of the
+  program made while it copied has ended: such a start ends by itself in its `main()` as it finds the setup at work, but
+  until then it holds the program's file and the libraries it maps, and the first start of a copy just written can take
+  seconds, as Windows' scanner (Microsoft Defender) scans each new library it maps (0.4 to 0.7 s each on a test VM, 2 to
+  8 s for a whole copy, some 60 ms once scanned): the setup looks a quarter of a second apart, for a minute at the most,
+  at every process whose file is in the program's folder (`WaitForStartsToEnd`), and again within that minute where a start
+  made as the copy is flushed holds a file of it, the flush then tried again, so that a start of the program made during
+  an update that ends within the minute no longer costs the update. It never ends such a start: one that still runs
+  after the minute makes the copy not count, as any that does not, and the setup says so. A whole copy is flushed to the disk, each file by
+  Windows (one that cannot be, tried again every quarter of a second for up to 5 s, and the copy does not count, as one not whole:
+  nothing set aside goes; outside review of 0.2.0, 1.6), and only then is the marker renamed to
+  `qkvm-desktop.update-finishing` in one step (where it cannot be, the copy does not count either), then what its record
+  names goes, each only where the file of its own name is there,
+  then that marker; each is removed with its read-only attribute cleared first and tried again twice, and one that
+  still cannot be stays named in the record, and the next set-aside carries it into its own record: it never stops a
+  setup (Preparing to Install's look at the files in use leaves such a file to its record, held or not; `AddLeftAside`). The uninstall removes what each record names, and keeps a marker (as a finishing one) where something it
+  names could not be removed. A copy that does
+  not complete puts every file back, and the marker goes. A cut (the power gone, the setup ended) runs none of that.
+  So that a start after a cut is never a program missing, nor one beside only some of its libraries (review i020-1,
+  M3), the setup carries qKVM Setup's update check (`ui/win/update_check.cpp`, target `qkvm-update-check`: Windows'
+  own calls and a static C runtime alone; `tools/build_setup.ps1 -UpdateCheck`, a `dontcopy` file, never in the
+  package nor installed under its own name): right after the program's own file is set aside, and before any library,
+  it is copied into the program's place (under a name of the setup's own beside it, `qkvm-desktop.update-check`,
+  flushed, then renamed into place in one step, so that a cut never leaves a file cut short at the program's name; review
+  i020-2, L4), and the copy writes the program last, over it. Whatever starts qKVM in
+  between (the Start menu's entry, the start with Windows) starts the update check, which, where no setup is at work,
+  says in a box of Windows' own "An update of qKVM did not finish. Choose OK, then run the qKVM setup again: it puts
+  the earlier version back, or finishes the update." and ends with 1; while a setup or an uninstall is at work it
+  ends at once, saying nothing, as the program does. A put-back puts the update check in the program's place first,
+  then the libraries back, then removes what the copy made that the earlier version had not (the record's `copy`
+  lines, L3), and the earlier program last; and, where the put-back is whole, what the cut copy left under Inno Setup's
+  temporary names (a file it was writing), in the package's own folders, as after a whole copy. Where the record names the earlier program as set aside and it is gone since
+  (0.1.2's own setup, run over a cut upgrade, removes it by its rule, as something stands at the program's name), the
+  put-back takes this setup's own update check away from the program's name too (known by its SHA-256), says that it put
+  back all but the earlier program, and never that the earlier version is whole; the folder then holds no program until
+  a setup completes (review i020-2, L3). An update check of another version's setup is not told from a program there,
+  and stays. The script's own head says which state a cut at each step leaves. Where
+  the copy came to its end and a cut came before it was marked finished, the program itself is there beside the
+  marker: it reads only the marker's record at its start (Windows' own calls, nothing of Qt's used yet; up to 1 MiB;
+  no walk of the folder): a file it names there with its ending is an update that did not finish, and so is a record
+  that does not read (not whole, of another kind, an ending or a name no package of ours has): said in a box of
+  Windows' own in the same words, and the program ends with 1, having started nothing; a record that names nothing
+  still set aside is stale, taken away, and the program starts (a marker left never shuts it out, nor does any file of
+  such an ending that it does not name). Every setup, in any mode, puts right first what such an update left (`PutRight`:
+  in `InitializeSetup`, before its refusal of an older version, in the folder it installs into as far as it can tell it
+  without `{app}`: an update's `/DIR`, else the installed folder, else the default, and only where that folder's rights
+  pass first, `FolderRightsReason` (outside review 2, 1.3): where another account may change it, nothing there is put
+  right, nor looked for, and Preparing to Install refuses it; and again as Preparing to Install sets the package aside,
+  after its own `RightsReason`), by the record alone: with the finishing marker each file it names is removed, with the
+  unfinished one each it set aside is put back (the copy's file of that name removed first) and what it carried
+  removed, then the marker (a file that cannot be looked at, `LookAt`, is never taken for one not there: the put-back
+  then stops and its record stays, as where a file only the copy made cannot be removed, or a start of the program
+  made during the copy still holds the program's file past the setup's minute; and the program, at its start,
+  takes such a file, there with no `aside` line of its name, for an update that did not finish; outside review of
+  0.2.0, 1.5); with neither, only the program's own file that 0.1.2 and before set aside alone, by that
+  version's own rule, and only in a folder that holds an install of ours: `qkvm-desktop.exe.old-update` is the one
+  file of a set-aside ending that a setup touches with no record naming it (review i020-2, L11). A record names only the setup's own (its package's names, and what a published version of ours
+  installed): one that names another, or does not read, is refused, named, and nothing it names is touched; where
+  `InitializeSetup` refuses, its log has the result line the program shows. The room asked before the copy is the whole
+  package's (the earlier files stay until the copy is whole).
+  Only into a folder of its own (review i020-2, M1): an install of ours there (`OurInstallIn`: the contract's marker, a
+  plain file of its six bytes), or a folder not there yet or empty, or one that holds nothing but what a setup of ours
+  leaves there (`LeftoversOnlyReason`: the markers whose records read, the files they name with their endings, folders of
+  the package's or an earlier version's names, looked through by `OtherWithin`, which removes nothing; a redirection, or
+  a look cut short, taken for one that holds something; outside review of 0.2.0, 1.8). `PutRight` decides that first
+  (1.1): a record is followed only in such a folder; where no install of ours is there, what its records name is removed
+  (`DropRecorded`, never a file of the package's own name) and nothing is put back; in any other folder nothing is
+  touched, and the setup does not begin, naming what is there. (`ForeignFolderReason` says the same, and names a
+  redirection as one; it reads a record there to tell what a setup of ours left, and follows none.) And only into a
+  folder that the person's account and Windows itself alone may change (`RightsReason`, 1.2, by `FolderRightsReason`,
+  which `InitializeSetup` asks first of the folder it would put right, outside review 2, 1.3): its owner and its list,
+  in Windows' own words (`RightsOf`, SDDL; `OthersMayChange` reads them, and refuses an entry or rights it does not
+  read), against the trusted (the setup's own account by its token's SID, `OwnAccount`, read where Windows' own pointer
+  in its token's user says, whatever its authority, an Entra ID account's `S-1-12-1-...` among them, `SidInTokenUser`,
+  outside review 2, 1.1; SYSTEM, TrustedInstaller, the administrators, CREATOR OWNER, OWNER RIGHTS); where the folder
+  is not made yet, the entries of the nearest folder above it that a new folder takes (CI), or the files made in it
+  (OI, outside review 2, 1.2); and each folder above, up to the root, by its owner and its own entries that let another
+  account remove, rename or take it; a network share refused. Where the folder is refused for its rights and an update
+  that did not finish left something there (a marker, or 0.1.2's program set aside), the refusal says that it stays as
+  it is until the folder is one no other account may change, or qKVM is uninstalled (outside review 2, 1.3).
+  Refused, never made safe: a per-user setup does not change rights it did not give. Any other folder, whatever
+  its files are named, is refused in Preparing to Install after the gate and the room and before a running copy is
+  closed (by hand at Install, or by a silent install), with exit code 7 and the result line; the set-aside refuses
+  again where no install of ours is proven, and 0.1.2's rule for the program's own file set aside acts only where one is.
+  SPEC (M4) says why every such folder and not only one of the package's names.
+  What an earlier version installed and this one does not ship (i020 step 4): `packaging/published-files.json` lists
+  every file each published version installed (read from its published ZIP, the very package its setup was made from;
+  each release adds its own); `tools/build_setup.ps1` makes `earlier.iss` from the versions before the package's: for
+  each version, the names the package has not, and their folders, a folder after every folder within it. Once a whole
+  copy is marked finished (never before: putting the earlier version back would lack them), and only where an earlier
+  version of ours is proven installed in that very folder (review i020-1, M4: this user's Settings > Apps entry of the
+  setup's AppId names `{app}` as its folder and that version, and the contract's marker `qkvm-desktop.installed` is
+  there; never on a first install, never in a folder `/DIR` names where no qKVM was), each file of that version's own
+  list is removed by its exact name where it is a plain file reached through no redirection, then each such folder
+  where that leaves it empty. No folder is walked to remove anything: the walk of `plugins` and `qml` that 0.1.x had
+  (every file there that the package lacked) is gone, as it reached another program's or a person's file there too.
+  All of the versions' names count as the setup's own in a record of what an update set aside (a later version's setup
+  sets aside the earlier version's files).
 * **Data that cannot be read** (`core::whyDataCannotBeRead`, in `main` after the single-instance mutex, before the
   settings are read). The data folder, the list of what is in it, and the settings: where Windows says any of them is
   plainly not there, that is a first start; where it cannot be read for any other reason (a list that shuts the
@@ -106,7 +243,9 @@ in place. The program and Setup keep a contract between them, and neither change
   does, so its exit code reaches nobody): the last line of the log's last 64 KiB that holds `qKVM-RESULT: `, read as
   the person's own text (one line, printable signs only, at most 200; `setupResultIn`). 105: qKVM was still running
   when Setup needed it closed, so Setup changed nothing. 7: not installed, and nothing was changed, with Setup's
-  reason. None: the update was not installed, with the place of Setup's log. Where it was not installed, the update is
+  reason; or, where Setup says it first put right what an update that did not finish had left ("7 first, Setup
+  <what>, and changed nothing else: <reason>"), not installed, in Setup's own words, never that nothing was changed
+  (review i020-2, L9). None: the update was not installed, with the place of Setup's log. Where it was not installed, the update is
   checked for again at once, so that it is offered again (its download still waits for the person). What is said is
   in Settings > Updates and in the first window's corner. A note that does not read is let go of.
 * Downgrades and the same version stay refused where the feed is read; a portable copy's update is still only shown,
@@ -251,7 +390,13 @@ Each of these is written into its section as it is built.
   and so is `core/src/server_screen.cpp`, which reads what the console says beside its
   frames: an index out of bounds ends the program there (a 27 % cost to the decoder, SPEC
   section 9), and a build without the checks is refused by the files themselves.
-* `core/` uses Qt Core and Qt Network only, and `bmc/`. It knows nothing of windows, of
+* `rfb/` is the same kind of library for RFB, the protocol of VNC, as the web app's
+  `qkvm/rfb.py`: the handshake, the encodings it reads (Raw, CopyRect, Hextile, ZRLE, Tight
+  with JPEG) and the key and pointer events, with an inflater of its own for zlib's streams,
+  and a JPEG decoder handed in by its host. OpenBMC's console speaks it (`core/`'s RfbScreen,
+  over bmcweb's WebSocket `/kvm/0`), and the VNC family will. Built with the same checks.
+* `core/` uses Qt Core and Qt Network only, and `bmc/` and `rfb/` (and FFmpeg's JPEG
+  decoder, for the JPEGs of OpenBMC's console). It knows nothing of windows, of
   QML, of the engine. It runs and is tested without a screen.
 * `ui/` is the only place that knows all of them. It is thin: it passes bytes from core to
   the engine, events from input to core, and state to QML.
@@ -269,7 +414,8 @@ desktop/
                tests/
   input/       keys: scan code to HID usage, what is down, the leave-key
   bmc/         a server's own screen from its management controller: ASPEED's frames read,
-               AMI's console messages read and written; tests/ (with the web's writer of frames, ported), fuzz/ (libFuzzer's, by hand)
+               AMI's console messages read and written; tests/ (with the web's writer of frames, ported), fuzz/ (libFuzzer's harnesses: section 8)
+  rfb/         RFB (VNC's protocol) read and written, and zlib's streams inflated; tests/ (with a server of its own)
   core/        server client, state machines, models, settings, secrets, finding/
   ui/          main, view models, VideoTile, win/ (tray, title bar, start-up, single instance,
                the keyboard hook)
@@ -423,6 +569,7 @@ packet in --> decoder --> slot of one --> (upload) --> drawn as a quad
 | Network (one) | Live connections: reads pictures, hands them to `Stream::push`, sends keys and mouse | Touches a QML object |
 | Decoding | A pool shared by every stream, software or on the card (each packet's work runs on it; the "one light thread per stream decoded on the card" first planned here was never so): 2 to 12 threads, the PC's processors less two (`Gpu::Options::decodeThreads` for tests and the rig). Since M6 2d it has two lines: a stream shown large or controlled goes before previews that wait, and previews run on all its threads but one, so that one is free for such a stream also while previews' decoding is under way (on a pool of two, previews have one thread: 64 JetKVM cards then fall behind, each showing its key frames less often, and a redraw after a lost device takes longer). Nor do previews starve: where the pool has three threads or more, urgent work runs on all but one while a preview waits, so that one is theirs (2d's reading; on a pool of two urgent work may have both); where none waits, urgent work takes every thread (2e's reading). A stream taken away while its decoding is under way is ended by the pool once that is over: whoever takes it away does not wait (it waited, up to 45 ms of the interface thread for an 8 MB key frame); a scene waits for those as it ends. What waited for it goes as it is taken away, nothing more of it is decoded, and it is urgent no more (2d's reading: what waited was decoded, urgent, ahead of the next machine shown large). 64 cards redrawn after a lost device: the first draw 14 ms on this PC | Blocks on the interface |
 | Reading a server's screen (M7; review 3's HIGH 1, 2026-11-06) | A server's console frames, read into its picture (bmc/'s ASPEED reader: about 46 ms a busy 1080p frame on a slow core in release), and the card's still made smaller from it, on a thread of Qt's pool (`QThreadPool::globalInstance`, which the application waits for as it ends), one screen's on one thread at a time in their order (core/src/screen_reader.h). Two frames wait for it at the most: the console's line is held back meanwhile (`DeviceLine::holdBack`), and nothing is thrown away unread (each frame brings only what changed). What it read goes back through a picture of its own; a screen whose thread was busy is handed the newest picture with all that changed since it last took one | Touches the screen or anything of Qt's but the one word it posts to the screen; holds a lock while a frame is read |
+| A device line's socket (outside review 2.2, 2026-11-18) | One thread for each line to a device (`DeviceLine`: a kvmd KVM's lines, a JetKVM's signalling, a live link, a server's console, a Proxmox guest's, a VNC server's RFB), and one for each VNC certificate asked for by the boxes (`vnc::askCertificate`), made as the line opens and ended as it goes, above normal priority (core/src/line_threads.h, "qKVM device line", "qKVM certificate asking"): the socket, its TCP and TLS, and every judgement of the certificate the device shows (Windows builds its chain there, and may fetch a signer it names and wait for it: at the handshake, and at each session ticket, key update or renegotiation after it), the driver's rule among it. What it reads it hands to the line, as far as the line has room; what is said it hands to Windows at once. Nothing waits for it: a line ends in its time on its own thread whatever its socket's thread waits for, and the program's end waits 300 ms at the most for all of them together | Touches the line's own state but through what the two share, under its lock and never across a call of Qt's socket; holds the interface thread |
 | Keyboard hook | Exists while a machine is controlled, and after that only until the keys it kept from Windows were let go, a minute at the most (3.8): says of each key whether Windows gets it, hands it on, and holds Windows' second account of the keyboard against what it heard | In its procedure: takes memory, waits for a lock, logs |
 | Writer | Log and measurements to disk | Makes anybody wait: a full queue drops and counts |
 
@@ -951,7 +1098,11 @@ already (`waitedMs`, `inTimeUnder`; half of the time, where the registry names a
 of a second or less): it is not swallowed, is not the machine's, and control ends as
 keys that fell behind. And a key that has waited a second since it was
 heard, on its way to the interface thread, is not typed late, nor is anything behind it
-(`lateAfterMs`, `whatToTell`): what is typed goes to a machine now or not at all. The
+(`lateAfterMs`, `whatToTell`): what is typed goes on to its line now or not at all, and
+the line holds what waits in qKVM to its own limit from there (SPEC.md section 8: a
+quarter of a second, but ten seconds on AMI's console in 0.2.0). What Windows has
+already taken for the line (four kilobytes at the most) is delivered when the way comes
+back, until the line is given up for its silence (SPEC.md section 8 names each). The
 gate's moment and one look of the hook's thread are half of that second at the most,
 whatever the registry says (a `static_assert` beside the constants).
 
@@ -1633,7 +1784,7 @@ or automatic send; tests inject a clipboard reader and use temporary profiles.
   without a goodbye is reset (`DeviceLine::reset`), so that what Windows still held
   for it is thrown away with it: one that ended by itself, and one that is cut. A line
   that is closed (`close()`) is said goodbye on, behind what was said before that,
-  and all of it is offered to Windows there and then; where something had waited
+  and all of it is offered to Windows at once (by the line's socket's thread, below); where something had waited
   too long already, neither is done, and the line is reset at once. After the
   goodbye the line is not ended from here, and nothing more is said on it: the KVM
   answers a goodbye with its own and ends the line, and that is waited for, for two
@@ -1682,6 +1833,101 @@ or automatic send; tests inject a clipboard reader and use temporary profiles.
   answered with a reset all the same; and a way that itself stalls, which no test on
   one PC can make.) `AwakeLine` is one such line on which nothing is ever said: it
   keeps a KVM's video awake.
+  Its socket is on a thread of the line's own, for the line's whole life
+  (`core/src/line_threads`; outside review 2.2), and so is everything Windows does
+  for its TLS: the handshake, and every judgement of the certificate the device
+  shows, with the driver's rule on what Windows objects to. Windows judges a
+  certificate on the thread that speaks TLS, and Qt has it judged again after the
+  handshake at each session ticket of TLS 1.3, each key update and each
+  renegotiation (measured on the build box, 2026-11-18: twice on every line to a
+  server of Windows' own, three times to OpenSSL's by the time it was in, four after
+  a key update; and again after a renegotiation of TLS 1.2). Where the certificate
+  names a signer to be fetched from an address that does not answer (an AIA fetch,
+  on a PC without internet), Windows waits there: 17 s on the interface thread for
+  a `vncs://` session, before this. So that thread is never the interface thread,
+  and never another line's: one that Windows holds holds nothing else. The line's
+  own work stays on the thread it was made on, as its user sees it: the asking,
+  what is said and when, what comes, its limits and its ends. What is said is handed
+  to the socket's thread, which hands it to Windows at once; what waits in the
+  program is what that thread has not taken yet and what its socket still holds,
+  and a line on which that has waited too long ends there and then
+  (`Limits::lateAfterMs`) whatever that thread is doing. Qt hands what a socket
+  holds to Windows by itself the moment Windows has room, at whatever turn of that
+  thread's loop comes first and with no look at how long it waited, which on a
+  thread held or starved past the limit came before the watch on what waits
+  (measured, 2026-11-19: the line's thread at the lowest priority beside 28 busy
+  threads, pieces that had waited up to 1.4 s left, on 18 of 400 lines). So three
+  things on that thread: each message its loop takes from Windows is looked at
+  first (a native event filter on that thread's loop alone), and what has waited
+  too long ends the line there, Late, before Qt has the message; the socket is given
+  what was said one message at a time, and only while it holds nothing, so that a
+  thread put aside between that look and Qt's own work lets no more than that one
+  message leave late; and what leaves is looked at as it leaves, and ends the line
+  (reset) where it had waited too long. (Measured so: no more than one piece left
+  late on any line, and only on a thread put aside for seconds between the two.)
+  Test: test_device_line's
+  `whatWaitedTooLongIsNotHandedOnWhereTheLinesOwnThreadWasHeldPastIt`, the line's
+  thread held past the limit while the way comes back, also with that look turned off
+  (`lines::looksBeforeQt`, a knob for tests) to see the two guards behind it on
+  their own; and, that thread put aside
+  after its look and before Qt's own work (`lines::afterALook`, a seam for tests),
+  `whatWaitedTooLongIsNotHandedOnWhereTheLinesThreadIsPutAsideAfterItsLook` (no more
+  than the one message leaves late, and it ends the line) and
+  `aLineCutWhileItsThreadIsPutAsideHandsNothingMoreOn`. These see what went to
+  Windows, and when, where that thread hands it on (`lines::whatWasHanded`, a seam
+  for tests that says what that thread has handed Windows each time it looks at its
+  socket), and hold the far end to that by count alone: the far end may throw away
+  unread what came just before the reset, and its own times are taken after it read;
+  and that the line was found late on that thread, by the far end's reset before the
+  thread the line lives on has done anything with it (outside review 2, 2.3). Calls
+  Qt posts to the socket
+  are looked at first as well (an event filter on it), and a line reset from its own
+  thread is reset there wherever that thread learns of it (outside review of tls,
+  L2). The asking is not held to the limit: it is no input, it may wait behind a
+  judgement after the handshake, and the time to be let in bounds it (L1). What comes
+  is taken there, as far as there is room for it here (one message's worth in each of
+  the two places, on every line, whatever it reads: outside review of tls, M1), and
+  handed here; a line held back, or one whose user is busy, holds the device back so.
+  That thread says it left something in its socket for want of room only where it
+  finds none under the lock the two share, and the line asks it for more where it
+  gives room back and finds that said, under the same lock: whichever comes last sees
+  the other, and no room given back is missed (outside review 2, 2.1: said on the
+  strength of an earlier look, a console could stall with the tail of an update
+  unread until its watch ended it; test_device_line's
+  `roomTheLineGivesBackWhileItsThreadFindsNoneIsNotMissed`, that thread put aside
+  between the two, `lines::afterTheRoom`).
+  A line's thread that Windows holds is let go of with its line; where four of one
+  place's are still held two seconds after, a line to that place is not reached until
+  Windows lets go (`lines::mostHeldToOnePlace`, L7). A line ends,
+  is cut, or is thrown away neither closed nor cut (its destructor), at once, its
+  thread or not: what was said and not taken goes with it (written over where it
+  said who asks), the socket is reset there the moment Windows lets that thread go,
+  and nothing more is handed to Windows meanwhile, but for the one message that
+  thread may be handing over at that very instant: one it had looked at for a reset
+  just before (outside review 2, 2.8), or, over TLS, one in whose flush by Qt Windows
+  holds that thread (a key update or a renegotiation read behind it). That one goes
+  once, to the device that passed the certificate's look, the reset right behind it.
+  The look before Qt's own reset of a line reset from its own thread is shown by
+  `aLineCutWhileItsThreadIsPutAsideBeforeItsLookHandsNothingMoreOn`, that thread put
+  aside before the look (`lines::beforeALook`) while the line is cut, and a row not
+  cut in which Qt hands on what the socket held at that very word (review cx2-cxl,
+  L1). (Outside review 2, 2.2: thrown
+  away so, a line had that thread hand all of it over when Windows let it go, the
+  asking with its cookie or token among it, with no time limit, and close the line
+  behind it. kvmd's AwakeLine goes so, the line that keeps the video awake and the
+  fingerbot's, and so does a JetKVM driver's line still open when the driver goes.
+  Test: test_device_line's
+  `aLineThrownAwayNeitherClosedNorCutHandsNothingMoreOn`, that thread held while the
+  asking, or what was said once in, waits for it.) A line closed first is closed at
+  once too, and goes behind what was said before its close and its goodbye
+  (`DeviceLine::close`). Nothing waits for a line's thread but the program's end, and
+  that for 300 ms at the most for all of them (`lines::endWithinMs`): one that
+  Windows still holds is left to the end of the process. A VNC server's certificate
+  asked for by the boxes (`vnc::askCertificate`) is asked on a thread of its own
+  the same way. (Tests: `core/tests/test_device_line_tls.cpp`, every kind of line
+  while Windows waits for a signer far away, and the program's end meanwhile;
+  `aVncsSessionWhileWindowsFetchesItsSignerDoesNotHoldTheInterfaceThread` in
+  `core/tests/test_vnc_adding.cpp`.)
 * **Keyboard and mouse to a KVM** (`core/kvmd_console_line`, `core/kvmd_input`).
   `kvmd_input` makes each message kvmd's `/api/ws` takes, in the two wordings kvmd
   has: short messages of bytes, which are what kvmd's own pages send, and texts of
@@ -1788,7 +2034,11 @@ or automatic send; tests inject a clipboard reader and use temporary profiles.
   KVM has no password (`no_password` on its card), and nothing is made of what is
   there. So where the list and the store do not agree (the list could not be written
   and the password before could not be put back, or the program ended between the two
-  writings), what is in the store goes to nobody. Where the kept password may go
+  writings), what is in the store goes to nobody. A change that takes the password to
+  another address or certificate keeps both records in the one secret until the list is
+  written (`QKVM-KVM-2+`, `KeptTogether`), and the new one alone after that, so that the
+  card has its password wherever the change is cut off; and a read Windows refuses is
+  no answer: nothing is changed then (the outside review of the wave 2 desktop, 6.1). Where the kept password may go
   without being typed anew is one rule (`keptPasswordMayGoTo`), which the wall keeps
   whoever asks, for signing in with it (`signerIn`) and for saving (`change`): to the
   KVM as it is known, at the address it has; or to another address only where both are
@@ -2705,9 +2955,11 @@ or automatic send; tests inject a clipboard reader and use temporary profiles.
   own, "This PC's wall as a file", below), the server's page (the bar's button opens the
   box that adds a KVM instead, and the icon's menu has no row for a page), signing out
   (the account's box has "Connect to a QKVM server" in its place). What is spoken to
-  over plain HTTP is said: the bar has its "Not encrypted" where one KVM of the wall
-  is, and that KVM's card writes `http://` before its address (`Machine::plain`, which
-  this PC's wall sets and a server does not say). A KVM that is added or taken off is
+  in the clear (over plain HTTP, or a VNC server's `vnc://`: `OwnKvm::isInTheClear`, the
+  one rule for the bar, the card and the row in the settings) is said: the bar has its
+  "Not encrypted" where one KVM of the wall is, and that KVM's card writes `http://` or
+  `vnc://` before its address (`Machine::plain`, which this PC's wall sets and a server
+  does not say). A KVM that is added or taken off is
   on the wall, or off it, at once (`WallFeed::askAnew`; where the list is being asked
   for that moment, it is asked for once more when the answer has come, which may have
   been made before the change), and looked at again soon after, as after something
@@ -2930,7 +3182,12 @@ or automatic send; tests inject a clipboard reader and use temporary profiles.
   "Edit…" in its menu, and its card's own button, in the page's words, "Update
   login" where the KVM refused the sign-in and "Review certificate" where it shows
   another certificate than it is known by (`cardWayOf` says where the button leads;
-  `cardFor` clears that word for every other machine as before); and the settings' list of
+  `cardFor` clears that word for every other machine as before). A server's card that asks
+  whether the computer at its place, which gives a UUID now, is its server (`CardWay::
+  ConfirmServer`) has "Is it this server?" there, which asks in the question box, Yes or
+  No, with what that computer says of itself as its detail and the keyboard at neither
+  answer every time it opens (its No sends something, and its Yes takes that computer: an item
+  of the box that takes no key, `questionKeyless`, has it), and opens no box that changes it (SPEC 8); and the settings' list of
   this PC's KVMs, whose "Edit" opens it as it is and whose "Remove" opens it at its
   question alone ("The settings", below). The box changes the
   name, the address, the user name, the password (left empty: the kept one) and the
@@ -3683,7 +3940,7 @@ One framework: Qt Test, which comes with Qt.
 |---|---|
 | engine | Decoding in software against known pictures. Drawing on Windows' software adapter (WARP) into a texture, compared with expected pictures within a tolerance, so it runs anywhere. The device lost on purpose. At the end of every test the debug layer must report nothing alive. Everything again with the address sanitizer |
 | input | The scan-code table against Microsoft's. AltGr. For random sequences of keys cut off at a random point: nothing stays down |
-| bmc | Against frames made by the tests' own writer (the web's `tests/aspeed_frames.py`, ported); pictures the same as the web's reader makes, by their SHA-256; the console's messages byte for byte as the web's writes them. Seeded tests of damaged frames, headers at their edges, and console streams cut anywhere and damaged, in the ordinary suite, which counts every allocation and times every frame against its bound; libFuzzer's targets in a build of their own (`QKVM_FUZZ`), run by hand |
+| bmc | Against frames made by the tests' own writer (the web's `tests/aspeed_frames.py`, ported); pictures the same as the web's reader makes, by their SHA-256; the console's messages byte for byte as the web's writes them. Seeded tests of damaged frames, headers at their edges, and console streams cut anywhere and damaged, in the ordinary suite, which counts every allocation and times every frame against its bound; libFuzzer's targets, as every reader's (below) |
 | core | Against a stand-in of a hundred lines over a TCP socket, in the test itself: every refusal the server can give, slow answers, answers too large, broken JSON, a changed certificate. Marked tests run against `python -m tests.demo` |
 | finding | `mayAsk`, exhaustively. Sweeps only against stand-ins on the loopback address |
 | ui | View models without a screen. `qmllint` with warnings as errors. Every screen loaded once with pretend view models |
@@ -3691,6 +3948,77 @@ One framework: Qt Test, which comes with Qt.
 
 Hardware decoding cannot be tested on a machine without a graphics card: those tests are
 marked, and run where there is one.
+
+The readers of what a KVM or a server sends that are named below have libFuzzer targets (MSVC's own,
+`/fsanitize=fuzzer`, no dependency of its own), each harness a header beside its reader
+(`rfb/fuzz`, `bmc/fuzz`, `core/fuzz`) with the readers compiled into the target again, so
+that libFuzzer sees their branches, and the standard library's hardening ending a failed
+check in abort(): the RFB reader with its inflater and the screen's JPEG walk and decode
+(`fuzz_rfb`), the inflater alone held to Qt's zlib (`fuzz_rfb_inflate`), the JPEG walk
+(`fuzz_jpeg`), a VNC server's session through the screen's own reader (`fuzz_vnc`),
+ASPEED's frames and AMI's console (`fuzz_bmc_aspeed`, `fuzz_bmc_ami_console`), Redfish's
+answers and tasks (`fuzz_redfish`), kvmd's answers, its `msd` events and its stream of
+pictures (`fuzz_kvmd`, `fuzz_kvmd_media`, `fuzz_multipart`), the program's own JSON
+reader (`fuzz_strict_json`), session descriptions and addresses (`fuzz_rtc_sdp`), H.264
+over RTP (`fuzz_h264_rtp`), and what a JetKVM says on its three lines and to its driver
+(`fuzz_jetkvm`, through `core/src/jetkvm_words.h`, the connection's and the driver's
+readings of its words moved apart from what they do). Each harness holds its reader to
+promises of its own (`base/include/qkvm/base/fuzz_promise.h`). They are linked only by the
+`fuzz` preset (the address sanitizer's build with `QKVM_FUZZ`, in `build\fuzz`; the other
+presets compile their ways in, unlinked, and build the seed maker, so that clang-tidy reads
+each with the flags it is built with), with
+seeds the seed maker writes at build time from the tests' own inputs (`core/fuzz/
+make_seeds.cpp`: no seed is a file in the sources). `tools/fuzz.ps1` builds them on every
+core and runs each for a bounded time, half the usable processors at once (`-len_control=0`:
+each seed mutated whole from the first run; in the gate, `-FastCores`, held to the fast cores
+of a PC of two kinds as the tests are, and as the step's time was measured), and fails on
+anything one finds, its input kept in `build\fuzz\fuzz\findings`, on a target that could not
+be started, and on one that fuzzed nothing (no INITED line, or no run). A finding that an
+earlier run kept fails every run until it is taken away, and is named as an earlier one; an
+input slower than 25 seconds that is no timeout (libFuzzer's slow units) is said, and is no
+finding. A corpus past 2000 inputs is merged before its run (`-merge=1`), so that a target's
+start, which reads its whole corpus before its time counts, does not grow from gate to gate.
+`tools/check.ps1` runs it as its step `fuzz`, which passes only where its last line says that
+nothing was found, and the gate fails where that step never ran. What any of them
+ever found is a row of `test_core_fuzz_found`, its bytes in the source, run through the same
+harness in every preset.
+
+Not fuzzed yet, each small and leaning on Qt's JSON reader: kvmd's WebRTC signalling through
+Janus (`core/src/kvmd_webrtc.cpp`, `KvmdWebRtc::read`), AMI's web sign-in and its CSRF token
+(`core/src/redfish_console_way.cpp`), the probe of an address being added
+(`core/src/kvm_probe.cpp`), kvmd's fingerbot (`core/src/kvmd_fingerbot.cpp`), and a qKVM
+server's answers (`core/src/live_link.cpp`, `server_details.cpp`, `server_client.cpp`). Nor
+yet two readers that came into the tree beside the fuzz work, each a target to come: a Proxmox
+host's answers (`core/src/proxmox_answers.cpp`, on Qt's JSON reader; its console is the RFB
+reader, fuzzed above), and what a JetKVM answers of its virtual media and its storage
+(`core/src/jetkvm_media_answers.cpp`, on the program's own JSON reader, which is fuzzed
+alone). No list above claims them.
+
+That a harness reaches deep into its reader is shown, not assumed: built with
+`QKVM_FUZZ_CANARY` (the `fuzz-canary` preset, `build\fuzz-canary`), each harness ends its
+run where its reader read an input to a deep state the harness names (`fuzz::reached`):
+a Tight JPEG decoded into pixels and drawn away from the screen's top left corner, a stream
+of a dynamic block fed in two parts or more read to its end as zlib reads it, a session
+signed in by VNC authentication onto a screen of a size no seed has and drawn into, a
+Thermal's hot temperature beside a fan, a JetKVM's answer read through its base64 and JSON
+to a video chosen and then a sound address of its, and so on, each one none of the
+target's seeds reaches. Each is a state a few single changes of a seed reach with the
+reader's whole way behind it, so that finding it shows the depth and not luck: states that
+only a join of two seeds or a copy of a whole message reaches (an update of a Tight JPEG and
+a rectangle of another encoding; two updates drawn after VNC authentication) were not found
+in fifteen minutes, or found in one run and not in the next, which says how libFuzzer
+searches, not how deep a harness reaches (by hand, each such input reached its state). `tools/fuzz.ps1 -Canary` first reads each
+target's seeds alone (none may reach it), then fuzzes each from them until it finds its
+canary, and passes only where every target found its own and nothing else within its time;
+`-Smallest` does the same from one small seed each. The input each found it with is a row of
+`test_core_fuzz_found` too, held there in every build to reaching that state still, so that
+a reader or a harness that no longer gets that deep is seen by the ordinary tests. The
+canary proof found two things on 2026-11-17 that kept targets far from as deep as they
+seemed: libFuzzer's own length control cut every seed longer than the shortest one to a few
+hundred bytes for minutes while it mutated them (`-len_control=0` since), and the Redfish
+and kvmd harnesses made their HTTP status as a share of 600, which is never 200, so that no
+Redfish resource was ever taken (`core/fuzz/fuzz_status.h` since; the Redfish target's
+features from its seeds went from 131 to 1,946).
 
 The tests are run on the fast cores of a PC that has two kinds (`Use-FastCores` in
 `tools/common.ps1`, which `tools/check.ps1` uses around the tests of each build; the

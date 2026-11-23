@@ -139,6 +139,7 @@ QuitRequests::QuitRequests(QuitNames names, std::function<QString()> holds, std:
         while (WaitForMultipleObjects(static_cast<DWORD>(either.size()), either.data(), FALSE, INFINITE) ==
                WAIT_OBJECT_0 + 1) {
             const auto came = std::chrono::steady_clock::now();
+            ++m_noted;
             QMetaObject::invokeMethod(this, [this, came] { hear(came); }, Qt::QueuedConnection);
         }
     });

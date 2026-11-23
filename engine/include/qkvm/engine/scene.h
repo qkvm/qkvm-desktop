@@ -30,6 +30,10 @@ public:
     virtual void push(const Packet& packet) = 0;
     // How large the stream is drawn, and how much it matters: decides how it is decoded. Any thread.
     virtual void shownAt(SizePx onScreen, Importance importance) = 0;
+    // Whether it is a card of a wall and nothing more: a preview, small, of which no copy of the screen is made. Only
+    // then is a still kept at the size it is drawn (PERF-2); every other stream (a machine shown large, a picture
+    // live, whatever its kind) keeps every picture whole. Not a card to begin with. Any thread.
+    virtual void shownAsACard(bool /*card*/) {}
     // True once after pictures were lost: the host asks the server for a key frame. Any thread.
     virtual bool takeKeyFrameWish() = 0;
     // Any thread.

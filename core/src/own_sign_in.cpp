@@ -22,7 +22,21 @@ JetKvmDevice::Where asAJetKvmHasIt(const OneSignIn::Where& where)
 
 RedfishDevice::Where asAControllerHasIt(const OneSignIn::Where& where)
 {
-    return RedfishDevice::Where{where.address, where.user, where.knownByCertificate, where.certificate, where.machine};
+    return RedfishDevice::Where{where.address,     where.user,    where.knownByCertificate,
+                                where.certificate, where.machine, where.serverPlace};
+}
+
+// (A VNC server's address as vnc::addressFrom writes it, which the QUrl holds as it is; no user, no mark.)
+VncDevice::Where asAVncServerHasIt(const OneSignIn::Where& where)
+{
+    return VncDevice::Where{where.address.toString(QUrl::FullyEncoded), where.knownByCertificate, where.certificate};
+}
+
+ProxmoxDevice::Where asAGuestHasIt(const OneSignIn::Where& where)
+{
+    // (A sign-in changes no boot order: none is handed to it.)
+    return ProxmoxDevice::Where{where.address,     where.node,    where.vmid,  where.user, where.knownByCertificate,
+                                where.certificate, where.machine, std::nullopt};
 }
 
 } // namespace
@@ -40,6 +54,7 @@ DriverPaces DriverPaces::alike(KvmdDevice::Pace kvmd)
     paces.jetkvm.freshMs = kvmd.freshMs;
     // (One pacing for the sign-ins of both: what a test keeps of its own, it keeps for both.)
     paces.jetkvm.pacing = kvmd.pacing;
+    paces.vnc.pacing = kvmd.pacing;
     // A controller's, by the web's ratios (the header says which).
     RedfishDevice::Pace& server = paces.redfish;
     server.connectWithinMs = kvmd.connectWithinMs;
@@ -57,6 +72,8 @@ DriverPaces DriverPaces::alike(KvmdDevice::Pace kvmd)
     server.retryLookMs = server.freshMs * 2 / 5;
     server.hiccupMs = server.freshMs * 9 / 2;
     server.faultHoldMs = server.freshMs * 30;
+    // A guest's sign-ins counted where the kvmd's are, and its times its own (the web's for a guest).
+    paces.proxmox.pacing = kvmd.pacing;
     paces.kvmd = std::move(kvmd);
     return paces;
 }
@@ -85,6 +102,15 @@ base::Result<std::unique_ptr<OneSignIn>> OneSignIn::of(const QString& family, co
         // driver's own question, by the mark in `where`.)
         made->m_redfish = std::make_unique<RedfishDevice>(asAControllerHasIt(where), password, paces.redfish);
         driver = made->m_redfish.get();
+    } else if (family == "vnc"_L1) {
+        // (A VNC server's: its own connection, held to the certificate in `where` over vncs://.)
+        made->m_vnc = std::make_unique<VncDevice>(asAVncServerHasIt(where), password, paces.vnc);
+        driver = made->m_vnc.get();
+    } else if (family == "proxmox"_L1) {
+        // (No twin check: a Proxmox's certificate is every guest's of it. Which virtual machine has the guest's number
+        // is its driver's own question, by the number in `where`: rule 30.)
+        made->m_proxmox = std::make_unique<ProxmoxDevice>(asAGuestHasIt(where), password, paces.proxmox);
+        driver = made->m_proxmox.get();
     } else {
         return base::Error{"invalid", "This program does not speak to that family of device itself."};
     }
@@ -100,6 +126,10 @@ void OneSignIn::tryAfresh(const QString& family, const Where& where, const QStri
         JetKvmDevice::tryAfresh(asAJetKvmHasIt(where), password, paces.jetkvm);
     } else if (family == "redfish"_L1) {
         RedfishDevice::tryAfresh(asAControllerHasIt(where), password, paces.redfish);
+    } else if (family == "vnc"_L1) {
+        VncDevice::tryAfresh(asAVncServerHasIt(where), password, paces.vnc);
+    } else if (family == "proxmox"_L1) {
+        ProxmoxDevice::tryAfresh(asAGuestHasIt(where), password, paces.proxmox);
     }
 }
 
@@ -126,7 +156,8 @@ void OneSignIn::identify(std::function<void(base::Result<Said>)> done)
                 done(askedOnce(who.error()));
                 return;
             }
-            done(Said{who.value().model, who.value().version, who.value().hostname, std::nullopt, QString()});
+            done(Said{who.value().model, who.value().version, who.value().hostname, std::nullopt, QString(),
+                      ServerPlace{}});
         });
         return;
     }
@@ -139,7 +170,31 @@ void OneSignIn::identify(std::function<void(base::Result<Said>)> done)
                     return;
                 }
                 done(Said{who.value().model, who.value().version, who.value().hostname, who.value().number,
-                          driver->machine()});
+                          driver->machine(), driver->serverPlace()});
+            });
+        return;
+    }
+    if (m_vnc != nullptr) {
+        m_vnc->identify([done = std::move(done)](const base::Result<VncDevice::Identity>& who) {
+            if (!who) {
+                done(askedOnce(who.error()));
+                return;
+            }
+            done(Said{who.value().model, who.value().version, who.value().hostname, std::nullopt, QString(),
+                      ServerPlace{}});
+        });
+        return;
+    }
+    if (m_proxmox != nullptr) {
+        // (The number is the driver's once it has answered: what it was asked by, or what it took.)
+        m_proxmox->identify(
+            [done = std::move(done), driver = m_proxmox.get()](const base::Result<ProxmoxDevice::Identity>& who) {
+                if (!who) {
+                    done(askedOnce(who.error()));
+                    return;
+                }
+                done(Said{who.value().model, who.value().version, who.value().hostname, who.value().number,
+                          driver->machine(), ServerPlace{}});
             });
         return;
     }
@@ -148,7 +203,7 @@ void OneSignIn::identify(std::function<void(base::Result<Said>)> done)
             done(askedOnce(who.error()));
             return;
         }
-        done(Said{who.value().model, who.value().version, QString(), who.value().number, QString()});
+        done(Said{who.value().model, who.value().version, QString(), who.value().number, QString(), ServerPlace{}});
     });
 }
 

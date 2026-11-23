@@ -22,6 +22,9 @@ QString setupOverridesFile(const QString& settings);
 QString incidentsFile(const QString& settings);
 // The screen watches' pictures (ScreenWatch::keepIn).
 QString alertPicturesFolder(const QString& settings);
+// The file whose lock says which copy of the program writes the profile (ui/win/profile_lock.h, from 0.2.0 on): it
+// holds nothing, and a version that does not lock it passes it by.
+QString runningFile(const QString& settings);
 
 // --- The way back (SPEC.md section 11.2, from 0.1.2 on) --------------------------------------------------------------
 
@@ -71,15 +74,17 @@ struct Started {
     // Where the settings it found were kept; empty: no copy was made (the same version, or no settings yet).
     QString keptAs;
 };
-// At every start, before anything of the profile is read or written. Whoever wrote the settings last: the version they
-// say wrote them ("written_by", from 0.1.2 on), or, where they say none, the version recorded if they were not written
-// since it recorded them (their time), else one from before 0.1.2. Where that is not `version` (newer, older, or one
-// that kept no record), the settings are kept as they were found (keepCopy, VersionChange, named by that version, or
-// "before-<version>" for one before 0.1.2), and only then is `version` recorded, with the one before it and the
-// settings' time. Where the copy cannot be made, nothing is recorded and the error is handed back (copyNotKept): the
-// program starts all the same, tells the person, and its settings owe the copy (Settings::owesACopy), which is kept
-// before anything of them is written; nothing is written while it cannot be, so the settings stay as the version
-// before left them, and the next start owes it still (outside review of 0.1.2, C2 and C9).
+// At every start, before anything of the profile is read or written. Whoever left the settings as they are: the
+// version recorded, where they were not written since it recorded them (their time: its start found them so, and kept
+// them then where another version had left them, so that a version started again before it wrote them keeps no second
+// copy); else the version they say wrote them ("written_by", from 0.1.2 on); else one from before 0.1.2. Where that is
+// not `version` (newer, older, or one that kept no record), the settings are kept as they were found (keepCopy,
+// VersionChange, named by that version, or "before-<version>" for one before 0.1.2), and only then is `version`
+// recorded, with the one before it and the settings' time. Where the copy cannot be made, nothing is recorded and the
+// error is handed back (copyNotKept): the program starts all the same, tells the person, and its settings owe the copy
+// (Settings::owesACopy), which is kept before anything of them is written; nothing is written while it cannot be, so
+// the settings stay as the version before left them, and the next start owes it still (outside review of 0.1.2, C2 and
+// C9).
 base::Result<Started> recordStart(const QString& settings, const QString& version);
 
 // What a start of the program does with that (main.cpp, before the settings are read; review 012, L4 c): recordStart,
