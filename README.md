@@ -135,8 +135,8 @@ but our own code and your graphics card.
   compositor in between.
 - **Keys a browser never gets.** The Windows key, Alt+Tab and the like belong to your PC in a browser. A native
   program can take them for the machine you are working on, and hand them back with a leave key.
-- **Small and quiet.** One process. No bundled browser engine, no Node.js, no local web server. About 19 MB to
-  download. A wall of 64 previews at one picture a second took 0.33 % of a current desktop PC's processor.
+- **Small and quiet.** One process. No bundled browser engine, no Node.js, no local web server. About 26 MB to
+  download as a ZIP. A wall of 64 previews at one picture a second took 0.33 % of a current desktop PC's processor.
 - **Fewer things to trust.** A short list of dependencies, each pinned: Qt 6.12 and FFmpeg (both LGPL), and
   libdatachannel with Mbed TLS for WebRTC. Every download the build makes is checked by its SHA-256, and WebRTC is
   built from pinned sources. Every line of qKVM's own code is written for this project.

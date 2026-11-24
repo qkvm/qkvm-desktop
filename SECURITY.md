@@ -159,8 +159,9 @@ network connection.
 - Each release lists the SHA-256 of its files in `SHA256SUMS`, on its GitHub release page.
   Check the setup before you run it, or the ZIP before you unpack it:
 
-      Get-FileHash .\qKVM-Desktop-0.2.0-windows-x64-setup.exe -Algorithm SHA256
+      Get-FileHash .\qKVM-Desktop-0.2.0-windows-setup.exe -Algorithm SHA256
       Get-FileHash .\qKVM-Desktop-0.2.0-windows-x64.zip -Algorithm SHA256
+      Get-FileHash .\qKVM-Desktop-0.2.0-windows-arm64.zip -Algorithm SHA256
 
   A different value means: do not run it.
 - The program checks for updates against a feed signed with a key that is built into it, and
